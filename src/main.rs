@@ -98,14 +98,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     // 3. Initialize capture and color samplers
     let mut capture = create_capture(160, 90);
-    let mut sampler = ZoneSampler::new(config.zones.clone(), 0.35);
-    let mut packet_builder = HueStreamPacketBuilder::new();
+    let mut sampler = ZoneSampler::new(config.zones.clone(), 0.35, config.hdr_tone_mapping);
+    let mut packet_builder = HueStreamPacketBuilder::new(Some(config.entertainment_area_id.clone()));
 
-    let frame_interval = Duration::from_millis(1000 / config.fps.max(1) as u64);
+    // Bound framerate between 25 and 60 Hz to meet Hue Bridge requirements
+    let target_fps = config.fps.clamp(25, 60);
+    let frame_interval = Duration::from_millis(1000 / target_fps as u64);
     info!(
-        "Entering sync loop at {} FPS (interval: {:?}) for {} zones...",
-        config.fps,
-        frame_interval,
+        "Entering sync loop at {} FPS (mode: {}, HDR tone-mapping: {}, zones: {})...",
+        target_fps,
+        if config.use_xy_gamut { "CIE 1931 xy (Gamut C)" } else { "sRGB" },
+        config.hdr_tone_mapping,
         config.zones.len()
     );
 
@@ -121,7 +124,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     frame.is_bgra,
                 );
 
-                // Convert RGB to 16-bit big-endian channel tuples
+                // Convert colors to 16-bit values (either xy+brightness or raw RGB)
                 let channels: Vec<(u8, (u16, u16, u16))> = sampled_zones
                     .into_iter()
                     .map(|(channel_id, color)| {
@@ -130,11 +133,20 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             ((color.g as f32) * config.brightness_multiplier).clamp(0.0, 255.0) as u8,
                             ((color.b as f32) * config.brightness_multiplier).clamp(0.0, 255.0) as u8,
                         );
-                        (channel_id, scaled.to_u16())
+                        if config.use_xy_gamut {
+                            (channel_id, scaled.to_xy_u16(color::HueGamut::GamutC))
+                        } else {
+                            (channel_id, scaled.to_u16())
+                        }
                     })
                     .collect();
 
-                let packet = packet_builder.build_packet(&channels);
+                let packet = if config.use_xy_gamut {
+                    packet_builder.build_xy_packet(&channels)
+                } else {
+                    packet_builder.build_rgb_packet(&channels)
+                };
+
                 if let Err(e) = dtls_client.send(&packet) {
                     error!("Failed to send DTLS HueStream packet: {}", e);
                 }
@@ -180,7 +192,7 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
         &config.clientkey,
     )?;
 
-    let mut packet_builder = HueStreamPacketBuilder::new();
+    let mut packet_builder = HueStreamPacketBuilder::new(Some(config.entertainment_area_id.clone()));
     info!("Streaming rainbow test pattern for 10 seconds...");
 
     let start = std::time::Instant::now();
@@ -194,7 +206,7 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
             channels.push((zone.channel_id, RgbColor::new(r, g, b).to_u16()));
         }
 
-        let packet = packet_builder.build_packet(&channels);
+        let packet = packet_builder.build_rgb_packet(&channels);
         dtls_client.send(&packet)?;
         tokio::time::sleep(Duration::from_millis(33)).await;
     }
@@ -213,7 +225,7 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
 async fn run_test_capture(config_path: PathBuf) -> Result<()> {
     let config = Config::load(&config_path)?;
     let mut capture = create_capture(160, 90);
-    let mut sampler = ZoneSampler::new(config.zones.clone(), 0.35);
+    let mut sampler = ZoneSampler::new(config.zones.clone(), 0.35, config.hdr_tone_mapping);
 
     info!("Sampling capture for 5 frames...");
     for frame_idx in 1..=5 {

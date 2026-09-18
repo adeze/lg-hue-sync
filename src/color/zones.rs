@@ -1,3 +1,4 @@
+use crate::color::gamut::{rgb_to_xy_brightness, HueGamut, HueXYBrightness};
 use crate::config::LightZone;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -12,11 +13,27 @@ impl RgbColor {
         Self { r, g, b }
     }
 
+    /// Convert to 16-bit RGB values (0..65535) for Hue Entertainment protocol
     pub fn to_u16(self) -> (u16, u16, u16) {
         (
             ((self.r as u16) << 8) | (self.r as u16),
             ((self.g as u16) << 8) | (self.g as u16),
             ((self.b as u16) << 8) | (self.b as u16),
+        )
+    }
+
+    /// Convert to CIE 1931 xy coordinates and brightness, clamped to Hue Gamut C
+    pub fn to_xy_brightness(self, gamut: HueGamut) -> HueXYBrightness {
+        rgb_to_xy_brightness(self.r, self.g, self.b, gamut)
+    }
+
+    /// Converts CIE 1931 xy + brightness to 16-bit integers for HueStream
+    pub fn to_xy_u16(self, gamut: HueGamut) -> (u16, u16, u16) {
+        let xy = self.to_xy_brightness(gamut);
+        (
+            (xy.x * 65535.0).clamp(0.0, 65535.0).round() as u16,
+            (xy.y * 65535.0).clamp(0.0, 65535.0).round() as u16,
+            (xy.brightness * 65535.0).clamp(0.0, 65535.0).round() as u16,
         )
     }
 
@@ -26,21 +43,40 @@ impl RgbColor {
         let b = (self.b as f32 + (target.b as f32 - self.b as f32) * alpha).clamp(0.0, 255.0) as u8;
         Self { r, g, b }
     }
+
+    /// Applies Reinhard tone mapping to prevent clipped highlights on HDR10/Dolby Vision video
+    pub fn tone_map_hdr(self) -> Self {
+        let r_f = self.r as f32 / 255.0;
+        let g_f = self.g as f32 / 255.0;
+        let b_f = self.b as f32 / 255.0;
+
+        let r_tm = (r_f / (r_f + 0.25) * 1.25).clamp(0.0, 1.0);
+        let g_tm = (g_f / (g_f + 0.25) * 1.25).clamp(0.0, 1.0);
+        let b_tm = (b_f / (b_f + 0.25) * 1.25).clamp(0.0, 1.0);
+
+        Self {
+            r: (r_tm * 255.0) as u8,
+            g: (g_tm * 255.0) as u8,
+            b: (b_tm * 255.0) as u8,
+        }
+    }
 }
 
 pub struct ZoneSampler {
     zones: Vec<LightZone>,
     smoothed_colors: Vec<RgbColor>,
     smoothing_factor: f32,
+    hdr_tone_mapping: bool,
 }
 
 impl ZoneSampler {
-    pub fn new(zones: Vec<LightZone>, smoothing_factor: f32) -> Self {
+    pub fn new(zones: Vec<LightZone>, smoothing_factor: f32, hdr_tone_mapping: bool) -> Self {
         let len = zones.len();
         Self {
             zones,
             smoothed_colors: vec![RgbColor::new(0, 0, 0); len],
             smoothing_factor,
+            hdr_tone_mapping,
         }
     }
 
@@ -84,7 +120,7 @@ impl ZoneSampler {
                 }
             }
 
-            let raw_color = if count > 0 {
+            let mut raw_color = if count > 0 {
                 RgbColor::new(
                     (sum_r / count) as u8,
                     (sum_g / count) as u8,
@@ -94,7 +130,11 @@ impl ZoneSampler {
                 RgbColor::new(0, 0, 0)
             };
 
-            // Apply smoothing filter
+            if self.hdr_tone_mapping {
+                raw_color = raw_color.tone_map_hdr();
+            }
+
+            // Apply EMA smoothing filter
             let current = self.smoothed_colors[i];
             let smoothed = current.lerp(raw_color, self.smoothing_factor);
             self.smoothed_colors[i] = smoothed;

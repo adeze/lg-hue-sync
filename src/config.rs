@@ -15,6 +15,33 @@ pub struct LightZone {
     pub y_max: f32,
 }
 
+impl LightZone {
+    #[allow(dead_code)]
+    pub fn from_3d_position(channel_id: u8, name: &str, pos: [f32; 3]) -> Self {
+        // Hue Entertainment coordinate space:
+        // X: -1.0 (left) to 1.0 (right)
+        // Y: -1.0 (behind) to 1.0 (front)
+        // Z: -1.0 (bottom) to 1.0 (top)
+        let center_x = (pos[0] * 0.5 + 0.5).clamp(0.0, 1.0);
+        let center_y = (1.0 - (pos[2] * 0.5 + 0.5)).clamp(0.0, 1.0);
+
+        let span = 0.30;
+        let x_min = (center_x - span * 0.5).clamp(0.0, 1.0);
+        let x_max = (center_x + span * 0.5).clamp(0.0, 1.0);
+        let y_min = (center_y - span * 0.5).clamp(0.0, 1.0);
+        let y_max = (center_y + span * 0.5).clamp(0.0, 1.0);
+
+        Self {
+            channel_id,
+            name: name.to_string(),
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub bridge_ip: String,
@@ -25,6 +52,10 @@ pub struct Config {
     pub fps: u32,
     #[serde(default = "default_brightness")]
     pub brightness_multiplier: f32,
+    #[serde(default = "default_true")]
+    pub use_xy_gamut: bool,
+    #[serde(default = "default_true")]
+    pub hdr_tone_mapping: bool,
     #[serde(default = "default_zones")]
     pub zones: Vec<LightZone>,
 }
@@ -35,6 +66,10 @@ fn default_fps() -> u32 {
 
 fn default_brightness() -> f32 {
     1.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_zones() -> Vec<LightZone> {
@@ -83,6 +118,8 @@ impl Config {
             entertainment_area_id: area_id.to_string(),
             fps: default_fps(),
             brightness_multiplier: default_brightness(),
+            use_xy_gamut: true,
+            hdr_tone_mapping: true,
             zones: default_zones(),
         }
     }

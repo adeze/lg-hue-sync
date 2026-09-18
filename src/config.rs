@@ -75,6 +75,18 @@ fn default_zones() -> Vec<LightZone> {
 }
 
 impl Config {
+    pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
+        Self {
+            bridge_ip: bridge_ip.to_string(),
+            username: username.to_string(),
+            clientkey: clientkey.to_string(),
+            entertainment_area_id: area_id.to_string(),
+            fps: default_fps(),
+            brightness_multiplier: default_brightness(),
+            zones: default_zones(),
+        }
+    }
+
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(&path)
             .with_context(|| format!("Failed to open config file at {:?}", path.as_ref()))?;
@@ -83,7 +95,6 @@ impl Config {
         Ok(config)
     }
 
-    #[allow(dead_code)]
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let mut file = File::create(&path)
             .with_context(|| format!("Failed to create config file at {:?}", path.as_ref()))?;

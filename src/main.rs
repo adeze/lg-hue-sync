@@ -42,6 +42,13 @@ enum Commands {
         #[arg(short, long, default_value = "config.json")]
         config: PathBuf,
     },
+    /// Discover and pair with a Philips Hue Bridge via pushlink button
+    Pair {
+        #[arg(short, long)]
+        bridge: Option<String>,
+        #[arg(short, long, default_value = "config.json")]
+        output: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -57,6 +64,7 @@ async fn main() -> Result<()> {
         Commands::Run { config } => run_daemon(config).await,
         Commands::TestPattern { config } => run_test_pattern(config).await,
         Commands::TestCapture { config } => run_test_capture(config).await,
+        Commands::Pair { bridge, output } => run_pair(bridge, output).await,
     }
 }
 
@@ -248,3 +256,39 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
         ((b1 + m) * 255.0) as u8,
     )
 }
+
+async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
+    let bridge_ip = match bridge_opt {
+        Some(ip) => ip,
+        None => match hue::discover_bridge() {
+            Ok(ip) => ip,
+            Err(e) => {
+                println!("Auto-discovery: {}. Please enter Hue Bridge IP manually:", e);
+                use std::io::{stdin, stdout, Write};
+                print!("Bridge IP: ");
+                stdout().flush().ok();
+                let mut line = String::new();
+                stdin().read_line(&mut line)?;
+                line.trim().to_string()
+            }
+        },
+    };
+
+    let (username, clientkey, area_id) = hue::pair_bridge(&bridge_ip, 45)?;
+    let mut config = if output.exists() {
+        Config::load(&output).unwrap_or_else(|_| Config::new_default(&bridge_ip, &username, &clientkey, &area_id))
+    } else {
+        Config::new_default(&bridge_ip, &username, &clientkey, &area_id)
+    };
+
+    config.bridge_ip = bridge_ip;
+    config.username = username;
+    config.clientkey = clientkey;
+    config.entertainment_area_id = area_id;
+
+    config.save(&output)?;
+    println!("\n[+] Configuration and Hue credentials successfully saved to {:?}", output);
+    println!("    You can now run: lg-hue-sync run --config {:?}", output);
+    Ok(())
+}
+

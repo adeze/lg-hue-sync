@@ -25,10 +25,11 @@ lg-hue-sync/
 ├── config.example.json        # Template configuration for zones & bridge
 ├── scripts/
 │   ├── prepare_dejavuln_usb.sh # DejaVuln USB autoroot payload stager
-│   ├── provision_tv.sh        # Remote SSH installer for PicCap & Hyperion.NG
+│   ├── provision_tv.sh        # Remote SSH installer for PicCap & HyperHDR / Hyperion
+│   ├── deploy_rust_daemon.sh  # Cross-compiler & SSH deployer for Rust daemon
 │   └── pair_hue.py            # Hue Bridge pushlink discovery and pairing (PEP 723 / uv)
 └── src/
-    ├── main.rs                # Daemon CLI entrypoint (run, test-pattern, test-capture)
+    ├── main.rs                # Daemon CLI entrypoint (run, pair, test-pattern, test-capture)
     ├── config.rs              # Configuration loader & zone definitions
     ├── capture/
     │   ├── mod.rs             # Screen capture factory

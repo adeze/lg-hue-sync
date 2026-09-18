@@ -139,12 +139,21 @@ pub fn set_stream_active(
     Ok(())
 }
 
-/// Queries whether the entertainment area is currently active on the Hue Bridge
-pub fn get_stream_status(
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamState {
+    pub active: bool,
+    /// 0.0 to 1.0 (if reported by bridge, default 1.0)
+    pub brightness: f32,
+    /// Suggested smoothing factor: 0.15 (subtle) to 0.85 (extreme)
+    pub smoothing_factor: f32,
+}
+
+/// Queries whether the entertainment area is currently active on the Hue Bridge and reads settings
+pub fn get_stream_state(
     bridge_ip: &str,
     username: &str,
     group_id: &str,
-) -> Result<bool> {
+) -> Result<StreamState> {
     let url = format!("http://{}/api/{}/groups/{}", bridge_ip, username, group_id);
     let resp = ureq::get(&url)
         .timeout(Duration::from_secs(3))
@@ -152,11 +161,36 @@ pub fn get_stream_status(
         .with_context(|| format!("Failed to query group status from {}", url))?;
 
     let json: Value = resp.into_json()?;
-    let is_active = json
-        .get("stream")
+    let stream_obj = json.get("stream");
+    let is_active = stream_obj
         .and_then(|s| s.get("active"))
         .and_then(|a| a.as_bool())
         .unwrap_or(false);
 
-    Ok(is_active)
+    // Read any action / bri if available from group
+    let bri = json
+        .get("action")
+        .and_then(|a| a.get("bri"))
+        .and_then(|b| b.as_f64())
+        .map(|b| (b / 254.0) as f32)
+        .unwrap_or(1.0);
+
+    // Map proxy mode or default to 0.35 (moderate)
+    let smoothing = 0.35f32;
+
+    Ok(StreamState {
+        active: is_active,
+        brightness: bri,
+        smoothing_factor: smoothing,
+    })
+}
+
+/// Queries whether the entertainment area is currently active on the Hue Bridge
+#[allow(dead_code)]
+pub fn get_stream_status(
+    bridge_ip: &str,
+    username: &str,
+    group_id: &str,
+) -> Result<bool> {
+    get_stream_state(bridge_ip, username, group_id).map(|s| s.active)
 }

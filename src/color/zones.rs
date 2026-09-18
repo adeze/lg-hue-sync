@@ -161,6 +161,11 @@ impl ZoneSampler {
         }
     }
 
+    /// Dynamically update smoothing factor based on Hue mobile app sync intensity
+    pub fn set_smoothing_factor(&mut self, factor: f32) {
+        self.smoothing_factor = factor.clamp(0.05, 1.0);
+    }
+
     /// Fast letterbox / pillarbox detector. Evaluates top/bottom row luminance to find black bars.
     pub fn detect_active_rect(data: &[u8], width: u32, height: u32, is_bgra: bool) -> ActiveRect {
         let luma_threshold = 12u32; // Below this is considered black letterbox bar

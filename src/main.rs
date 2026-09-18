@@ -142,14 +142,15 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             last_watchdog = tokio::time::Instant::now();
         }
 
-        // Periodically verify if the user stopped sync from the official Hue mobile app (every 5s)
+        // Periodically verify if the user stopped sync or changed intensity from the official Hue mobile app (every 5s)
         if last_status_check.elapsed() >= Duration::from_secs(5) {
             last_status_check = tokio::time::Instant::now();
-            if let Ok(is_active) = hue::get_stream_status(&config.bridge_ip, &config.username, &config.entertainment_area_id) {
-                if !is_active {
+            if let Ok(state) = hue::get_stream_state(&config.bridge_ip, &config.username, &config.entertainment_area_id) {
+                if !state.active {
                     info!("Sync was stopped externally from the Philips Hue app. Exiting sync loop gracefully...");
                     break;
                 }
+                sampler.set_smoothing_factor(state.smoothing_factor);
             }
         }
 

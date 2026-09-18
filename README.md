@@ -101,6 +101,31 @@ Official Philips Hue Sync apps are only available on 2024+ LG TVs running webOS 
 
 ---
 
+## Recommended TV Picture & Video Settings (LG C1 OLED)
+
+To achieve the lowest latency, prevent frame drops, and ensure accurate ambient phosphor colorimetry, configure your LG C1 with the following settings:
+
+### 1. Disable LG AI Services (`Settings -> General -> AI Service`)
+* **AI Picture Pro $\rightarrow$ OFF**:  
+  *Reasoning*: The Alpha 9 Gen 4 AI pipeline inserts an intermediate neural processing buffer between the video decoder and the hardware scaler. This frequently causes `libvtcapture.so` to drop frames, experience buffer stalls, or stutter. In addition, its dynamic frame-by-frame edge sharpening and contrast pumping cause ambient LEDs to rapidly flutter and misrepresent true scene color.
+* **AI Genre Selection $\rightarrow$ OFF**:  
+  *Reasoning*: Automatically swaps display tone curves when it detects genres (e.g., switching between "Cinema" and "Standard"), causing abrupt color jumps in the lights.
+* **AI Brightness Settings $\rightarrow$ OFF**:  
+  *Reasoning*: Uses the room's physical ambient light sensor to alter display gamma curves, causing inconsistent color extraction between daytime and nighttime viewing.
+* **AI Sound Pro $\rightarrow$ OFF**:  
+  *Reasoning*: Bypasses TV DSP so uncompressed multi-channel audio (Dolby Atmos, TrueHD, LPCM) bitstreams cleanly over eARC to your AVR.
+
+### 2. Recommended Picture Presets
+* **SDR Content**: **Filmmaker Mode** or **Cinema** (D65 white point, 2.4/BT.1886 gamma, TruMotion OFF).
+* **HDR10 / Dolby Vision**: **Cinema** or **Filmmaker Mode** (preserves ST.2084 PQ curve without artificial dynamic contrast bloat).
+* **Gaming (Consoles / PC)**: **Game Optimizer** (low-latency ALLM bypass, zero display lag, VRR / G-Sync up to 120 Hz).
+
+### 3. Disable Energy Saving (`Settings -> Support -> Energy Saving`)
+* **Energy Saving Step $\rightarrow$ OFF**:  
+  *Reasoning*: Energy saving actively restricts OLED peak luminance based on average picture level (APL), dimming bright scenes and distorting ambient light brightness tracking.
+
+---
+
 ## Quick Start Guide
 
 ### Step 1: Pair Your Hue Bridge (Run Locally on Mac)

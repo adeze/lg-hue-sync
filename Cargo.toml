@@ -1,6 +1,6 @@
 [package]
 name = "lg-hue-sync"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Native webOS screen capture and Philips Hue Entertainment synchronizer for LG C1"
 authors = ["Adam <adam@adeze.com>"]
@@ -16,6 +16,8 @@ anyhow = "1.0"
 byteorder = "1.5"
 ureq = { version = "2.9", features = ["json"] }
 openssl = { version = "0.10", features = ["vendored"] }
+libloading = "0.8"
+sd-notify = "0.4"
 
 [profile.release]
 opt-level = 3

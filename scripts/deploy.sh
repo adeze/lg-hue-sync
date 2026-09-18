@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# deploy_rust_daemon.sh
+# deploy.sh
 # Cross-compiles the native Rust daemon for LG webOS 32-bit ARM (Alpha 9 Gen 4)
-# and deploys it over SSH to the LG C1 TV.
+# and deploys it over SSH to the LG C1 TV as a headless systemd service.
 
 TV_IP="${1:-192.168.1.149}"
 SSH_PORT="${2:-22}"
@@ -60,7 +60,9 @@ Description=LG C1 Native Philips Hue Sync Daemon
 After=network.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
+WatchdogSec=10
 WorkingDirectory=/var/home/root/lg-hue-sync
 ExecStart=/var/home/root/lg-hue-sync/lg-hue-sync run --config /var/home/root/lg-hue-sync/config.json
 Restart=always
@@ -71,16 +73,18 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload || true
-echo "[TV] Service registered at /etc/systemd/system/lg-hue-sync.service"
+systemctl enable lg-hue-sync || true
+systemctl restart lg-hue-sync || true
+echo "[TV] Service installed and started at /etc/systemd/system/lg-hue-sync.service"
 REMOTEEOC
 
 echo ""
 echo "==================================================================="
-echo "[+] SUCCESS: lg-hue-sync deployed to TV at $REMOTE_DIR/lg-hue-sync"
+echo "[+] SUCCESS: lg-hue-sync deployed and active on TV!"
 echo "==================================================================="
 echo "Management commands on TV (via SSH):"
-echo "  Start:   ssh -p $SSH_PORT root@$TV_IP 'systemctl start lg-hue-sync'"
 echo "  Status:  ssh -p $SSH_PORT root@$TV_IP 'systemctl status lg-hue-sync'"
 echo "  Logs:    ssh -p $SSH_PORT root@$TV_IP 'journalctl -u lg-hue-sync -f'"
+echo "  Restart: ssh -p $SSH_PORT root@$TV_IP 'systemctl restart lg-hue-sync'"
 echo "  Stop:    ssh -p $SSH_PORT root@$TV_IP 'systemctl stop lg-hue-sync'"
 echo "==================================================================="

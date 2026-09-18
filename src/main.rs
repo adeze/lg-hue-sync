@@ -98,32 +98,61 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     // 3. Initialize capture and color samplers
     let mut capture = create_capture(160, 90);
-    let mut sampler = ZoneSampler::new(config.zones.clone(), 0.35, config.hdr_tone_mapping);
+    let mut sampler = ZoneSampler::new(
+        config.zones.clone(),
+        0.35,
+        config.hdr_tone_mapping,
+        config.letterbox_detection,
+        config.saturation_boost,
+        config.noise_gate_threshold,
+    );
     let mut packet_builder = HueStreamPacketBuilder::new(Some(config.entertainment_area_id.clone()));
 
     // Bound framerate between 20 and 60 Hz (supports 23.976, 24, 25, 29.97, 30, 50, 60 fps)
     let target_fps = (config.fps as f64).clamp(20.0, 60.0);
     let frame_interval = Duration::from_secs_f64(1.0 / target_fps);
     info!(
-        "Entering sync loop at {:.2} FPS ({:.2} ms cadence, mode: {}, HDR tone-mapping: {}, zones: {})...",
+        "Entering sync loop at {:.2} FPS ({:.2} ms cadence, mode: {}, HDR tone-mapping: {}, letterbox: {}, zones: {})...",
         target_fps,
         frame_interval.as_secs_f64() * 1000.0,
         if config.use_xy_gamut { "CIE 1931 xy (Gamut C)" } else { "sRGB" },
         config.hdr_tone_mapping,
+        config.letterbox_detection,
         config.zones.len()
     );
+
+    // Notify systemd that service is ready and streaming
+    let _ = sd_notify::notify(true, &[
+        sd_notify::NotifyState::Ready,
+        sd_notify::NotifyState::Status(&format!("Syncing at {:.2} FPS ({} zones)", target_fps, config.zones.len())),
+    ]);
+
+    let mut last_channels: Vec<(u8, (u16, u16, u16))> = Vec::new();
+    let mut static_frame_count: u32 = 0;
+    let mut last_heartbeat = tokio::time::Instant::now();
+    let mut last_watchdog = tokio::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
         let loop_start = tokio::time::Instant::now();
 
+        // Feed systemd watchdog every 2 seconds
+        if last_watchdog.elapsed() >= Duration::from_secs(2) {
+            let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
+            last_watchdog = tokio::time::Instant::now();
+        }
+
         match capture.acquire_frame() {
             Ok(frame) => {
-                let sampled_zones = sampler.sample_frame(
+                let (sampled_zones, is_scene_cut) = sampler.sample_frame(
                     frame.data,
                     frame.width,
                     frame.height,
                     frame.is_bgra,
                 );
+
+                if is_scene_cut {
+                    tracing::debug!("Detected scene cut: snapping lighting without latency");
+                }
 
                 // Convert colors to 16-bit values (either xy+brightness or raw RGB)
                 let channels: Vec<(u8, (u16, u16, u16))> = sampled_zones
@@ -142,14 +171,48 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     })
                     .collect();
 
-                let packet = if config.use_xy_gamut {
-                    packet_builder.build_xy_packet(&channels)
+                // Adaptive deadband throttling:
+                // Check if color change across all channels is below Just Noticeable Difference (JND ~ 1%)
+                let is_virtually_identical = if !last_channels.is_empty() && last_channels.len() == channels.len() {
+                    last_channels.iter().zip(&channels).all(|((_, (a1, a2, a3)), (_, (b1, b2, b3)))| {
+                        (*a1 as i32 - *b1 as i32).abs() < 350
+                            && (*a2 as i32 - *b2 as i32).abs() < 350
+                            && (*a3 as i32 - *b3 as i32).abs() < 350
+                    })
                 } else {
-                    packet_builder.build_rgb_packet(&channels)
+                    false
                 };
 
-                if let Err(e) = dtls_client.send(&packet) {
-                    error!("Failed to send DTLS HueStream packet: {}", e);
+                let should_send = if config.adaptive_throttling {
+                    if is_virtually_identical {
+                        static_frame_count = static_frame_count.saturating_add(1);
+                        // Send at 2 Hz heartbeat to prevent Bridge timeout (watchdog is 5.0s)
+                        if last_heartbeat.elapsed() >= Duration::from_millis(500) {
+                            last_heartbeat = tokio::time::Instant::now();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        static_frame_count = 0;
+                        last_heartbeat = tokio::time::Instant::now();
+                        true
+                    }
+                } else {
+                    true
+                };
+
+                if should_send {
+                    let packet = if config.use_xy_gamut {
+                        packet_builder.build_xy_packet(&channels)
+                    } else {
+                        packet_builder.build_rgb_packet(&channels)
+                    };
+
+                    if let Err(e) = dtls_client.send(&packet) {
+                        error!("Failed to send DTLS HueStream packet: {}", e);
+                    }
+                    last_channels = channels;
                 }
             }
             Err(e) => {
@@ -226,13 +289,20 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
 async fn run_test_capture(config_path: PathBuf) -> Result<()> {
     let config = Config::load(&config_path)?;
     let mut capture = create_capture(160, 90);
-    let mut sampler = ZoneSampler::new(config.zones.clone(), 0.35, config.hdr_tone_mapping);
+    let mut sampler = ZoneSampler::new(
+        config.zones.clone(),
+        0.35,
+        config.hdr_tone_mapping,
+        config.letterbox_detection,
+        config.saturation_boost,
+        config.noise_gate_threshold,
+    );
 
     info!("Sampling capture for 5 frames...");
     for frame_idx in 1..=5 {
         let frame = capture.acquire_frame()?;
-        let sampled = sampler.sample_frame(frame.data, frame.width, frame.height, frame.is_bgra);
-        info!("Frame {}:", frame_idx);
+        let (sampled, is_cut) = sampler.sample_frame(frame.data, frame.width, frame.height, frame.is_bgra);
+        info!("Frame {} (scene cut: {}):", frame_idx, is_cut);
         for (channel_id, color) in sampled {
             let zone_name = config
                 .zones

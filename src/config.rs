@@ -56,6 +56,14 @@ pub struct Config {
     pub use_xy_gamut: bool,
     #[serde(default = "default_true")]
     pub hdr_tone_mapping: bool,
+    #[serde(default = "default_true")]
+    pub letterbox_detection: bool,
+    #[serde(default = "default_saturation_boost")]
+    pub saturation_boost: f32,
+    #[serde(default = "default_noise_gate")]
+    pub noise_gate_threshold: f32,
+    #[serde(default = "default_true")]
+    pub adaptive_throttling: bool,
     #[serde(default = "default_zones")]
     pub zones: Vec<LightZone>,
 }
@@ -70,6 +78,14 @@ fn default_brightness() -> f32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_saturation_boost() -> f32 {
+    1.5
+}
+
+fn default_noise_gate() -> f32 {
+    0.02
 }
 
 fn default_zones() -> Vec<LightZone> {
@@ -120,6 +136,10 @@ impl Config {
             brightness_multiplier: default_brightness(),
             use_xy_gamut: true,
             hdr_tone_mapping: true,
+            letterbox_detection: true,
+            saturation_boost: default_saturation_boost(),
+            noise_gate_threshold: default_noise_gate(),
+            adaptive_throttling: true,
             zones: default_zones(),
         }
     }

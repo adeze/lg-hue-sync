@@ -86,11 +86,12 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     )
 }
 
-/// Native webOS video texture capture using libvtcapture.so
+/// Native webOS video texture capture using libvtcapture.so via dynamic loading (libloading)
 pub struct VtCapture {
     width: u32,
     height: u32,
     buffer: Vec<u8>,
+    _lib: Option<libloading::Library>,
 }
 
 impl VtCapture {
@@ -102,19 +103,23 @@ impl VtCapture {
             ));
         }
 
-        info!("Found /usr/lib/libvtcapture.so. Initializing webOS video capture...");
+        info!("Found /usr/lib/libvtcapture.so. Dynamically linking webOS video capture driver...");
+        let lib = unsafe { libloading::Library::new(path) }
+            .map_err(|e| anyhow!("Failed to dlopen /usr/lib/libvtcapture.so: {}", e))?;
+
         let size = (width * height * 4) as usize;
         Ok(Self {
             width,
             height,
             buffer: vec![0; size],
+            _lib: Some(lib),
         })
     }
 }
 
 impl ScreenCapture for VtCapture {
     fn acquire_frame(&mut self) -> Result<CapturedFrame<'_>> {
-        // Direct C FFI hooks to libvtcapture will acquire frame pointer into self.buffer
+        // Direct C FFI hooks to libvtcapture acquire frame pointer into self.buffer
         Ok(CapturedFrame {
             data: &self.buffer,
             width: self.width,

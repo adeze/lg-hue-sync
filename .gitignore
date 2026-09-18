@@ -3,6 +3,11 @@
 **/*.rs.bk
 *.pdb
 
+# Python / uv artifacts
+.venv/
+__pycache__/
+*.pyc
+
 # Local credentials & config
 config.json
 .env

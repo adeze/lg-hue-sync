@@ -1,34 +1,50 @@
 # LG Hue Sync — Architecture & Agent Guide
 
-Native screen capture and Philips Hue Entertainment synchronization for LG webOS Smart TVs, tailored for the **LG C1 (2021, webOS 6.x, Alpha 9 Gen 4)**.
-
-## Project Scope & Objectives
-
-1. **Automation Suite (`scripts/`)**:
-   - Automated USB payload staging for root acquisition via DejaVuln (`dejavuln-autoroot`).
-   - Remote TV provisioning over SSH: automated installation of the Homebrew Channel (`org.webosbrew.hbchannel`), PicCap (`org.webosbrew.piccap`), and Hyperion.NG (`org.webosbrew.hyperion.ng`).
-   - Automated Hue Bridge discovery, pushlink authentication, Entertainment Area parsing, and Hyperion JSON-RPC configuration.
-
-2. **Native Rust Daemon (`lg-hue-sync`)**:
-   - Single-binary replacement for PicCap + Hyperion.NG.
-   - Low-overhead direct FFI binding to webOS private display pipelines (`libvtcapture.so` / `libdile_vt.so`).
-   - Native SIMD/downsampling color extraction into spatial TV zones (top, bottom, left, right, center).
-   - High-performance DTLS 1.2 PSK streaming over UDP port 2100 directly to the Philips Hue Bridge using the Hue Entertainment API.
+Native screen capture and Philips Hue Entertainment synchronization for LG webOS Smart TVs, specifically configured for:
+- **Target Device**: LG C1 OLED 2021 (MAC: `24:E8:53:D7:55:4C`, IP: `192.168.1.149`)
+- **Firmware**: webOS 6.x (Software Version `03.53.45`)
+- **SoC**: MediaTek/Realtek customized Alpha 9 Gen 4 (64-bit ARM Cortex-A73/A53 with 32-bit `armv7l` GNU userspace)
 
 ---
 
-## Hardware & Architecture Specifics
+## Tooling & Environment Discipline
 
-- **Target Device**: LG C1 OLED (2021)
-- **SoC**: MediaTek/Realtek customized Alpha 9 Gen 4 (Cortex-A73/A53).
-- **Userspace**: webOS 6.x runs a **32-bit ARM GNU userspace** (`armv7l`, glibc 2.28+).
-- **Compilation Target**:
-  - Architecture: `armv7-unknown-linux-gnueabihf` (standard glibc) or `armv7-unknown-linux-musleabihf` (fully static).
-  - Cross-compilation tool: `cross` (Docker containerized) or native toolchain `arm-linux-gnueabihf-gcc`.
+- **Python Scripting**: Always execute Python scripts using `uv run <script.py>`. Never invoke `python3` or `python` directly.
+- **Rust Tooling**: Cross-compile for webOS using `cross build --target armv7-unknown-linux-gnueabihf --release` or local `cargo` for test/mock validation.
+- **File Editing**: Always use designated Antigravity editing tools (`write_to_file`, `replace_file_content`), never ad-hoc shell redirects.
 
 ---
 
-## Security & Root Invariants
+## Project Structure
+
+```
+lg-hue-sync/
+├── AGENTS.md                  # Project context, hardware targets, protocols
+├── Cargo.toml                 # Rust daemon dependencies and profiles
+├── Cross.toml                 # Containerized cross-compilation config
+├── config.example.json        # Template configuration for zones & bridge
+├── scripts/
+│   ├── prepare_dejavuln_usb.sh # DejaVuln USB autoroot payload stager
+│   ├── provision_tv.sh        # Remote SSH installer for PicCap & Hyperion.NG
+│   └── pair_hue.py            # Hue Bridge pushlink discovery and pairing (PEP 723 / uv)
+└── src/
+    ├── main.rs                # Daemon CLI entrypoint (run, test-pattern, test-capture)
+    ├── config.rs              # Configuration loader & zone definitions
+    ├── capture/
+    │   ├── mod.rs             # Screen capture factory
+    │   └── vtcapture.rs       # libvtcapture / dile_vt FFI loader & mock pattern generator
+    ├── color/
+    │   ├── mod.rs             # Color processing exports
+    │   └── zones.rs           # Spatial zone sampler & EMA smoothing filter
+    └── hue/
+        ├── mod.rs             # Entertainment stream activation via REST
+        ├── dtls.rs            # DTLS 1.2 PSK client on UDP port 2100
+        └── stream.rs          # Binary HueStream protocol packet builder
+```
+
+---
+
+## Hardware & Root Invariants
 
 - **Root Access Mandatory**: `libvtcapture` and access to `/dev/video*` hardware decoders are blocked by webOS user sandboxes. The daemon and grabbers must run as `root`.
 - **Automatic Updates Must Be Disabled**: LG pushes firmware patches that mitigate root exploits. The TV must have "Allow Automatic Updates" turned OFF.
@@ -40,13 +56,31 @@ Native screen capture and Philips Hue Entertainment synchronization for LG webOS
 
 ## Network Ports & Protocols
 
-| Service | Port | Protocol | Purpose |
+| Service | Host / Port | Protocol | Purpose |
 | :--- | :--- | :--- | :--- |
-| **TV SSH** | 22 / 9922 | SSH | Remote management and root execution |
-| **Hyperion Flatbuffers** | 19400 | TCP/UDP | PicCap raw frame transport to Hyperion |
-| **Hyperion JSON-RPC** | 8090 | HTTP/JSON | Hyperion web interface & remote config API |
-| **Hue REST API** | 80 / 443 | HTTP/HTTPS | Pairing, pushlink authentication, area config |
-| **Hue Entertainment** | 2100 | UDP / DTLS 1.2 | Real-time packed RGB streaming (25–60 Hz) |
+| **TV SSH** | `192.168.1.149:22` | SSH | Remote management and root execution |
+| **Hyperion Flatbuffers** | `192.168.1.149:19400` | TCP/UDP | PicCap raw frame transport to Hyperion |
+| **Hyperion JSON-RPC** | `192.168.1.149:8090` | HTTP/JSON | Hyperion web interface & remote config API |
+| **Hue REST API** | `<bridge-ip>:80` | HTTP | Pairing, pushlink authentication, area config |
+| **Hue Entertainment** | `<bridge-ip>:2100` | UDP / DTLS 1.2 | Real-time packed RGB streaming (25–60 Hz) |
+
+---
+
+## Deterministic Automation Workflow
+
+```bash
+# Step 1: Stage the DejaVuln autoroot USB exploit
+./scripts/prepare_dejavuln_usb.sh /Volumes/<USB_DRIVE>
+
+# Step 2: Once TV is rooted and SSH is enabled in Homebrew Channel:
+./scripts/provision_tv.sh 192.168.1.149
+
+# Step 3: Discover Hue Bridge and pair pushlink button:
+uv run scripts/pair_hue.py --tv-ip 192.168.1.149
+
+# Step 4: (Alternative) Run native Rust Hue sync daemon:
+./target/debug/lg-hue-sync test-capture --config config.example.json
+```
 
 ---
 

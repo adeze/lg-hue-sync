@@ -1,9 +1,17 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
 """
 pair_hue.py
 Discovers Philips Hue Bridge on the local network, guides pushlink authentication,
 extracts Hue Entertainment credentials (username + clientkey for DTLS PSK),
 and optionally configures Hyperion.NG on your LG C1 TV via JSON-RPC.
+
+Usage:
+    uv run scripts/pair_hue.py
+    uv run scripts/pair_hue.py --tv-ip 192.168.1.149
 """
 
 import argparse

@@ -58,6 +58,8 @@ cat << 'EOF' > /etc/systemd/system/lg-hue-sync.service
 [Unit]
 Description=LG C1 Native Philips Hue Sync Daemon
 After=network.target
+Conflicts=sleep.target suspend.target
+StopWhenUnneeded=yes
 
 [Service]
 Type=notify
@@ -67,6 +69,7 @@ WorkingDirectory=/var/home/root/lg-hue-sync
 ExecStart=/var/home/root/lg-hue-sync/lg-hue-sync run --config /var/home/root/lg-hue-sync/config.json
 Restart=always
 RestartSec=5
+TimeoutStopSec=3
 
 [Install]
 WantedBy=multi-user.target

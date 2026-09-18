@@ -148,6 +148,23 @@ Your TV is now syncing ambient lighting on boot with zero visible apps or clutte
 
 ---
 
+### Step 5 (Optional): Map Toggle to LG Magic Remote Quick Access
+
+If you would like to be able to turn sync on or off or restart it using your **LG Magic Remote**:
+
+```bash
+./scripts/install_remote_shortcut.sh 192.168.1.149
+```
+
+This creates a lightweight native webOS app entry **"Hue Sync"**:
+1. On your LG Magic Remote, **hold the `0` key** to open the **Quick Access** editor.
+2. Select any number key (e.g. **`9`**) and assign **"Hue Sync"** to it.
+3. Now, whenever you hold **`9`** on your remote, it will instantly toggle Hue Sync ON or OFF and display an on-screen TV notification:
+   - `Philips Hue Sync: ON`
+   - `Philips Hue Sync: OFF`
+
+---
+
 ## Management via SSH
 
 ```bash
@@ -157,9 +174,10 @@ ssh root@192.168.1.149 'systemctl status lg-hue-sync'
 # View live real-time sync logs
 ssh root@192.168.1.149 'journalctl -u lg-hue-sync -f'
 
-# Stop / Start service
+# Stop / Start / Restart service
 ssh root@192.168.1.149 'systemctl stop lg-hue-sync'
 ssh root@192.168.1.149 'systemctl start lg-hue-sync'
+ssh root@192.168.1.149 'systemctl restart lg-hue-sync'
 ```
 
 ---

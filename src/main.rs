@@ -101,12 +101,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut sampler = ZoneSampler::new(config.zones.clone(), 0.35, config.hdr_tone_mapping);
     let mut packet_builder = HueStreamPacketBuilder::new(Some(config.entertainment_area_id.clone()));
 
-    // Bound framerate between 25 and 60 Hz to meet Hue Bridge requirements
-    let target_fps = config.fps.clamp(25, 60);
-    let frame_interval = Duration::from_millis(1000 / target_fps as u64);
+    // Bound framerate between 20 and 60 Hz (supports 23.976, 24, 25, 29.97, 30, 50, 60 fps)
+    let target_fps = (config.fps as f64).clamp(20.0, 60.0);
+    let frame_interval = Duration::from_secs_f64(1.0 / target_fps);
     info!(
-        "Entering sync loop at {} FPS (mode: {}, HDR tone-mapping: {}, zones: {})...",
+        "Entering sync loop at {:.2} FPS ({:.2} ms cadence, mode: {}, HDR tone-mapping: {}, zones: {})...",
         target_fps,
+        frame_interval.as_secs_f64() * 1000.0,
         if config.use_xy_gamut { "CIE 1931 xy (Gamut C)" } else { "sRGB" },
         config.hdr_tone_mapping,
         config.zones.len()

@@ -2,8 +2,9 @@ mod capture;
 mod color;
 mod config;
 mod hue;
+mod nanoleaf;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,10 +17,11 @@ use capture::{create_capture, detect_source_fps};
 use color::{RgbColor, ZoneSampler};
 use config::Config;
 use hue::{set_stream_active, HueDtlsClient, HueStreamPacketBuilder};
+use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
 
 #[derive(Parser)]
 #[command(name = "lg-hue-sync")]
-#[command(about = "High-performance native screen capture and Philips Hue synchronizer for LG webOS", long_about = None)]
+#[command(about = "High-performance native screen capture and ambient lighting synchronizer for LG webOS (Hue & Nanoleaf 4D)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -37,6 +39,11 @@ enum Commands {
         #[arg(short, long, default_value = "config.json")]
         config: PathBuf,
     },
+    /// Stream a test color pattern to Nanoleaf 4D lightstrip on port 60222
+    TestNanoleaf {
+        #[arg(short, long, default_value = "config.json")]
+        config: PathBuf,
+    },
     /// Run screen capture only and log sampled zone colors to console
     TestCapture {
         #[arg(short, long, default_value = "config.json")]
@@ -48,6 +55,20 @@ enum Commands {
         bridge: Option<String>,
         #[arg(short, long, default_value = "config.json")]
         output: PathBuf,
+    },
+    /// Re-sync entertainment area and 3D light coordinates from Philips Hue app
+    SyncHue {
+        #[arg(short, long, default_value = "config.json")]
+        config: PathBuf,
+        #[arg(short, long)]
+        area: Option<String>,
+    },
+    /// Pair with Nanoleaf 4D controller and save credentials to config
+    PairNanoleaf {
+        #[arg(short, long)]
+        ip: Option<String>,
+        #[arg(short, long, default_value = "config.json")]
+        config: PathBuf,
     },
 }
 
@@ -63,14 +84,29 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Run { config } => run_daemon(config).await,
         Commands::TestPattern { config } => run_test_pattern(config).await,
+        Commands::TestNanoleaf { config } => run_test_nanoleaf(config).await,
         Commands::TestCapture { config } => run_test_capture(config).await,
         Commands::Pair { bridge, output } => run_pair(bridge, output).await,
+        Commands::SyncHue { config, area } => run_sync_hue(config, area).await,
+        Commands::PairNanoleaf { ip, config } => run_pair_nanoleaf(ip, config).await,
     }
 }
 
 async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let config = Config::load(&config_path)?;
-    info!("Loaded configuration for Bridge at {}", config.bridge_ip);
+
+    let hue_active = config.hue_enabled && !config.bridge_ip.is_empty() && !config.username.is_empty();
+    let nanoleaf_active = config.nanoleaf.as_ref().map(|n| n.enabled && !n.ip.is_empty() && !n.auth_token.is_empty()).unwrap_or(false);
+
+    if !hue_active && !nanoleaf_active {
+        return Err(anyhow!("Neither Philips Hue nor Nanoleaf is configured and enabled in {:?}", config_path));
+    }
+
+    info!(
+        "Loaded configuration (Hue: {}, Nanoleaf: {})",
+        if hue_active { format!("ACTIVE @ {}", config.bridge_ip) } else { "DISABLED".to_string() },
+        if nanoleaf_active { format!("ACTIVE @ {}", config.nanoleaf.as_ref().unwrap().ip) } else { "DISABLED".to_string() }
+    );
 
     // Setup graceful shutdown handler
     let running = Arc::new(AtomicBool::new(true));
@@ -81,32 +117,64 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         r.store(false, Ordering::SeqCst);
     });
 
-    // 1. Activate entertainment streaming on Hue Bridge
-    set_stream_active(
-        &config.bridge_ip,
-        &config.username,
-        &config.entertainment_area_id,
-        true,
-    )?;
+    // 1. Initialize Philips Hue DTLS client if active
+    let mut hue_dtls = if hue_active {
+        set_stream_active(
+            &config.bridge_ip,
+            &config.username,
+            &config.entertainment_area_id,
+            true,
+        )?;
+        let client = HueDtlsClient::connect(
+            &config.bridge_ip,
+            &config.username,
+            &config.clientkey,
+        )?;
+        Some(client)
+    } else {
+        None
+    };
 
-    // 2. Connect DTLS client
-    let mut dtls_client = HueDtlsClient::connect(
-        &config.bridge_ip,
-        &config.username,
-        &config.clientkey,
-    )?;
+    let mut hue_sampler = if hue_active {
+        Some(ZoneSampler::new(
+            config.zones.clone(),
+            0.35,
+            config.hdr_tone_mapping,
+            config.letterbox_detection,
+            config.saturation_boost,
+            config.noise_gate_threshold,
+        ))
+    } else {
+        None
+    };
 
-    // 3. Initialize capture and color samplers
+    let mut hue_packet_builder = if hue_active {
+        Some(HueStreamPacketBuilder::new(Some(config.entertainment_area_id.clone())))
+    } else {
+        None
+    };
+
+    // 2. Initialize Nanoleaf 4D UDP streamer if active
+    let (mut nanoleaf_sampler, mut nanoleaf_streamer) = if nanoleaf_active {
+        let n_cfg = config.nanoleaf.as_ref().unwrap();
+        let port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
+        let sampler = NanoleafPerimeterSampler::new(
+            n_cfg.segments,
+            &n_cfg.panel_ids,
+            config.hdr_tone_mapping,
+            config.saturation_boost,
+            config.noise_gate_threshold,
+            config.brightness_multiplier,
+        );
+        let streamer = NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())?;
+        info!("[+] Nanoleaf 4D streaming ready: {} perimeter segments on UDP port {}", streamer.panel_count(), port);
+        (Some(sampler), Some(streamer))
+    } else {
+        (None, None)
+    };
+
+    // 3. Initialize capture
     let mut capture = create_capture(160, 90);
-    let mut sampler = ZoneSampler::new(
-        config.zones.clone(),
-        0.35,
-        config.hdr_tone_mapping,
-        config.letterbox_detection,
-        config.saturation_boost,
-        config.noise_gate_threshold,
-    );
-    let mut packet_builder = HueStreamPacketBuilder::new(Some(config.entertainment_area_id.clone()));
 
     // Determine target framerate (supports auto-matching source refresh rate 23.976..60.0 Hz)
     let detected_fps = if config.fps == 0 { detect_source_fps() } else { None };
@@ -115,20 +183,25 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut frame_interval = Duration::from_secs_f64(1.0 / target_fps);
 
     info!(
-        "Entering sync loop at {:.2} FPS ({:.2} ms cadence{}, mode: {}, HDR tone-mapping: {}, letterbox: {}, zones: {})...",
+        "Entering sync loop at {:.2} FPS ({:.2} ms cadence{}, mode: {}, HDR tone-mapping: {}, letterbox: {})...",
         target_fps,
         frame_interval.as_secs_f64() * 1000.0,
         if detected_fps.is_some() { " [source auto-matched]" } else { "" },
         if config.use_xy_gamut { "CIE 1931 xy (Gamut C)" } else { "sRGB" },
         config.hdr_tone_mapping,
-        config.letterbox_detection,
-        config.zones.len()
+        config.letterbox_detection
     );
 
     // Notify systemd that service is ready and streaming
+    let status_desc = format!(
+        "Syncing at {:.1} FPS (Hue: {} zones, Nanoleaf: {} segments)",
+        target_fps,
+        if hue_active { config.zones.len() } else { 0 },
+        nanoleaf_streamer.as_ref().map(|s| s.panel_count()).unwrap_or(0)
+    );
     let _ = sd_notify::notify(true, &[
         sd_notify::NotifyState::Ready,
-        sd_notify::NotifyState::Status(&format!("Syncing at {:.2} FPS ({} zones)", target_fps, config.zones.len())),
+        sd_notify::NotifyState::Status(&status_desc),
     ]);
 
     let mut last_channels: Vec<(u8, (u16, u16, u16))> = Vec::new();
@@ -146,15 +219,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             last_watchdog = tokio::time::Instant::now();
         }
 
-        // Periodically verify if the user stopped sync or changed intensity from the official Hue mobile app (every 5s)
+        // Periodically verify if the user stopped sync from the official Hue mobile app (every 5s)
         if last_status_check.elapsed() >= Duration::from_secs(5) {
             last_status_check = tokio::time::Instant::now();
-            if let Ok(state) = hue::get_stream_state(&config.bridge_ip, &config.username, &config.entertainment_area_id) {
-                if !state.active {
-                    info!("Sync was stopped externally from the Philips Hue app. Exiting sync loop gracefully...");
-                    break;
+            if hue_active {
+                if let Ok(state) = hue::get_stream_state(&config.bridge_ip, &config.username, &config.entertainment_area_id) {
+                    if !state.active {
+                        info!("Sync was stopped externally from the Philips Hue app. Exiting sync loop gracefully...");
+                        break;
+                    }
+                    if let Some(ref mut s) = hue_sampler {
+                        s.set_smoothing_factor(state.smoothing_factor);
+                    }
+                    if let Some(ref mut ns) = nanoleaf_sampler {
+                        ns.set_smoothing_factor(state.smoothing_factor);
+                    }
                 }
-                sampler.set_smoothing_factor(state.smoothing_factor);
             }
 
             // In auto FPS mode, dynamically update cadence if TV source rate changed (e.g. film started)
@@ -172,76 +252,98 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
         match capture.acquire_frame() {
             Ok(frame) => {
-                let (sampled_zones, is_scene_cut) = sampler.sample_frame(
-                    frame.data,
-                    frame.width,
-                    frame.height,
-                    frame.is_bgra,
-                );
+                let mut is_scene_cut = false;
 
-                if is_scene_cut {
-                    tracing::debug!("Detected scene cut: snapping lighting without latency");
-                }
-
-                // Convert colors to 16-bit values (either xy+brightness or raw RGB)
-                let channels: Vec<(u8, (u16, u16, u16))> = sampled_zones
-                    .into_iter()
-                    .map(|(channel_id, color)| {
-                        let scaled = RgbColor::new(
-                            ((color.r as f32) * config.brightness_multiplier).clamp(0.0, 255.0) as u8,
-                            ((color.g as f32) * config.brightness_multiplier).clamp(0.0, 255.0) as u8,
-                            ((color.b as f32) * config.brightness_multiplier).clamp(0.0, 255.0) as u8,
+                // 1. Process Philips Hue entertainment zones
+                if hue_active {
+                    if let (Some(ref mut sampler), Some(ref mut dtls), Some(ref mut builder)) = (
+                        &mut hue_sampler,
+                        &mut hue_dtls,
+                        &mut hue_packet_builder,
+                    ) {
+                        let (sampled_zones, cut) = sampler.sample_frame(
+                            frame.data,
+                            frame.width,
+                            frame.height,
+                            frame.is_bgra,
                         );
-                        if config.use_xy_gamut {
-                            (channel_id, scaled.to_xy_u16(color::HueGamut::GamutC))
-                        } else {
-                            (channel_id, scaled.to_u16())
-                        }
-                    })
-                    .collect();
+                        is_scene_cut = cut;
 
-                // Adaptive deadband throttling:
-                // Check if color change across all channels is below Just Noticeable Difference (JND ~ 1%)
-                let is_virtually_identical = if !last_channels.is_empty() && last_channels.len() == channels.len() {
-                    last_channels.iter().zip(&channels).all(|((_, (a1, a2, a3)), (_, (b1, b2, b3)))| {
-                        (*a1 as i32 - *b1 as i32).abs() < 350
-                            && (*a2 as i32 - *b2 as i32).abs() < 350
-                            && (*a3 as i32 - *b3 as i32).abs() < 350
-                    })
-                } else {
-                    false
-                };
+                        let channels: Vec<(u8, (u16, u16, u16))> = sampled_zones
+                            .into_iter()
+                            .map(|(channel_id, color)| {
+                                let scaled = RgbColor::new(
+                                    ((color.r as f32) * config.brightness_multiplier).clamp(0.0, 255.0) as u8,
+                                    ((color.g as f32) * config.brightness_multiplier).clamp(0.0, 255.0) as u8,
+                                    ((color.b as f32) * config.brightness_multiplier).clamp(0.0, 255.0) as u8,
+                                );
+                                if config.use_xy_gamut {
+                                    (channel_id, scaled.to_xy_u16(color::HueGamut::GamutC))
+                                } else {
+                                    (channel_id, scaled.to_u16())
+                                }
+                            })
+                            .collect();
 
-                let should_send = if config.adaptive_throttling {
-                    if is_virtually_identical {
-                        static_frame_count = static_frame_count.saturating_add(1);
-                        // Send at 2 Hz heartbeat to prevent Bridge timeout (watchdog is 5.0s)
-                        if last_heartbeat.elapsed() >= Duration::from_millis(500) {
-                            last_heartbeat = tokio::time::Instant::now();
-                            true
+                        // Adaptive deadband throttling for Hue Bridge
+                        let is_virtually_identical = if !last_channels.is_empty() && last_channels.len() == channels.len() {
+                            last_channels.iter().zip(&channels).all(|((_, (a1, a2, a3)), (_, (b1, b2, b3)))| {
+                                (*a1 as i32 - *b1 as i32).abs() < 350
+                                    && (*a2 as i32 - *b2 as i32).abs() < 350
+                                    && (*a3 as i32 - *b3 as i32).abs() < 350
+                            })
                         } else {
                             false
+                        };
+
+                        let should_send = if config.adaptive_throttling {
+                            if is_virtually_identical {
+                                static_frame_count = static_frame_count.saturating_add(1);
+                                if last_heartbeat.elapsed() >= Duration::from_millis(500) {
+                                    last_heartbeat = tokio::time::Instant::now();
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                static_frame_count = 0;
+                                last_heartbeat = tokio::time::Instant::now();
+                                true
+                            }
+                        } else {
+                            true
+                        };
+
+                        if should_send {
+                            let packet = if config.use_xy_gamut {
+                                builder.build_xy_packet(&channels)
+                            } else {
+                                builder.build_rgb_packet(&channels)
+                            };
+
+                            if let Err(e) = dtls.send(&packet) {
+                                error!("Failed to send DTLS HueStream packet: {}", e);
+                            }
+                            last_channels = channels;
                         }
-                    } else {
-                        static_frame_count = 0;
-                        last_heartbeat = tokio::time::Instant::now();
-                        true
                     }
-                } else {
-                    true
-                };
+                }
 
-                if should_send {
-                    let packet = if config.use_xy_gamut {
-                        packet_builder.build_xy_packet(&channels)
-                    } else {
-                        packet_builder.build_rgb_packet(&channels)
-                    };
-
-                    if let Err(e) = dtls_client.send(&packet) {
-                        error!("Failed to send DTLS HueStream packet: {}", e);
+                // 2. Process Nanoleaf 4D TV perimeter lightstrip
+                if nanoleaf_active {
+                    if let (Some(ref mut nl_sampler), Some(ref mut nl_streamer)) = (
+                        &mut nanoleaf_sampler,
+                        &mut nanoleaf_streamer,
+                    ) {
+                        let nl_colors = nl_sampler.sample_frame(
+                            frame.data,
+                            frame.width,
+                            frame.height,
+                            frame.is_bgra,
+                            is_scene_cut,
+                        );
+                        let _ = nl_streamer.send_frame(&nl_colors, 0);
                     }
-                    last_channels = channels;
                 }
             }
             Err(e) => {
@@ -255,14 +357,16 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
     }
 
-    // Cleanup: deactivate stream
-    info!("Deactivating entertainment area stream on bridge...");
-    let _ = set_stream_active(
-        &config.bridge_ip,
-        &config.username,
-        &config.entertainment_area_id,
-        false,
-    );
+    // Cleanup: deactivate Hue stream
+    if hue_active {
+        info!("Deactivating entertainment area stream on Hue Bridge...");
+        let _ = set_stream_active(
+            &config.bridge_ip,
+            &config.username,
+            &config.entertainment_area_id,
+            false,
+        );
+    }
 
     info!("lg-hue-sync terminated cleanly.");
     Ok(())
@@ -311,7 +415,41 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
         false,
     )?;
 
-    info!("[+] Test pattern completed successfully!");
+    info!("[+] Hue test pattern completed successfully!");
+    Ok(())
+}
+
+async fn run_test_nanoleaf(config_path: PathBuf) -> Result<()> {
+    let config = Config::load(&config_path)?;
+    let n_cfg = config.nanoleaf.ok_or_else(|| anyhow!("No Nanoleaf configuration found in {:?}", config_path))?;
+
+    info!("Connecting to Nanoleaf 4D at {}...", n_cfg.ip);
+    let udp_port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
+    let segments = n_cfg.segments.max(30);
+    let mut panel_ids = n_cfg.panel_ids.clone();
+    if panel_ids.is_empty() {
+        panel_ids = (1..=segments).collect();
+    }
+
+    let mut streamer = NanoleafUdpStreamer::new(&n_cfg.ip, udp_port, panel_ids)?;
+    info!("Streaming rotating rainbow chase around TV perimeter for 10 seconds...");
+
+    let start = std::time::Instant::now();
+    while start.elapsed().as_secs() < 10 {
+        let hue_offset = (start.elapsed().as_secs_f32() * 90.0) % 360.0;
+        let mut colors = Vec::with_capacity(segments as usize);
+
+        for i in 0..segments {
+            let hue = (hue_offset + (i as f32 / segments as f32) * 360.0) % 360.0;
+            let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
+            colors.push(RgbColor::new(r, g, b));
+        }
+
+        streamer.send_frame(&colors, 0)?;
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+
+    info!("[+] Nanoleaf 4D test pattern completed successfully!");
     Ok(())
 }
 
@@ -407,3 +545,60 @@ async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
     Ok(())
 }
 
+async fn run_sync_hue(config_path: PathBuf, target_area: Option<String>) -> Result<()> {
+    let mut config = Config::load(&config_path)?;
+    info!("Querying Hue Bridge at {} for Entertainment Areas...", config.bridge_ip);
+
+    let (area_id, area_name, discovered_zones) = hue::sync_entertainment_areas(
+        &config.bridge_ip,
+        &config.username,
+        target_area.as_deref(),
+    )?;
+
+    config.entertainment_area_id = area_id;
+    if !discovered_zones.is_empty() {
+        config.zones = discovered_zones;
+    }
+    config.save(&config_path)?;
+
+    println!("\n[+] Entertainment area '{}' (ID: {}) synced successfully!", area_name, config.entertainment_area_id);
+    println!("    Updated {} light zones in {:?}", config.zones.len(), config_path);
+    println!("    3D light positions have been refreshed and projected to screen sampling boxes.");
+    Ok(())
+}
+
+async fn run_pair_nanoleaf(ip_opt: Option<String>, config_path: PathBuf) -> Result<()> {
+    let ip = match ip_opt {
+        Some(ip) => ip,
+        None => {
+            use std::io::{stdin, stdout, Write};
+            print!("Enter Nanoleaf 4D IP address: ");
+            stdout().flush().ok();
+            let mut line = String::new();
+            stdin().read_line(&mut line)?;
+            line.trim().to_string()
+        }
+    };
+
+    let (auth_token, num_panels, panel_ids) = nanoleaf::pair_nanoleaf(&ip, 45)?;
+    let mut config = if config_path.exists() {
+        Config::load(&config_path).unwrap_or_else(|_| Config::new_default("", "", "", ""))
+    } else {
+        Config::new_default("", "", "", "")
+    };
+
+    config.nanoleaf = Some(crate::config::NanoleafConfig {
+        enabled: true,
+        ip: ip.clone(),
+        auth_token,
+        udp_port: 60222,
+        segments: num_panels.max(30),
+        panel_ids,
+    });
+
+    config.save(&config_path)?;
+    println!("\n[+] Nanoleaf 4D controller at {} successfully paired and saved to {:?}", ip, config_path);
+    println!("    You can test it with: lg-hue-sync test-nanoleaf --config {:?}", config_path);
+    println!("    Run live sync with:   lg-hue-sync run --config {:?}", config_path);
+    Ok(())
+}

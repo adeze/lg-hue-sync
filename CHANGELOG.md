@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-18
+
+### Added
+- **Nanoleaf 4D (V1) Lightstrip Integration**: High-speed binary UDP streaming on port 60222 using the `extControl` v2 protocol ported from Hyperion's battle-tested networking implementation.
+- **Perimeter Edge Sampler**: Automatically generates 30+ normalized sampling zones along the TV perimeter (Left, Top, Right, Bottom) with 16:9 aspect ratio distribution, saturation-weighted dominant color extraction, and OLED near-black noise gating.
+- **Unified Lockstep Dual-System Sync**: Drives both the TV perimeter Nanoleaf 4D strip and Philips Hue room surround lighting simultaneously from a single captured video frame with shared scene-cut detection.
+- **`sync-hue` Dynamic Re-Sync Command**: Re-queries the Hue Bridge for updated 3D light coordinates and entertainment area selection without requiring physical button press re-pairing.
+- **`pair-nanoleaf` Setup Command**: Pairs with a Nanoleaf controller on LAN via HTTP POST `/api/v1/new` and queries physical panel/segment layout.
+- **`test-nanoleaf` Verification Command**: Streams a rotating rainbow test pattern to verify Nanoleaf UDP connectivity and perimeter segment sequencing.
+- **3D Depth & Height Room Projection**: Maps Philips Hue 3D coordinates `[X, Y, Z]` into screen sampling zones; front-stage lights maintain tight directional focus, while rear surrounds expand into diffuse ambient reflections.
+
 ## [0.2.0] - 2026-09-18
 
 ### Added

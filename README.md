@@ -35,20 +35,23 @@ Official Philips Hue Sync apps are only available on 2024+ LG TVs running webOS 
 │                                              │ Zero-Copy FFI           │
 │                                              ▼                         │
 │                                    [ lg-hue-sync daemon ]              │
-│                                    - Spatial Zone Sampler              │
 │                                    - Reinhard HDR Tone-Mapping         │
-│                                    - Hue Gamut C Boundary Clamp        │
-│                                    - CIE 1931 xy Quantizer             │
+│                                    - Dynamic Letterbox Detection       │
+│                                    - OLED Near-Black Noise Gate        │
+│                                    - Saturation Dominance Boost        │
 │                                    - Single-Slot Drop-Stale Pump       │
-│                                              │                         │
-│                                              ▼ DTLS 1.2 PSK            │
-└──────────────────────────────────────────────┼─────────────────────────┘
-                                               │ UDP Port 2100 (24-60Hz)
-                                               ▼
-                                    [ Philips Hue Bridge ]
-                                               │ Zigbee Light Link
-                                               ▼
-                                 [ Play Gradient / Bulbs ]
+│                                       │                     │          │
+│                        Perimeter UDP  │                     │ DTLS PSK │
+│                          (Port 60222) │                     │ (Port    │
+│                                       ▼                     ▼  2100)   │
+└───────────────────────────────────────┼─────────────────────┼──────────┘
+                                        │                     │
+                                        ▼                     ▼
+                               [ Nanoleaf 4D (V1) ]   [ Philips Hue Bridge ]
+                                (TV Lightstrip)        (Room Surrounds)
+                                        │                     │
+                                        ▼                     ▼
+                               [ 30+ TV Edge LEDs ]   [ Hue Play / Bulbs ]
 ```
 
 ---
@@ -120,9 +123,43 @@ When prompted, press the physical round button on your Hue Bridge. The CLI will:
 
 ---
 
+### Step 1b (Optional): Pair with Nanoleaf 4D (V1) Lightstrip
+
+If you have a **Nanoleaf 4D** lightstrip mounted around your TV perimeter:
+
+```bash
+cargo run -- pair-nanoleaf --ip 192.168.1.150
+```
+
+1. Hold the power button on the Nanoleaf controller for 5–7 seconds until the LED starts blinking.
+2. The daemon pairs via the local REST API, discovers your panel layout, and saves credentials to `config.json`.
+3. Verify perimeter lighting with:
+   ```bash
+   cargo run -- test-nanoleaf
+   ```
+
+---
+
+### Step 1c: Re-Sync Entertainment Areas Anytime (`sync-hue`)
+
+Whenever you add new lights, move lamps, or modify your 3D layout in the official **Philips Hue mobile app**, run:
+
+```bash
+cargo run -- sync-hue
+```
+
+Or target a specific entertainment area by name:
+```bash
+cargo run -- sync-hue --area "Living Room Cinema"
+```
+
+This re-queries the Hue Bridge, extracts updated 3D coordinates `[X, Y, Z]`, projects them into 2D screen sampling boxes (with front/surround depth scaling), and refreshes `config.json` **without needing to press the Bridge button again**.
+
+---
+
 ### Step 2: Verify Lights with a Test Pattern
 
-Verify that the DTLS 1.2 PSK engine can drive your lights directly over UDP port 2100:
+Verify that the DTLS 1.2 PSK engine can drive your Hue lights directly over UDP port 2100:
 
 ```bash
 cargo run -- test-pattern --config config.json
@@ -205,10 +242,18 @@ ssh root@192.168.1.149 'systemctl restart lg-hue-sync'
 
 ```json
 {
+  "hue_enabled": true,
   "bridge_ip": "192.168.1.100",
   "username": "your-hue-application-username",
   "clientkey": "your-32-char-dtls-psk-key",
   "entertainment_area_id": "93f225c7-96f9-40cd-afdc-89a779615607",
+  "nanoleaf": {
+    "enabled": true,
+    "ip": "192.168.1.150",
+    "auth_token": "your-nanoleaf-api-token",
+    "udp_port": 60222,
+    "segments": 30
+  },
   "fps": 0,
   "brightness_multiplier": 1.0,
   "use_xy_gamut": true,
@@ -227,8 +272,10 @@ ssh root@192.168.1.149 'systemctl restart lg-hue-sync'
 ```
 
 ### Key Configuration Knobs
+* **`"hue_enabled"` & `"nanoleaf"`**: Enable or disable Philips Hue or Nanoleaf 4D independently or run both in lockstep.
 * **`"fps": 0` (Auto Source Matching)**: Automatically queries the webOS display pipeline to match your video source refresh rate (23.976 / 24.0 / 29.97 / 30.0 / 50.0 / 60.0 Hz). When playing 120 Hz VRR games, it automatically clamps to the Bridge's 60 Hz hardware limit.
-* **`"zones"`**: Automatically populated by `cargo run -- pair` using your 3D room coordinates configured in the official Philips Hue app. Depth ($Y$) and height ($Z$) are intelligently mapped: front-stage lights sample tight screen borders, while rear surround lights sample diffuse ambient scene reflections.
+* **`"zones"`**: Automatically populated by `cargo run -- pair` or `cargo run -- sync-hue` using your 3D room coordinates from the Philips Hue app. Depth ($Y$) and height ($Z$) are intelligently mapped: front-stage lights sample tight screen borders, while rear surround lights sample diffuse ambient scene reflections.
+* **`"nanoleaf.segments"`**: Number of addressable perimeter LED zones along your TV edges (default 30 for standard 4D strips). Automatically distributed around Left, Top, Right, and Bottom edges based on 16:9 aspect ratio.
 
 ---
 

@@ -1,0 +1,9 @@
+[build]
+# Default to armv7 for LG webOS 6.x / Alpha 9 Gen 4
+# target = "armv7-unknown-linux-gnueabihf"
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+
+[target.armv7-unknown-linux-musleabihf]
+linker = "arm-linux-musleabihf-gcc"

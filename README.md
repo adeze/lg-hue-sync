@@ -209,7 +209,7 @@ ssh root@192.168.1.149 'systemctl restart lg-hue-sync'
   "username": "your-hue-application-username",
   "clientkey": "your-32-char-dtls-psk-key",
   "entertainment_area_id": "93f225c7-96f9-40cd-afdc-89a779615607",
-  "fps": 24,
+  "fps": 0,
   "brightness_multiplier": 1.0,
   "use_xy_gamut": true,
   "hdr_tone_mapping": true,
@@ -225,6 +225,10 @@ ssh root@192.168.1.149 'systemctl restart lg-hue-sync'
   ]
 }
 ```
+
+### Key Configuration Knobs
+* **`"fps": 0` (Auto Source Matching)**: Automatically queries the webOS display pipeline to match your video source refresh rate (23.976 / 24.0 / 29.97 / 30.0 / 50.0 / 60.0 Hz). When playing 120 Hz VRR games, it automatically clamps to the Bridge's 60 Hz hardware limit.
+* **`"zones"`**: Automatically populated by `cargo run -- pair` using your 3D room coordinates configured in the official Philips Hue app. Depth ($Y$) and height ($Z$) are intelligently mapped: front-stage lights sample tight screen borders, while rear surround lights sample diffuse ambient scene reflections.
 
 ---
 

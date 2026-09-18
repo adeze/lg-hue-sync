@@ -16,20 +16,31 @@ pub struct LightZone {
 }
 
 impl LightZone {
-    #[allow(dead_code)]
+    /// Maps 3D room coordinates [X, Y, Z] from Philips Hue Entertainment API into a 2D screen sampling box.
+    /// - X: -1.0 (left wall) to +1.0 (right wall)
+    /// - Y: -1.0 (behind listening seat) to +1.0 (front TV wall)
+    /// - Z: -1.0 (floor) to +1.0 (ceiling)
     pub fn from_3d_position(channel_id: u8, name: &str, pos: [f32; 3]) -> Self {
-        // Hue Entertainment coordinate space:
-        // X: -1.0 (left) to 1.0 (right)
-        // Y: -1.0 (behind) to 1.0 (front)
-        // Z: -1.0 (bottom) to 1.0 (top)
-        let center_x = (pos[0] * 0.5 + 0.5).clamp(0.0, 1.0);
-        let center_y = (1.0 - (pos[2] * 0.5 + 0.5)).clamp(0.0, 1.0);
+        let x = pos[0].clamp(-1.0, 1.0);
+        let y = pos[1].clamp(-1.0, 1.0);
+        let z = pos[2].clamp(-1.0, 1.0);
 
-        let span = 0.30;
-        let x_min = (center_x - span * 0.5).clamp(0.0, 1.0);
-        let x_max = (center_x + span * 0.5).clamp(0.0, 1.0);
-        let y_min = (center_y - span * 0.5).clamp(0.0, 1.0);
-        let y_max = (center_y + span * 0.5).clamp(0.0, 1.0);
+        // 1. Calculate base 2D screen center (X and Z)
+        let center_x = (x * 0.5 + 0.5).clamp(0.0, 1.0);
+        // Invert Z so +1.0 (ceiling/high) maps to top of screen (Y=0.0 in raster space)
+        let center_y = (1.0 - (z * 0.5 + 0.5)).clamp(0.0, 1.0);
+
+        // 2. Depth scaling (Y-axis):
+        // Front lights (near TV wall, Y >= 0.5): narrow, sharp directional span (25% screen box).
+        // Rear/surround lights (behind seat, Y < 0.2): expand span into a wide diffuse ambient zone (up to 70%).
+        let depth_factor = ((1.0 - y) * 0.5).clamp(0.0, 1.0); // 0.0 at TV wall, 1.0 behind couch
+        let span_x = 0.25 + 0.40 * depth_factor;
+        let span_y = 0.25 + 0.35 * depth_factor;
+
+        let x_min = (center_x - span_x * 0.5).clamp(0.0, 1.0);
+        let x_max = (center_x + span_x * 0.5).clamp(0.0, 1.0);
+        let y_min = (center_y - span_y * 0.5).clamp(0.0, 1.0);
+        let y_max = (center_y + span_y * 0.5).clamp(0.0, 1.0);
 
         Self {
             channel_id,

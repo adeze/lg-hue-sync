@@ -12,7 +12,7 @@ use std::time::Duration;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use capture::create_capture;
+use capture::{create_capture, detect_source_fps};
 use color::{RgbColor, ZoneSampler};
 use config::Config;
 use hue::{set_stream_active, HueDtlsClient, HueStreamPacketBuilder};
@@ -108,13 +108,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     );
     let mut packet_builder = HueStreamPacketBuilder::new(Some(config.entertainment_area_id.clone()));
 
-    // Bound framerate between 20 and 60 Hz (supports 23.976, 24, 25, 29.97, 30, 50, 60 fps)
-    let target_fps = (config.fps as f64).clamp(20.0, 60.0);
-    let frame_interval = Duration::from_secs_f64(1.0 / target_fps);
+    // Determine target framerate (supports auto-matching source refresh rate 23.976..60.0 Hz)
+    let detected_fps = if config.fps == 0 { detect_source_fps() } else { None };
+    let initial_fps = detected_fps.unwrap_or(config.fps as f64);
+    let mut target_fps = initial_fps.clamp(20.0, 60.0);
+    let mut frame_interval = Duration::from_secs_f64(1.0 / target_fps);
+
     info!(
-        "Entering sync loop at {:.2} FPS ({:.2} ms cadence, mode: {}, HDR tone-mapping: {}, letterbox: {}, zones: {})...",
+        "Entering sync loop at {:.2} FPS ({:.2} ms cadence{}, mode: {}, HDR tone-mapping: {}, letterbox: {}, zones: {})...",
         target_fps,
         frame_interval.as_secs_f64() * 1000.0,
+        if detected_fps.is_some() { " [source auto-matched]" } else { "" },
         if config.use_xy_gamut { "CIE 1931 xy (Gamut C)" } else { "sRGB" },
         config.hdr_tone_mapping,
         config.letterbox_detection,
@@ -151,6 +155,18 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     break;
                 }
                 sampler.set_smoothing_factor(state.smoothing_factor);
+            }
+
+            // In auto FPS mode, dynamically update cadence if TV source rate changed (e.g. film started)
+            if config.fps == 0 {
+                if let Some(new_fps) = detect_source_fps() {
+                    let clamped = new_fps.clamp(20.0, 60.0);
+                    if (clamped - target_fps).abs() > 0.5 {
+                        target_fps = clamped;
+                        frame_interval = Duration::from_secs_f64(1.0 / target_fps);
+                        info!("Video source timing changed: adapting sync cadence to {:.2} FPS", target_fps);
+                    }
+                }
             }
         }
 
@@ -370,7 +386,7 @@ async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
         },
     };
 
-    let (username, clientkey, area_id) = hue::pair_bridge(&bridge_ip, 45)?;
+    let (username, clientkey, area_id, discovered_zones) = hue::pair_bridge(&bridge_ip, 45)?;
     let mut config = if output.exists() {
         Config::load(&output).unwrap_or_else(|_| Config::new_default(&bridge_ip, &username, &clientkey, &area_id))
     } else {
@@ -381,6 +397,9 @@ async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
     config.username = username;
     config.clientkey = clientkey;
     config.entertainment_area_id = area_id;
+    if !discovered_zones.is_empty() {
+        config.zones = discovered_zones;
+    }
 
     config.save(&output)?;
     println!("\n[+] Configuration and Hue credentials successfully saved to {:?}", output);

@@ -143,3 +143,29 @@ pub fn create_capture(width: u32, height: u32) -> Box<dyn ScreenCapture> {
         }
     }
 }
+
+/// Detects the active HDMI / video source framerate from webOS system display timing
+pub fn detect_source_fps() -> Option<f64> {
+    // Queries webOS display timing via luna-send if available on the TV
+    if std::path::Path::new("/usr/bin/luna-send").exists() {
+        if let Ok(output) = std::process::Command::new("/usr/bin/luna-send")
+            .args(["-n", "1", "luna://com.webos.service.tv.display/getVideoInfo", "{}"])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    // Check standard webOS video timing fields
+                    if let Some(fps_str) = val.get("frameRate").and_then(|v| v.as_str()) {
+                        if let Ok(fps) = fps_str.parse::<f64>() {
+                            return Some(fps);
+                        }
+                    }
+                    if let Some(fps_num) = val.get("frameRate").and_then(|v| v.as_f64()) {
+                        return Some(fps_num);
+                    }
+                }
+            }
+        }
+    }
+    None
+}

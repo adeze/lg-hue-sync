@@ -30,7 +30,10 @@ pub fn discover_bridge() -> Result<String> {
 }
 
 /// Polls the bridge for pushlink button press and authenticates
-pub fn pair_bridge(bridge_ip: &str, timeout_secs: u64) -> Result<(String, String, String)> {
+pub fn pair_bridge(
+    bridge_ip: &str,
+    timeout_secs: u64,
+) -> Result<(String, String, String, Vec<crate::config::LightZone>)> {
     let url = format!("http://{}/api", bridge_ip);
     let payload = serde_json::json!({
         "devicetype": "lg-hue-sync#tv",
@@ -76,7 +79,7 @@ pub fn pair_bridge(bridge_ip: &str, timeout_secs: u64) -> Result<(String, String
         return Err(anyhow!("Timed out waiting for Hue Bridge button press"));
     }
 
-    // Query Entertainment Areas
+    // Query Entertainment Areas and 3D light locations
     let groups_url = format!("http://{}/api/{}/groups", bridge_ip, username);
     let groups_resp = ureq::get(&groups_url)
         .call()
@@ -84,29 +87,53 @@ pub fn pair_bridge(bridge_ip: &str, timeout_secs: u64) -> Result<(String, String
 
     let groups_json: Value = groups_resp.into_json()?;
     let mut area_id = "1".to_string();
+    let mut discovered_zones: Vec<crate::config::LightZone> = Vec::new();
 
     if let Value::Object(groups) = groups_json {
         let mut entertainment_areas = Vec::new();
         for (gid, gdata) in groups {
             if gdata.get("type").and_then(|v| v.as_str()) == Some("Entertainment") {
                 let name = gdata.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed");
-                entertainment_areas.push((gid, name.to_string()));
+                let locations = gdata.get("locations").cloned();
+                entertainment_areas.push((gid, name.to_string(), locations));
             }
         }
 
         if !entertainment_areas.is_empty() {
             println!("\nFound {} Entertainment Area(s):", entertainment_areas.len());
-            for (i, (gid, name)) in entertainment_areas.iter().enumerate() {
+            for (i, (gid, name, _)) in entertainment_areas.iter().enumerate() {
                 println!("  [{}] ID: {} - {}", i + 1, gid, name);
             }
             area_id = entertainment_areas[0].0.clone();
             println!("Auto-selected: '{}' (ID: {})", entertainment_areas[0].1, area_id);
+
+            // If locations are present, auto-derive 2D screen sampling zones using 3D coordinates
+            if let Some(Value::Object(locs)) = &entertainment_areas[0].2 {
+                for (channel_idx, (light_id, coords_val)) in locs.iter().enumerate() {
+                    if let Some(coords_arr) = coords_val.as_array() {
+                        if coords_arr.len() >= 3 {
+                            let x = coords_arr[0].as_f64().unwrap_or(0.0) as f32;
+                            let y = coords_arr[1].as_f64().unwrap_or(0.0) as f32;
+                            let z = coords_arr[2].as_f64().unwrap_or(0.0) as f32;
+                            let zone_name = format!("Light {}", light_id);
+                            let zone = crate::config::LightZone::from_3d_position(
+                                channel_idx as u8,
+                                &zone_name,
+                                [x, y, z],
+                            );
+                            println!("  -> Mapped Light {} at 3D [X:{:.2}, Y:{:.2}, Z:{:.2}] to screen zone [{:.2}..{:.2}, {:.2}..{:.2}]",
+                                light_id, x, y, z, zone.x_min, zone.x_max, zone.y_min, zone.y_max);
+                            discovered_zones.push(zone);
+                        }
+                    }
+                }
+            }
         } else {
             println!("\n[!] Warning: No Entertainment Areas found. Please configure one in Hue app.");
         }
     }
 
-    Ok((username, clientkey, area_id))
+    Ok((username, clientkey, area_id, discovered_zones))
 }
 
 /// Activates or deactivates the entertainment streaming session on the Hue Bridge

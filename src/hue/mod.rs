@@ -138,3 +138,25 @@ pub fn set_stream_active(
     info!("Bridge response: {}", text);
     Ok(())
 }
+
+/// Queries whether the entertainment area is currently active on the Hue Bridge
+pub fn get_stream_status(
+    bridge_ip: &str,
+    username: &str,
+    group_id: &str,
+) -> Result<bool> {
+    let url = format!("http://{}/api/{}/groups/{}", bridge_ip, username, group_id);
+    let resp = ureq::get(&url)
+        .timeout(Duration::from_secs(3))
+        .call()
+        .with_context(|| format!("Failed to query group status from {}", url))?;
+
+    let json: Value = resp.into_json()?;
+    let is_active = json
+        .get("stream")
+        .and_then(|s| s.get("active"))
+        .and_then(|a| a.as_bool())
+        .unwrap_or(false);
+
+    Ok(is_active)
+}

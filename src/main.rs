@@ -131,6 +131,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut static_frame_count: u32 = 0;
     let mut last_heartbeat = tokio::time::Instant::now();
     let mut last_watchdog = tokio::time::Instant::now();
+    let mut last_status_check = tokio::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
         let loop_start = tokio::time::Instant::now();
@@ -139,6 +140,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         if last_watchdog.elapsed() >= Duration::from_secs(2) {
             let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
             last_watchdog = tokio::time::Instant::now();
+        }
+
+        // Periodically verify if the user stopped sync from the official Hue mobile app (every 5s)
+        if last_status_check.elapsed() >= Duration::from_secs(5) {
+            last_status_check = tokio::time::Instant::now();
+            if let Ok(is_active) = hue::get_stream_status(&config.bridge_ip, &config.username, &config.entertainment_area_id) {
+                if !is_active {
+                    info!("Sync was stopped externally from the Philips Hue app. Exiting sync loop gracefully...");
+                    break;
+                }
+            }
         }
 
         match capture.acquire_frame() {

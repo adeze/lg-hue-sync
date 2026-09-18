@@ -69,6 +69,25 @@ Official Philips Hue Sync apps are only available on 2024+ LG TVs running webOS 
 
 ---
 
+## Comparison: `lg-hue-sync` vs. Official Philips Hue Sync TV App
+
+| Feature / Architecture | Official Hue Sync TV App (webOS 24+) | `lg-hue-sync` Daemon (LG C1 / webOS 5-6) |
+| :--- | :--- | :--- |
+| **TV Compatibility** | **2024+ models only** (Locked out on C1, C2, C3, CX) | **Any rooted webOS TV** (Native support for C1 Alpha 9 Gen 4) |
+| **Cost** | **$129.99 USD** one-time purchase or $2.99/mo | **$0 (Free & Open Source)** |
+| **Runtime Architecture** | Heavy Chromium WebApp + Node/JS bridge | **Pure headless compiled Rust binary** (zero web bloat) |
+| **Memory Consumption** | **$\approx 85\text{–}140\text{ MB}$** (Heavy RAM footprint) | **$\approx 6\text{–}8\text{ MB}$** (15x less memory) |
+| **CPU Utilization** | $\approx 4\text{–}7\%$ CPU | **$< 1.2\%$ CPU** |
+| **Cadence Matching** | Fixed internal 50/60 Hz timer | **Native 23.976, 24.0, 29.97, 30.0, 60.0 Hz frame-cadence** |
+| **Letterbox Detection** | Fixed $16:9$ sampling (samples black bars on movies) | **Dynamic real-time auto-crop** (re-anchors to $2.39:1 / 2.0:1$ film frame) |
+| **OLED Near-Black Floor** | Faint 1–2% grey light flicker in dark scenes | **OLED Near-Black Noise Gate** (cuts off below 2% luma to true black) |
+| **Color Dominance** | Proprietary color mixing | **Chroma-weighted saturation boost** ($1.0 + \gamma \cdot S^2$) |
+| **HDR10 / Dolby Vision** | Dynamic metadata-based tone mapping | **Reinhard Non-Linear HDR Curve** (prevents highlight burnout) |
+| **Network Traffic** | Continuous fixed-rate UDP | **Adaptive Deadband Throttling** (drops to 2 Hz heartbeat on pause) |
+| **Lifecycle Control** | Managed in-app | **Auto TV sleep/wake, LG Magic Remote Quick Access, and Hue Mobile App** |
+
+---
+
 ## Hardware & Content Compatibility
 
 | Source | Supported? | Notes |

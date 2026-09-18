@@ -44,13 +44,17 @@ echo "[TV] Checking root identity: $(whoami)"
 # Query Homebrew service
 HB_SERVICE="luna://org.webosbrew.hbchannel.service"
 
-# Install PicCap
+# Install PicCap (video grabber frontend)
 echo "[TV] Requesting PicCap installation..."
 luna-send -n 1 "$HB_SERVICE/install" '{"id":"org.webosbrew.piccap"}' || echo "[TV] Warning: luna install piccap returned non-zero (may already be installed)"
 
-# Install Hyperion.NG
+# Install HyperHDR Loader (modern HDR/Dolby Vision tone-mapping engine)
+echo "[TV] Requesting HyperHDR Loader installation..."
+luna-send -n 1 "$HB_SERVICE/install" '{"id":"org.webosbrew.hyperhdr.loader"}' || echo "[TV] Warning: luna install hyperhdr returned non-zero"
+
+# Also install Hyperion.NG as alternative
 echo "[TV] Requesting Hyperion.NG installation..."
-luna-send -n 1 "$HB_SERVICE/install" '{"id":"org.webosbrew.hyperion.ng"}' || echo "[TV] Warning: luna install hyperion returned non-zero (may already be installed)"
+luna-send -n 1 "$HB_SERVICE/install" '{"id":"org.webosbrew.hyperion.ng"}' || echo "[TV] Warning: luna install hyperion returned non-zero"
 
 # Wait for package manager to settle
 sleep 3
@@ -76,8 +80,8 @@ cat << 'CONFIG_EOF' > /tmp/piccap_config.json
 CONFIG_EOF
 
 # Launch services
-echo "[TV] Starting Hyperion.NG service..."
-luna-send -n 1 luna://com.webos.applicationManager/launch '{"id":"org.webosbrew.hyperion.ng"}' || true
+echo "[TV] Starting HyperHDR Loader service..."
+luna-send -n 1 luna://com.webos.applicationManager/launch '{"id":"org.webosbrew.hyperhdr.loader"}' || luna-send -n 1 luna://com.webos.applicationManager/launch '{"id":"org.webosbrew.hyperion.ng"}' || true
 
 echo "[TV] Starting PicCap service..."
 luna-send -n 1 luna://com.webos.applicationManager/launch '{"id":"org.webosbrew.piccap"}' || true
@@ -87,10 +91,11 @@ REMOTEEOC
 
 echo ""
 echo "==================================================================="
-echo "[+] SUCCESS: PicCap and Hyperion.NG installed and running on TV!"
+echo "[+] SUCCESS: PicCap and HyperHDR / Hyperion installed on TV!"
 echo "==================================================================="
-echo "1. Verify Hyperion Web UI in your browser:"
-echo "   http://$TV_IP:8090"
+echo "1. Verify Web UI in your browser:"
+echo "   HyperHDR: http://$TV_IP:8090 (or 8092)"
+echo "   Hyperion: http://$TV_IP:8090"
 echo ""
 echo "2. Next Step: Automatically pair your Philips Hue Bridge:"
 echo "   uv run scripts/pair_hue.py --tv-ip $TV_IP"

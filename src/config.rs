@@ -32,11 +32,28 @@ pub enum ConfigError {
 pub struct LightZone {
     pub channel_id: u8,
     pub name: String,
+    /// Hue V2 owner device for this channel. Empty on pre-V2 configurations.
+    #[serde(default)]
+    pub hue_device_id: Option<String>,
+    /// Zero-based gradient segment index, when the light exposes segments.
+    #[serde(default)]
+    pub hue_segment_index: Option<u8>,
+    #[serde(default)]
+    pub hue_segment_count: Option<u8>,
+    /// Bounded, per-device output calibration; shared by all of a gradient light's channels.
+    #[serde(default = "default_output_trim")]
+    pub output_trim: f32,
     /// Normalized coordinates: 0.0 to 1.0
     pub x_min: f32,
     pub x_max: f32,
     pub y_min: f32,
     pub y_max: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HueLightTrim {
+    pub device_id: String,
+    pub output_trim: f32,
 }
 
 impl LightZone {
@@ -69,6 +86,10 @@ impl LightZone {
         Self {
             channel_id,
             name: name.to_string(),
+            hue_device_id: None,
+            hue_segment_index: None,
+            hue_segment_count: None,
+            output_trim: default_output_trim(),
             x_min,
             x_max,
             y_min,
@@ -114,7 +135,8 @@ pub struct Config {
     /// SHA-256 fingerprint of the bridge's local V2 HTTPS certificate.
     #[serde(default)]
     pub hue_bridge_certificate_sha256: Option<String>,
-    /// Legacy V1 group ID used only for stream activation and state queries.
+    /// Deprecated V1 selector retained only to load existing configurations.
+    /// New configurations store the V2 UUID here as well as in `entertainment_configuration_id`.
     pub entertainment_area_id: String,
     /// V2 entertainment configuration UUID embedded in HueStream packets.
     #[serde(default)]
@@ -227,6 +249,10 @@ fn default_zones() -> Vec<LightZone> {
         LightZone {
             channel_id: 0,
             name: "Left".to_string(),
+            hue_device_id: None,
+            hue_segment_index: None,
+            hue_segment_count: None,
+            output_trim: default_output_trim(),
             x_min: 0.0,
             x_max: 0.25,
             y_min: 0.1,
@@ -235,6 +261,10 @@ fn default_zones() -> Vec<LightZone> {
         LightZone {
             channel_id: 1,
             name: "Top".to_string(),
+            hue_device_id: None,
+            hue_segment_index: None,
+            hue_segment_count: None,
+            output_trim: default_output_trim(),
             x_min: 0.2,
             x_max: 0.8,
             y_min: 0.0,
@@ -243,6 +273,10 @@ fn default_zones() -> Vec<LightZone> {
         LightZone {
             channel_id: 2,
             name: "Right".to_string(),
+            hue_device_id: None,
+            hue_segment_index: None,
+            hue_segment_count: None,
+            output_trim: default_output_trim(),
             x_min: 0.75,
             x_max: 1.0,
             y_min: 0.1,
@@ -251,6 +285,10 @@ fn default_zones() -> Vec<LightZone> {
         LightZone {
             channel_id: 3,
             name: "Bottom".to_string(),
+            hue_device_id: None,
+            hue_segment_index: None,
+            hue_segment_count: None,
+            output_trim: default_output_trim(),
             x_min: 0.2,
             x_max: 0.8,
             y_min: 0.7,

@@ -623,6 +623,10 @@ mod tests {
         let zone = LightZone {
             channel_id: 0,
             name: "Test".to_string(),
+            hue_device_id: None,
+            hue_segment_index: None,
+            hue_segment_count: None,
+            output_trim: 1.0,
             x_min: 0.0,
             x_max: 1.0,
             y_min: 0.0,
@@ -696,6 +700,10 @@ mod tests {
         let zone = LightZone {
             channel_id: 0,
             name: "Test".to_string(),
+            hue_device_id: None,
+            hue_segment_index: None,
+            hue_segment_count: None,
+            output_trim: 1.0,
             x_min: 0.0,
             x_max: 1.0,
             y_min: 0.0,

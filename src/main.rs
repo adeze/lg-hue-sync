@@ -17,8 +17,8 @@ use tracing_subscriber::FmtSubscriber;
 
 use capture::{create_capture, detect_source_fps, VtCapture};
 use color::{RgbColor, ZoneSampler};
-use config::{Config, ConfigError};
-use hue::{set_stream_active, sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
+use config::{Config, ConfigError, HueLightTrim};
+use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
 use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
 
@@ -96,12 +96,7 @@ async fn main() -> Result<()> {
 }
 
 fn reconnect_hue(config: &Config) -> Result<HueDtlsClient> {
-    set_stream_active(
-        &config.bridge_ip,
-        &config.username,
-        &config.entertainment_area_id,
-        true,
-    )?;
+    set_hue_stream_active(config, true)?;
     HueDtlsClient::connect(&config.bridge_ip, &config.username, &config.clientkey)
 }
 
@@ -111,6 +106,62 @@ fn hue_configuration_id(config: &Config) -> Option<String> {
         .as_deref()
         .filter(|id| id.len() == 36)
         .map(ToOwned::to_owned)
+}
+
+fn set_hue_stream_active(config: &Config, active: bool) -> Result<()> {
+    let configuration_id = hue_configuration_id(config)
+        .ok_or_else(|| anyhow!("Hue V2 Entertainment configuration has not been selected"))?;
+    hue::set_stream_active(
+        &config.bridge_ip,
+        &config.username,
+        &configuration_id,
+        config.hue_bridge_certificate_sha256.as_deref(),
+        active,
+    )
+}
+
+fn retain_hue_output_trims(
+    new_zones: &mut [config::LightZone],
+    previous_zones: &[config::LightZone],
+) {
+    for zone in new_zones {
+        if let Some(device_id) = zone.hue_device_id.as_deref() {
+            if let Some(previous) = previous_zones
+                .iter()
+                .find(|previous| previous.hue_device_id.as_deref() == Some(device_id))
+            {
+                zone.output_trim = previous.output_trim;
+            }
+        }
+    }
+}
+
+fn hue_light_trims(zones: &[config::LightZone]) -> Vec<HueLightTrim> {
+    let mut trims = Vec::new();
+    for zone in zones {
+        if let Some(device_id) = zone.hue_device_id.as_deref() {
+            if !trims
+                .iter()
+                .any(|trim: &HueLightTrim| trim.device_id == device_id)
+            {
+                trims.push(HueLightTrim {
+                    device_id: device_id.to_string(),
+                    output_trim: zone.output_trim,
+                });
+            }
+        }
+    }
+    trims
+}
+
+fn apply_hue_light_trims(zones: &mut [config::LightZone], trims: &[HueLightTrim]) {
+    for zone in zones {
+        if let Some(device_id) = zone.hue_device_id.as_deref() {
+            if let Some(trim) = trims.iter().find(|trim| trim.device_id == device_id) {
+                zone.output_trim = trim.output_trim.clamp(0.25, 1.5);
+            }
+        }
+    }
 }
 
 fn calibration_pattern(state: &SharedState) -> Option<CalibrationPattern> {
@@ -252,14 +303,16 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         match sync_entertainment_areas(
             &config.bridge_ip,
             &config.username,
-            Some(&config.entertainment_area_id),
+            config.entertainment_configuration_id.as_deref(),
             config.hue_bridge_certificate_sha256.as_deref(),
         ) {
             Ok(area) => {
-                config.entertainment_area_id = area.legacy_group_id;
+                let previous_zones = config.zones.clone();
+                config.entertainment_area_id = area.configuration_id.clone();
                 config.entertainment_configuration_id = Some(area.configuration_id);
                 config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
                 config.zones = area.zones;
+                retain_hue_output_trims(&mut config.zones, &previous_zones);
                 if let Err(error) = config.save(&config_path) {
                     warn!(
                         "Resolved Hue V2 configuration but could not persist it: {}",
@@ -444,6 +497,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let initial_settings = LiveSettings {
         brightness_multiplier: config.brightness_multiplier,
         hue_output_brightness: config.hue_output_brightness,
+        hue_light_trims: hue_light_trims(&config.zones),
         nanoleaf_output_brightness: config.nanoleaf_output_brightness,
         saturation_boost: config.saturation_boost,
         peak_weight: config.peak_weight,
@@ -530,19 +584,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         if last_status_check.elapsed() >= Duration::from_secs(5) {
             last_status_check = tokio::time::Instant::now();
             if hue_active && hue_sync_enabled && hue_dtls.is_some() {
-                if let Ok(state) = hue::get_stream_state(
-                    &config.bridge_ip,
-                    &config.username,
-                    &config.entertainment_area_id,
-                ) {
-                    if !state.active {
-                        external_stop = true;
-                    }
-                    if let Some(ref mut s) = hue_sampler {
-                        s.set_smoothing_factor(state.smoothing_factor);
-                    }
-                    if let Some(ref mut ns) = nanoleaf_sampler {
-                        ns.set_smoothing_factor(state.smoothing_factor);
+                if let Some(configuration_id) = hue_configuration_id(&config) {
+                    if let Ok(state) = hue::get_stream_state(
+                        &config.bridge_ip,
+                        &config.username,
+                        &configuration_id,
+                        config.hue_bridge_certificate_sha256.as_deref(),
+                    ) {
+                        if !state.active {
+                            external_stop = true;
+                        }
+                        if let Some(ref mut s) = hue_sampler {
+                            s.set_smoothing_factor(state.smoothing_factor);
+                        }
+                        if let Some(ref mut ns) = nanoleaf_sampler {
+                            ns.set_smoothing_factor(state.smoothing_factor);
+                        }
                     }
                 }
             }
@@ -557,12 +614,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
             // Deactivate Hue stream on bridge if web requested stop
             if web_stop_requested && hue_active {
-                let _ = set_stream_active(
-                    &config.bridge_ip,
-                    &config.username,
-                    &config.entertainment_area_id,
-                    false,
-                );
+                let _ = set_hue_stream_active(&config, false);
             }
             hue_dtls = None;
             shared_state.hue_connected.store(false, Ordering::Relaxed);
@@ -580,13 +632,16 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 let start_requested = shared_state.request_start.swap(false, Ordering::SeqCst);
                 let mut app_reactivated = false;
                 if !start_requested && hue_active {
-                    if let Ok(st) = hue::get_stream_state(
-                        &config.bridge_ip,
-                        &config.username,
-                        &config.entertainment_area_id,
-                    ) {
-                        if st.active {
-                            app_reactivated = true;
+                    if let Some(configuration_id) = hue_configuration_id(&config) {
+                        if let Ok(st) = hue::get_stream_state(
+                            &config.bridge_ip,
+                            &config.username,
+                            &configuration_id,
+                            config.hue_bridge_certificate_sha256.as_deref(),
+                        ) {
+                            if st.active {
+                                app_reactivated = true;
+                            }
                         }
                     }
                 }
@@ -662,6 +717,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             let live_st = shared_state.current_settings.read().unwrap().clone();
             current_hue_brightness = live_st.brightness_multiplier * live_st.hue_output_brightness;
             current_use_xy = live_st.use_xy_gamut;
+            apply_hue_light_trims(&mut config.zones, &live_st.hue_light_trims);
+            *shared_state.hue_zones.write().unwrap() = config.zones.clone();
             if hue_sync_enabled != live_st.hue_sync_enabled {
                 hue_sync_enabled = live_st.hue_sync_enabled;
                 if hue_sync_enabled && shared_state.is_syncing.load(Ordering::SeqCst) {
@@ -677,12 +734,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         }
                     }
                 } else {
-                    let _ = set_stream_active(
-                        &config.bridge_ip,
-                        &config.username,
-                        &config.entertainment_area_id,
-                        false,
-                    );
+                    let _ = set_hue_stream_active(&config, false);
                     hue_dtls = None;
                     shared_state.hue_connected.store(false, Ordering::Relaxed);
                 }
@@ -798,25 +850,21 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             match sync_entertainment_areas(
                 &config.bridge_ip,
                 &config.username,
-                Some(&config.entertainment_area_id),
+                config.entertainment_configuration_id.as_deref(),
                 config.hue_bridge_certificate_sha256.as_deref(),
             ) {
                 Ok(area) if !area.zones.is_empty() => {
-                    let group_changed = config.entertainment_area_id != area.legacy_group_id;
                     let configuration_changed = config.entertainment_configuration_id.as_deref()
                         != Some(&area.configuration_id);
-                    if group_changed {
-                        let _ = set_stream_active(
-                            &config.bridge_ip,
-                            &config.username,
-                            &config.entertainment_area_id,
-                            false,
-                        );
+                    if configuration_changed {
+                        let _ = set_hue_stream_active(&config, false);
                     }
-                    config.entertainment_area_id = area.legacy_group_id;
+                    let previous_zones = config.zones.clone();
+                    config.entertainment_area_id = area.configuration_id.clone();
                     config.entertainment_configuration_id = Some(area.configuration_id);
                     config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
                     config.zones = area.zones;
+                    retain_hue_output_trims(&mut config.zones, &previous_zones);
                     *shared_state.hue_zones.write().unwrap() = config.zones.clone();
                     let live_st = shared_state.current_settings.read().unwrap().clone();
                     hue_sampler = Some(ZoneSampler::new(
@@ -837,7 +885,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         sampler.set_gamma(live_st.gamma);
                         sampler.set_max_color_step(live_st.max_color_step);
                     }
-                    if group_changed || configuration_changed {
+                    if configuration_changed {
                         hue_packet_builder =
                             Some(HueStreamPacketBuilder::new(hue_configuration_id(&config)));
                         match reconnect_hue(&config) {
@@ -974,17 +1022,23 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         let channels: Vec<(u8, (u16, u16, u16))> = sampled_zones
                             .iter()
                             .map(|(channel_id, color)| {
+                                let channel_trim = config
+                                    .zones
+                                    .iter()
+                                    .find(|zone| zone.channel_id == *channel_id)
+                                    .map(|zone| zone.output_trim)
+                                    .unwrap_or(1.0);
                                 let scaled = if calibration.is_some() {
                                     *color
                                 } else {
                                     RgbColor::new(
-                                        ((color.r as f32) * current_hue_brightness)
+                                        ((color.r as f32) * current_hue_brightness * channel_trim)
                                             .clamp(0.0, 255.0)
                                             as u8,
-                                        ((color.g as f32) * current_hue_brightness)
+                                        ((color.g as f32) * current_hue_brightness * channel_trim)
                                             .clamp(0.0, 255.0)
                                             as u8,
-                                        ((color.b as f32) * current_hue_brightness)
+                                        ((color.b as f32) * current_hue_brightness * channel_trim)
                                             .clamp(0.0, 255.0)
                                             as u8,
                                     )
@@ -1205,12 +1259,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     // Cleanup: deactivate Hue stream
     if hue_active {
         info!("Deactivating entertainment area stream on Hue Bridge...");
-        let _ = set_stream_active(
-            &config.bridge_ip,
-            &config.username,
-            &config.entertainment_area_id,
-            false,
-        );
+        let _ = set_hue_stream_active(&config, false);
     }
 
     web_shutdown.cancel();
@@ -1230,12 +1279,7 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
         config.bridge_ip
     );
 
-    set_stream_active(
-        &config.bridge_ip,
-        &config.username,
-        &config.entertainment_area_id,
-        true,
-    )?;
+    set_hue_stream_active(&config, true)?;
 
     let mut dtls_client =
         HueDtlsClient::connect(&config.bridge_ip, &config.username, &config.clientkey)?;
@@ -1260,12 +1304,7 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(20)).await; // 50 Hz fast cadence
     }
 
-    set_stream_active(
-        &config.bridge_ip,
-        &config.username,
-        &config.entertainment_area_id,
-        false,
-    )?;
+    set_hue_stream_active(&config, false)?;
 
     info!("[+] Hue test pattern completed successfully!");
     Ok(())
@@ -1385,20 +1424,22 @@ async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
     let (username, clientkey, area) = hue::pair_bridge(&bridge_ip, 45)?;
     let mut config = if output.exists() {
         Config::load(&output).unwrap_or_else(|_| {
-            Config::new_default(&bridge_ip, &username, &clientkey, &area.legacy_group_id)
+            Config::new_default(&bridge_ip, &username, &clientkey, &area.configuration_id)
         })
     } else {
-        Config::new_default(&bridge_ip, &username, &clientkey, &area.legacy_group_id)
+        Config::new_default(&bridge_ip, &username, &clientkey, &area.configuration_id)
     };
 
     config.bridge_ip = bridge_ip;
     config.username = username;
     config.clientkey = clientkey;
-    config.entertainment_area_id = area.legacy_group_id;
+    let previous_zones = config.zones.clone();
+    config.entertainment_area_id = area.configuration_id.clone();
     config.entertainment_configuration_id = Some(area.configuration_id);
     config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
     if !area.zones.is_empty() {
         config.zones = area.zones;
+        retain_hue_output_trims(&mut config.zones, &previous_zones);
     }
 
     config.save(&output)?;
@@ -1424,11 +1465,13 @@ async fn run_sync_hue(config_path: PathBuf, target_area: Option<String>) -> Resu
         config.hue_bridge_certificate_sha256.as_deref(),
     )?;
 
-    config.entertainment_area_id = area.legacy_group_id;
+    let previous_zones = config.zones.clone();
+    config.entertainment_area_id = area.configuration_id.clone();
     config.entertainment_configuration_id = Some(area.configuration_id);
     config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
     if !area.zones.is_empty() {
         config.zones = area.zones;
+        retain_hue_output_trims(&mut config.zones, &previous_zones);
     }
     config.save(&config_path)?;
 

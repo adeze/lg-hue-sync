@@ -1,6 +1,6 @@
 use crate::{
     color::RgbColor,
-    config::{Config, ConfigError, LightZone, NanoleafConfig},
+    config::{Config, ConfigError, HueLightTrim, LightZone, NanoleafConfig},
     hue, nanoleaf,
 };
 use axum::{
@@ -26,6 +26,8 @@ pub struct LiveSettings {
     pub brightness_multiplier: f32,
     #[serde(default = "default_output_trim")]
     pub hue_output_brightness: f32,
+    #[serde(default)]
+    pub hue_light_trims: Vec<HueLightTrim>,
     #[serde(default = "default_output_trim")]
     pub nanoleaf_output_brightness: f32,
     pub saturation_boost: f32,
@@ -365,10 +367,16 @@ async fn hue_areas(State(state): State<AppState>) -> Result<Json<HueAreasRespons
         if config.bridge_ip.is_empty() || config.username.is_empty() {
             return Err("Pair a Hue Bridge before selecting an Entertainment Area".to_string());
         }
-        let areas = hue::list_entertainment_areas(&config.bridge_ip, &config.username)
-            .map_err(|error| error.to_string())?;
+        let areas = hue::list_entertainment_areas(
+            &config.bridge_ip,
+            &config.username,
+            config.hue_bridge_certificate_sha256.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
         Ok(HueAreasResponse {
-            selected_area_id: config.entertainment_area_id,
+            selected_area_id: config
+                .entertainment_configuration_id
+                .unwrap_or(config.entertainment_area_id),
             areas,
         })
     })
@@ -400,10 +408,21 @@ async fn select_hue_area(
             config.hue_bridge_certificate_sha256.as_deref(),
         )
         .map_err(|error| error.to_string())?;
-        config.entertainment_area_id = area.legacy_group_id;
+        let previous_zones = config.zones.clone();
+        config.entertainment_area_id = area.configuration_id.clone();
         config.entertainment_configuration_id = Some(area.configuration_id);
         config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
         config.zones = area.zones;
+        for zone in &mut config.zones {
+            if let Some(device_id) = zone.hue_device_id.as_deref() {
+                if let Some(previous) = previous_zones
+                    .iter()
+                    .find(|previous| previous.hue_device_id.as_deref() == Some(device_id))
+                {
+                    zone.output_trim = previous.output_trim;
+                }
+            }
+        }
         config.save(&config_path).map_err(|error| error.to_string())
     })
     .await
@@ -447,7 +466,7 @@ async fn pair_hue(
         config.clientkey = clientkey;
         config.hue_enabled = true;
         config.hue_sync_enabled = true;
-        config.entertainment_area_id = area.legacy_group_id;
+        config.entertainment_area_id = area.configuration_id.clone();
         config.entertainment_configuration_id = Some(area.configuration_id);
         config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
         config.zones = area.zones;

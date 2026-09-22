@@ -177,6 +177,7 @@
       <label class="switch"><input type="checkbox" id="toggleHueSync" checked onchange="updateSettings()"><span class="slider"></span></label>
     </div>
     <div class="control-group" style="margin-top:14px"><div class="control-header"><span>Hue Output Trim</span><span class="control-val" id="valHueOutput">1.00x</span></div><input type="range" id="sliderHueOutput" aria-label="Hue Output Trim" min="0.25" max="2.0" step="0.05" value="1.0" oninput="updateSettings()"></div>
+    <div id="hueLightTrimControls"></div>
     <div class="toggle-desc" id="hueSetupStatus" style="margin-top:12px"></div>
   </div>
 
@@ -378,7 +379,57 @@
 
     const hueZoneOverlay = document.getElementById('hueZoneOverlay');
     let hueZoneSignature = '';
+    let hueLightTrimSignature = '';
     let temporalResponse = { rise: 0.35, fall: 0.35 };
+
+    function updateHueLightTrims(zones, trims) {
+      const controls = document.getElementById('hueLightTrimControls');
+      const lights = new Map();
+      for (const zone of zones || []) {
+        if (!zone.hue_device_id) continue;
+        const label = zone.name.replace(/ · Segment \d+$/, '');
+        if (!lights.has(zone.hue_device_id)) lights.set(zone.hue_device_id, label);
+      }
+      const signature = Array.from(lights.entries()).map(([id, label]) => id + ':' + label).join('|');
+      if (signature !== hueLightTrimSignature) {
+        controls.replaceChildren();
+        if (lights.size) {
+          const note = document.createElement('div');
+          note.className = 'toggle-desc';
+          note.style.marginTop = '12px';
+          note.textContent = 'Per-light calibration — applies equally to all segments of a gradient light.';
+          controls.appendChild(note);
+          for (const [deviceId, label] of lights) {
+            const group = document.createElement('div');
+            group.className = 'control-group';
+            const header = document.createElement('div');
+            header.className = 'control-header';
+            const title = document.createElement('span');
+            title.textContent = label;
+            const value = document.createElement('span');
+            value.className = 'control-val';
+            value.id = 'hueTrimValue_' + deviceId;
+            header.append(title, value);
+            const input = document.createElement('input');
+            input.type = 'range';
+            input.className = 'hue-light-trim';
+            input.dataset.deviceId = deviceId;
+            input.setAttribute('aria-label', label + ' output trim');
+            input.min = '0.25'; input.max = '1.5'; input.step = '0.05';
+            input.oninput = updateSettings;
+            group.append(header, input);
+            controls.appendChild(group);
+          }
+        }
+        hueLightTrimSignature = signature;
+      }
+      const trimByDevice = new Map((trims || []).map(trim => [trim.device_id, trim.output_trim]));
+      for (const input of controls.querySelectorAll('.hue-light-trim')) {
+        if (document.activeElement !== input) input.value = trimByDevice.get(input.dataset.deviceId) ?? 1.0;
+        const value = document.getElementById('hueTrimValue_' + input.dataset.deviceId);
+        if (value) value.textContent = Number(input.value).toFixed(2) + 'x';
+      }
+    }
 
     function updateHueZones(zones, colors) {
       if (!zones) return;
@@ -396,7 +447,7 @@
           element.style.height = ((zone.y_max - zone.y_min) * 100) + '%';
           const label = document.createElement('span');
           label.className = 'hue-zone-label';
-          label.textContent = '#' + zone.channel_id;
+          label.textContent = zone.name;
           element.appendChild(label);
           hueZoneOverlay.appendChild(element);
         }
@@ -451,6 +502,7 @@
       document.getElementById('statCapture').innerText = data.capture_hardware ? 'libvtcapture (HW ' + data.capture_resolution + ')' : 'Mock (Fallback)';
       document.getElementById('captureResolution').innerText = data.capture_resolution;
       const settings = data.settings;
+      updateHueLightTrims(data.hue_zones, settings.hue_light_trims);
       if (!document.activeElement.matches('input[type="range"]')) {
         document.getElementById('sliderBrightness').value = settings.brightness_multiplier;
         document.getElementById('sliderHueOutput').value = settings.hue_output_brightness;
@@ -530,6 +582,10 @@
     async function updateSettings() {
       const brightness = parseFloat(document.getElementById('sliderBrightness').value);
       const hueOutputBrightness = parseFloat(document.getElementById('sliderHueOutput').value);
+      const hueLightTrims = Array.from(document.querySelectorAll('.hue-light-trim')).map(input => ({
+        device_id: input.dataset.deviceId,
+        output_trim: parseFloat(input.value)
+      }));
       const nanoleafOutputBrightness = parseFloat(document.getElementById('sliderNanoleafOutput').value);
       const saturation = parseFloat(document.getElementById('sliderSaturation').value);
       const peak = parseFloat(document.getElementById('sliderPeak').value);
@@ -557,6 +613,7 @@
       const payload = {
         brightness_multiplier: brightness,
         hue_output_brightness: hueOutputBrightness,
+        hue_light_trims: hueLightTrims,
         nanoleaf_output_brightness: nanoleafOutputBrightness,
         saturation_boost: saturation,
         peak_weight: peak,

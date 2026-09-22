@@ -16,7 +16,6 @@ pub use stream::HueStreamPacketBuilder;
 
 #[derive(Debug, Clone)]
 pub struct EntertainmentArea {
-    pub legacy_group_id: String,
     pub name: String,
     pub configuration_id: String,
     pub zones: Vec<crate::config::LightZone>,
@@ -122,25 +121,36 @@ pub fn sync_entertainment_areas(
     target_area: Option<&str>,
     expected_certificate_sha256: Option<&str>,
 ) -> Result<EntertainmentArea> {
-    let entertainment_areas = list_entertainment_areas(bridge_ip, username)?
-        .into_iter()
-        .map(|area| (area.id, area.name))
-        .collect::<Vec<_>>();
     let (configurations, certificate_sha256) =
         fetch_v2_configurations(bridge_ip, username, expected_certificate_sha256)?;
     let configuration_data = configurations
         .get("data")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("Hue v2 Entertainment configurations response has no data"))?;
-    let (area_id, area_name, configuration) =
-        select_entertainment_area(&entertainment_areas, configuration_data, target_area)?;
+    let (area_name, configuration) = select_entertainment_area(configuration_data, target_area)?;
     let configuration_id = configuration
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| id.len() == 36)
         .ok_or_else(|| anyhow!("Hue v2 configuration '{}' has no UUID", area_name))?
         .to_string();
-    let discovered_zones = zones_from_v2_configuration(configuration)?;
+    let (entertainment_services, _) = fetch_v2_resource(
+        bridge_ip,
+        username,
+        "/clip/v2/resource/entertainment",
+        Some(&certificate_sha256),
+    )?;
+    let (devices, _) = fetch_v2_resource(
+        bridge_ip,
+        username,
+        "/clip/v2/resource/device",
+        Some(&certificate_sha256),
+    )?;
+    let discovered_zones = zones_from_v2_configuration(
+        configuration,
+        entertainment_services.get("data").and_then(Value::as_array),
+        devices.get("data").and_then(Value::as_array),
+    )?;
     if discovered_zones.is_empty() {
         return Err(anyhow!(
             "Hue v2 configuration '{}' has no channel positions",
@@ -148,7 +158,6 @@ pub fn sync_entertainment_areas(
         ));
     }
     Ok(EntertainmentArea {
-        legacy_group_id: area_id,
         name: area_name,
         configuration_id,
         zones: discovered_zones,
@@ -161,32 +170,27 @@ pub fn sync_entertainment_areas(
 pub fn list_entertainment_areas(
     bridge_ip: &str,
     username: &str,
+    expected_certificate_sha256: Option<&str>,
 ) -> Result<Vec<EntertainmentAreaSummary>> {
-    let groups_url = format!("http://{}/api/{}/groups", bridge_ip, username);
-    let groups_json: Value = ureq::get(&groups_url)
-        .call()
-        .context("Failed to query groups from Hue Bridge")?
-        .into_json()?;
-    entertainment_areas_from_groups(&groups_json)
-}
-
-fn entertainment_areas_from_groups(groups_json: &Value) -> Result<Vec<EntertainmentAreaSummary>> {
-    let groups = groups_json
-        .as_object()
-        .ok_or_else(|| anyhow!("Hue Bridge groups response was not an object"))?;
-    let mut areas = groups
+    let (configurations, _) =
+        fetch_v2_configurations(bridge_ip, username, expected_certificate_sha256)?;
+    let data = configurations
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Hue v2 Entertainment configurations response has no data"))?;
+    let mut areas = data
         .iter()
-        .filter(|(_, group)| group.get("type").and_then(Value::as_str) == Some("Entertainment"))
-        .map(|(id, group)| EntertainmentAreaSummary {
-            id: id.clone(),
-            name: group
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("Unnamed")
-                .to_string(),
+        .filter_map(|configuration| {
+            Some(EntertainmentAreaSummary {
+                id: configuration.get("id")?.as_str()?.to_string(),
+                name: configuration
+                    .pointer("/metadata/name")?
+                    .as_str()?
+                    .to_string(),
+            })
         })
         .collect::<Vec<_>>();
-    areas.sort_by(|left, right| left.id.cmp(&right.id));
+    areas.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
     Ok(areas)
 }
 
@@ -195,6 +199,38 @@ fn entertainment_areas_from_groups(groups_json: &Value) -> Result<Vec<Entertainm
 fn fetch_v2_configurations(
     bridge_ip: &str,
     username: &str,
+    expected_certificate_sha256: Option<&str>,
+) -> Result<(Value, String)> {
+    fetch_v2_resource(
+        bridge_ip,
+        username,
+        "/clip/v2/resource/entertainment_configuration",
+        expected_certificate_sha256,
+    )
+}
+
+fn fetch_v2_resource(
+    bridge_ip: &str,
+    username: &str,
+    path: &str,
+    expected_certificate_sha256: Option<&str>,
+) -> Result<(Value, String)> {
+    v2_request(
+        bridge_ip,
+        username,
+        "GET",
+        path,
+        None,
+        expected_certificate_sha256,
+    )
+}
+
+fn v2_request(
+    bridge_ip: &str,
+    username: &str,
+    method: &str,
+    path: &str,
+    payload: Option<&Value>,
     expected_certificate_sha256: Option<&str>,
 ) -> Result<(Value, String)> {
     let address = format!("{}:443", bridge_ip)
@@ -228,10 +264,22 @@ fn fetch_v2_configurations(
         }
     }
 
+    let body = payload.map(serde_json::to_vec).transpose()?;
     write!(
         stream,
-        "GET /clip/v2/resource/entertainment_configuration HTTP/1.1\r\nHost: {bridge_ip}\r\nhue-application-key: {username}\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {bridge_ip}\r\nhue-application-key: {username}\r\nConnection: close\r\n"
     )?;
+    if let Some(body) = &body {
+        write!(
+            stream,
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )?;
+    }
+    stream.write_all(b"\r\n")?;
+    if let Some(body) = body {
+        stream.write_all(&body)?;
+    }
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
     let header_end = response
@@ -240,7 +288,12 @@ fn fetch_v2_configurations(
         .ok_or_else(|| anyhow!("Malformed Hue Bridge HTTPS response"))?;
     let headers = std::str::from_utf8(&response[..header_end])
         .context("Hue Bridge HTTPS response headers were not UTF-8")?;
-    if !headers.starts_with("HTTP/1.1 200") {
+    let status = headers
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or_default();
+    if !(200..300).contains(&status) {
         return Err(anyhow!(
             "Hue Bridge V2 request failed: {}",
             headers.lines().next().unwrap_or("unknown status")
@@ -290,62 +343,35 @@ fn decode_http_body(headers: &str, body: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn select_entertainment_area<'a>(
-    groups: &[(String, String)],
     configurations: &'a [Value],
     target: Option<&str>,
-) -> Result<(String, String, &'a Value)> {
-    let find_configuration = |name: &str| {
-        configurations.iter().find(|item| {
-            item.pointer("/metadata/name")
-                .and_then(Value::as_str)
-                .is_some_and(|value| value.eq_ignore_ascii_case(name))
+) -> Result<(String, &'a Value)> {
+    let selected = target
+        .and_then(|target| {
+            configurations.iter().find(|configuration| {
+                configuration.get("id").and_then(Value::as_str) == Some(target)
+                    || configuration
+                        .pointer("/metadata/name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case(target))
+            })
         })
-    };
-    let selected_group = target
-        .and_then(|value| {
-            groups
-                .iter()
-                .find(|(id, name)| id == value || name.eq_ignore_ascii_case(value))
-        })
-        .or_else(|| (target.is_none() && groups.len() == 1).then(|| &groups[0]));
-    if let Some((area_id, area_name)) = selected_group {
-        let configuration = find_configuration(area_name)
-            .ok_or_else(|| anyhow!("Hue v2 configuration named '{}' was not found", area_name))?;
-        return Ok((area_id.clone(), area_name.clone(), configuration));
-    }
-
-    if let Some(target) = target {
-        let configuration = configurations.iter().find(|item| {
-            item.get("id").and_then(Value::as_str) == Some(target)
-                || item
-                    .pointer("/metadata/name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| name.eq_ignore_ascii_case(target))
-        });
-        if let Some(configuration) = configuration {
-            let name = configuration
-                .pointer("/metadata/name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("Hue v2 configuration has no metadata name"))?;
-            let (area_id, area_name) = groups
-                .iter()
-                .find(|(_, group_name)| group_name.eq_ignore_ascii_case(name))
-                .ok_or_else(|| {
-                    anyhow!(
-                        "Hue v2 configuration '{}' has no matching v1 Entertainment group",
-                        name
-                    )
-                })?;
-            return Ok((area_id.clone(), area_name.clone(), configuration));
-        }
-    }
-
-    Err(anyhow!(
-        "Select an explicit Hue Entertainment Area when more than one exists"
-    ))
+        .or_else(|| (target.is_none() && configurations.len() == 1).then(|| &configurations[0]))
+        .ok_or_else(|| {
+            anyhow!("Select an explicit Hue Entertainment Area when more than one exists")
+        })?;
+    let name = selected
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Hue v2 configuration has no metadata name"))?;
+    Ok((name.to_string(), selected))
 }
 
-fn zones_from_v2_configuration(configuration: &Value) -> Result<Vec<crate::config::LightZone>> {
+fn zones_from_v2_configuration(
+    configuration: &Value,
+    entertainment_services: Option<&Vec<Value>>,
+    devices: Option<&Vec<Value>>,
+) -> Result<Vec<crate::config::LightZone>> {
     let mut zones = configuration
         .get("channels")
         .and_then(Value::as_array)
@@ -374,13 +400,86 @@ fn zones_from_v2_configuration(configuration: &Value) -> Result<Vec<crate::confi
                         )
                     })
             };
-            Ok(crate::config::LightZone::from_3d_position(
+            let service_id = channel
+                .pointer("/members/0/service/rid")
+                .and_then(Value::as_str);
+            let service = service_id.and_then(|id| {
+                entertainment_services?
+                    .iter()
+                    .find(|service| service.get("id").and_then(Value::as_str) == Some(id))
+            });
+            let device_id = service
+                .and_then(|service| service.pointer("/owner/rid"))
+                .and_then(Value::as_str);
+            let device_name = device_id
+                .and_then(|id| {
+                    devices?
+                        .iter()
+                        .find(|device| device.get("id").and_then(Value::as_str) == Some(id))
+                })
+                .and_then(|device| device.pointer("/metadata/name"))
+                .and_then(Value::as_str)
+                .unwrap_or("Hue light");
+            let segment_index = channel
+                .pointer("/members/0/index")
+                .and_then(Value::as_u64)
+                .and_then(|index| u8::try_from(index).ok());
+            let segment_count = service
+                .and_then(|service| service.get("segments"))
+                .and_then(Value::as_array)
+                .and_then(|segments| u8::try_from(segments.len()).ok());
+            let name = match (segment_index, segment_count) {
+                (Some(index), Some(count)) if count > 1 => {
+                    format!("{device_name} · Segment {}", index + 1)
+                }
+                _ if service_id.is_some() => device_name.to_string(),
+                _ => format!("Hue channel {channel_id}"),
+            };
+            let mut zone = crate::config::LightZone::from_3d_position(
                 channel_id,
-                &format!("Hue channel {}", channel_id),
+                &name,
                 [coordinate("x")?, coordinate("y")?, coordinate("z")?],
-            ))
+            );
+            zone.hue_device_id = device_id.map(ToOwned::to_owned);
+            zone.hue_segment_index = segment_index;
+            zone.hue_segment_count = segment_count;
+            Ok(zone)
         })
         .collect::<Result<Vec<_>>>()?;
+    // Some Bridge firmwares omit `entertainment.segments`; the configuration's
+    // indexed members still authoritatively describe the exposed gradient channels.
+    let segment_counts = zones
+        .iter()
+        .filter_map(|zone| {
+            Some((
+                zone.hue_device_id.as_deref()?,
+                zone.hue_segment_index?.saturating_add(1),
+            ))
+        })
+        .fold(
+            std::collections::BTreeMap::<String, u8>::new(),
+            |mut counts, (device_id, count)| {
+                counts
+                    .entry(device_id.to_string())
+                    .and_modify(|existing| *existing = (*existing).max(count))
+                    .or_insert(count);
+                counts
+            },
+        );
+    for zone in &mut zones {
+        if let (Some(device_id), Some(segment_index)) =
+            (zone.hue_device_id.as_deref(), zone.hue_segment_index)
+        {
+            if let Some(segment_count) = segment_counts.get(device_id).copied() {
+                let segment_count = zone.hue_segment_count.unwrap_or(segment_count);
+                zone.hue_segment_count = Some(segment_count);
+                if segment_count > 1 {
+                    let device_name = zone.name.split(" · Segment").next().unwrap_or(&zone.name);
+                    zone.name = format!("{device_name} · Segment {}", segment_index + 1);
+                }
+            }
+        }
+    }
     zones.sort_by_key(|zone| zone.channel_id);
     Ok(zones)
 }
@@ -400,57 +499,52 @@ mod selection_tests {
     }
 
     #[test]
-    fn v2_configuration_id_resolves_to_matching_v1_group() {
-        let groups = vec![
-            ("1".to_string(), "Cinema".to_string()),
-            ("2".to_string(), "Music".to_string()),
-        ];
+    fn v2_configuration_id_selects_the_configuration_directly() {
         let configurations = vec![serde_json::json!({
             "id": "12345678-1234-1234-1234-123456789abc",
             "metadata": { "name": "Cinema" },
             "channels": []
         })];
 
-        let (id, name, configuration) = select_entertainment_area(
-            &groups,
+        let (name, configuration) = select_entertainment_area(
             &configurations,
             Some("12345678-1234-1234-1234-123456789abc"),
         )
         .unwrap();
 
-        assert_eq!(id, "1");
         assert_eq!(name, "Cinema");
         assert_eq!(configuration["id"], "12345678-1234-1234-1234-123456789abc");
     }
 }
 
-/// Activates or deactivates the entertainment streaming session on the Hue Bridge
+/// Activates or deactivates the V2 Entertainment configuration through the pinned bridge API.
 pub fn set_stream_active(
     bridge_ip: &str,
     username: &str,
-    group_id: &str,
+    configuration_id: &str,
+    expected_certificate_sha256: Option<&str>,
     active: bool,
 ) -> Result<()> {
-    let url = format!("http://{}/api/{}/groups/{}", bridge_ip, username, group_id);
-    let payload = serde_json::json!({
-        "stream": {
-            "active": active
-        }
-    });
-
     info!(
-        "Sending stream {} request to Hue Bridge at group {}...",
+        "Sending V2 stream {} request to Hue Bridge...",
         if active { "START" } else { "STOP" },
-        group_id
     );
-
-    let resp = ureq::put(&url)
-        .set("Content-Type", "application/json")
-        .send_json(payload)
-        .with_context(|| format!("Failed to send stream active state to {}", url))?;
-
-    let text = resp.into_string()?;
-    info!("Bridge response: {}", text);
+    let path = format!("/clip/v2/resource/entertainment_configuration/{configuration_id}");
+    let (response, _) = v2_request(
+        bridge_ip,
+        username,
+        "PUT",
+        &path,
+        Some(&serde_json::json!({ "action": if active { "start" } else { "stop" } })),
+        expected_certificate_sha256,
+    )?;
+    if response
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| !errors.is_empty())
+    {
+        return Err(anyhow!("Hue Bridge rejected V2 stream action"));
+    }
     Ok(())
 }
 
@@ -463,43 +557,42 @@ pub struct StreamState {
     pub smoothing_factor: f32,
 }
 
-/// Queries whether the entertainment area is currently active on the Hue Bridge and reads settings
-pub fn get_stream_state(bridge_ip: &str, username: &str, group_id: &str) -> Result<StreamState> {
-    let url = format!("http://{}/api/{}/groups/{}", bridge_ip, username, group_id);
-    let resp = ureq::get(&url)
-        .timeout(Duration::from_secs(3))
-        .call()
-        .with_context(|| format!("Failed to query group status from {}", url))?;
-
-    let json: Value = resp.into_json()?;
-    let stream_obj = json.get("stream");
-    let is_active = stream_obj
-        .and_then(|s| s.get("active"))
-        .and_then(|a| a.as_bool())
-        .unwrap_or(false);
-
-    // Read any action / bri if available from group
-    let bri = json
-        .get("action")
-        .and_then(|a| a.get("bri"))
-        .and_then(|b| b.as_f64())
-        .map(|b| (b / 254.0) as f32)
-        .unwrap_or(1.0);
-
-    // Map proxy mode or default to 0.35 (moderate)
-    let smoothing = 0.35f32;
-
+/// Queries the V2 configuration state. Hue does not expose a stream brightness or smoothing value.
+pub fn get_stream_state(
+    bridge_ip: &str,
+    username: &str,
+    configuration_id: &str,
+    expected_certificate_sha256: Option<&str>,
+) -> Result<StreamState> {
+    let path = format!("/clip/v2/resource/entertainment_configuration/{configuration_id}");
+    let (json, _) = fetch_v2_resource(bridge_ip, username, &path, expected_certificate_sha256)?;
+    let configuration = json
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .ok_or_else(|| anyhow!("Hue V2 configuration response has no data"))?;
     Ok(StreamState {
-        active: is_active,
-        brightness: bri,
-        smoothing_factor: smoothing,
+        active: configuration.get("status").and_then(Value::as_str) == Some("active"),
+        brightness: 1.0,
+        smoothing_factor: 0.35,
     })
 }
 
 /// Queries whether the entertainment area is currently active on the Hue Bridge
 #[allow(dead_code)]
-pub fn get_stream_status(bridge_ip: &str, username: &str, group_id: &str) -> Result<bool> {
-    get_stream_state(bridge_ip, username, group_id).map(|s| s.active)
+pub fn get_stream_status(
+    bridge_ip: &str,
+    username: &str,
+    configuration_id: &str,
+    expected_certificate_sha256: Option<&str>,
+) -> Result<bool> {
+    get_stream_state(
+        bridge_ip,
+        username,
+        configuration_id,
+        expected_certificate_sha256,
+    )
+    .map(|s| s.active)
 }
 
 #[cfg(test)]
@@ -514,7 +607,7 @@ mod tests {
                 {"channel_id": 2, "position": {"x": -1.0, "y": -1.0, "z": 0.0}}
             ]
         });
-        let zones = zones_from_v2_configuration(&configuration).unwrap();
+        let zones = zones_from_v2_configuration(&configuration, None, None).unwrap();
         assert_eq!(
             zones.iter().map(|zone| zone.channel_id).collect::<Vec<_>>(),
             vec![2, 7]
@@ -524,19 +617,24 @@ mod tests {
     }
 
     #[test]
-    fn lists_only_entertainment_areas_in_stable_order() {
-        let groups = serde_json::json!({
-            "4": {"type": "Room", "name": "Living room"},
-            "9": {"type": "Entertainment", "name": "Cinema"},
-            "2": {"type": "Entertainment", "name": "TV area"}
+    fn v2_gradient_channels_keep_device_and_segment_identity() {
+        let configuration = serde_json::json!({
+            "channels": [{
+                "channel_id": 3,
+                "position": {"x": 0.0, "y": -1.0, "z": 0.0},
+                "members": [{"service": {"rid": "service-1"}, "index": 1}]
+            }]
         });
-        let areas = entertainment_areas_from_groups(&groups).unwrap();
-        assert_eq!(
-            areas
-                .iter()
-                .map(|area| (area.id.as_str(), area.name.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("2", "TV area"), ("9", "Cinema")]
-        );
+        let services = vec![serde_json::json!({
+            "id": "service-1", "owner": {"rid": "device-1"}, "segments": [{}, {}, {}]
+        })];
+        let devices = vec![serde_json::json!({
+            "id": "device-1", "metadata": {"name": "Hue Flux"}
+        })];
+        let zones =
+            zones_from_v2_configuration(&configuration, Some(&services), Some(&devices)).unwrap();
+        assert_eq!(zones[0].name, "Hue Flux · Segment 2");
+        assert_eq!(zones[0].hue_device_id.as_deref(), Some("device-1"));
+        assert_eq!(zones[0].hue_segment_count, Some(3));
     }
 }

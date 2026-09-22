@@ -2,7 +2,12 @@ pub mod dtls;
 pub mod stream;
 
 use anyhow::{anyhow, Context, Result};
+use openssl::hash::MessageDigest;
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use serde_json::Value;
+use std::fmt::Write as _;
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 use tracing::info;
 
@@ -15,6 +20,13 @@ pub struct EntertainmentArea {
     pub name: String,
     pub configuration_id: String,
     pub zones: Vec<crate::config::LightZone>,
+    pub certificate_sha256: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntertainmentAreaSummary {
+    pub id: String,
+    pub name: String,
 }
 
 /// Auto-discovers Hue Bridge on LAN via official discovery service
@@ -97,7 +109,7 @@ pub fn pair_bridge(
         return Err(anyhow!("Timed out waiting for Hue Bridge button press"));
     }
 
-    let area = sync_entertainment_areas(bridge_ip, &username, None)?;
+    let area = sync_entertainment_areas(bridge_ip, &username, None, None)?;
 
     Ok((username, clientkey, area))
 }
@@ -108,45 +120,14 @@ pub fn sync_entertainment_areas(
     bridge_ip: &str,
     username: &str,
     target_area: Option<&str>,
+    expected_certificate_sha256: Option<&str>,
 ) -> Result<EntertainmentArea> {
-    let groups_url = format!("http://{}/api/{}/groups", bridge_ip, username);
-    let groups_resp = ureq::get(&groups_url)
-        .call()
-        .context("Failed to query groups from Hue Bridge")?;
-
-    let groups_json: Value = groups_resp.into_json()?;
-    let groups = groups_json
-        .as_object()
-        .ok_or_else(|| anyhow!("Hue Bridge groups response was not an object"))?;
-    let mut entertainment_areas: Vec<_> = groups
-        .iter()
-        .filter(|(_, group)| group.get("type").and_then(Value::as_str) == Some("Entertainment"))
-        .map(|(id, group)| {
-            (
-                id.clone(),
-                group
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unnamed")
-                    .to_string(),
-            )
-        })
-        .collect();
-    entertainment_areas.sort_by(|left, right| left.0.cmp(&right.0));
-    let configurations_url = format!(
-        "https://{}/clip/v2/resource/entertainment_configuration",
-        bridge_ip
-    );
-    let configurations: Value = ureq::get(&configurations_url)
-        .set("hue-application-key", username)
-        .call()
-        .with_context(|| {
-            format!(
-                "Failed to query Hue v2 Entertainment configurations at {}",
-                configurations_url
-            )
-        })?
-        .into_json()?;
+    let entertainment_areas = list_entertainment_areas(bridge_ip, username)?
+        .into_iter()
+        .map(|area| (area.id, area.name))
+        .collect::<Vec<_>>();
+    let (configurations, certificate_sha256) =
+        fetch_v2_configurations(bridge_ip, username, expected_certificate_sha256)?;
     let configuration_data = configurations
         .get("data")
         .and_then(Value::as_array)
@@ -171,7 +152,141 @@ pub fn sync_entertainment_areas(
         name: area_name,
         configuration_id,
         zones: discovered_zones,
+        certificate_sha256,
     })
+}
+
+/// Lists the Hue Entertainment Areas available on the configured Bridge.
+/// This is configuration discovery only; it does not alter the active stream.
+pub fn list_entertainment_areas(
+    bridge_ip: &str,
+    username: &str,
+) -> Result<Vec<EntertainmentAreaSummary>> {
+    let groups_url = format!("http://{}/api/{}/groups", bridge_ip, username);
+    let groups_json: Value = ureq::get(&groups_url)
+        .call()
+        .context("Failed to query groups from Hue Bridge")?
+        .into_json()?;
+    entertainment_areas_from_groups(&groups_json)
+}
+
+fn entertainment_areas_from_groups(groups_json: &Value) -> Result<Vec<EntertainmentAreaSummary>> {
+    let groups = groups_json
+        .as_object()
+        .ok_or_else(|| anyhow!("Hue Bridge groups response was not an object"))?;
+    let mut areas = groups
+        .iter()
+        .filter(|(_, group)| group.get("type").and_then(Value::as_str) == Some("Entertainment"))
+        .map(|(id, group)| EntertainmentAreaSummary {
+            id: id.clone(),
+            name: group
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Unnamed")
+                .to_string(),
+        })
+        .collect::<Vec<_>>();
+    areas.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(areas)
+}
+
+/// Fetches V2 configurations through a bridge-specific certificate pin.
+/// Pairing accepts the first certificate only after the user proves physical access via pushlink.
+fn fetch_v2_configurations(
+    bridge_ip: &str,
+    username: &str,
+    expected_certificate_sha256: Option<&str>,
+) -> Result<(Value, String)> {
+    let address = format!("{}:443", bridge_ip)
+        .to_socket_addrs()
+        .context("Failed to resolve Hue Bridge address")?
+        .next()
+        .ok_or_else(|| anyhow!("Hue Bridge address did not resolve"))?;
+    let tcp = TcpStream::connect_timeout(&address, Duration::from_secs(5))
+        .context("Failed to connect to Hue Bridge HTTPS endpoint")?;
+    let mut builder = SslConnector::builder(SslMethod::tls())?;
+    // The local bridge presents a self-signed certificate. Verification below pins its SHA-256 DER fingerprint.
+    builder.set_verify(SslVerifyMode::NONE);
+    let connector = builder.build();
+    let mut stream = connector
+        .connect(bridge_ip, tcp)
+        .context("Hue Bridge TLS handshake failed")?;
+    let certificate = stream
+        .ssl()
+        .peer_certificate()
+        .ok_or_else(|| anyhow!("Hue Bridge did not present a TLS certificate"))?;
+    let digest = certificate.digest(MessageDigest::sha256())?;
+    let mut certificate_sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest.as_ref() {
+        write!(&mut certificate_sha256, "{byte:02x}")?;
+    }
+    if let Some(expected) = expected_certificate_sha256 {
+        if !expected.eq_ignore_ascii_case(&certificate_sha256) {
+            return Err(anyhow!(
+                "Hue Bridge certificate fingerprint changed; refusing V2 request"
+            ));
+        }
+    }
+
+    write!(
+        stream,
+        "GET /clip/v2/resource/entertainment_configuration HTTP/1.1\r\nHost: {bridge_ip}\r\nhue-application-key: {username}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let header_end = response
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("Malformed Hue Bridge HTTPS response"))?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .context("Hue Bridge HTTPS response headers were not UTF-8")?;
+    if !headers.starts_with("HTTP/1.1 200") {
+        return Err(anyhow!(
+            "Hue Bridge V2 request failed: {}",
+            headers.lines().next().unwrap_or("unknown status")
+        ));
+    }
+    let body = decode_http_body(headers, &response[header_end + 4..])?;
+    Ok((serde_json::from_slice(&body)?, certificate_sha256))
+}
+
+fn decode_http_body(headers: &str, body: &[u8]) -> Result<Vec<u8>> {
+    if !headers.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value.trim().eq_ignore_ascii_case("chunked")
+        })
+    }) {
+        return Ok(body.to_vec());
+    }
+
+    let mut remaining = body;
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = remaining
+            .windows(2)
+            .position(|bytes| bytes == b"\r\n")
+            .ok_or_else(|| anyhow!("Malformed chunked Hue Bridge response"))?;
+        let size = std::str::from_utf8(&remaining[..line_end])?
+            .split(';')
+            .next()
+            .ok_or_else(|| anyhow!("Missing Hue Bridge chunk size"))?
+            .trim();
+        let size = usize::from_str_radix(size, 16).context("Invalid Hue Bridge chunk size")?;
+        remaining = &remaining[line_end + 2..];
+        if size == 0 {
+            return Ok(decoded);
+        }
+        let chunk_end = size
+            .checked_add(2)
+            .filter(|end| *end <= remaining.len())
+            .ok_or_else(|| anyhow!("Truncated Hue Bridge response chunk"))?;
+        if &remaining[size..chunk_end] != b"\r\n" {
+            return Err(anyhow!("Malformed Hue Bridge response chunk terminator"));
+        }
+        decoded.extend_from_slice(&remaining[..size]);
+        remaining = &remaining[chunk_end..];
+    }
 }
 
 fn select_entertainment_area<'a>(
@@ -273,6 +388,16 @@ fn zones_from_v2_configuration(configuration: &Value) -> Result<Vec<crate::confi
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    #[test]
+    fn decodes_chunked_v2_response_body() {
+        let body = decode_http_body(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked",
+            b"6\r\n{\"data\r\n5\r\n\":[]}\r\n0\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(body, br#"{"data":[]}"#);
+    }
 
     #[test]
     fn v2_configuration_id_resolves_to_matching_v1_group() {
@@ -396,5 +521,22 @@ mod tests {
         );
         assert!(zones[0].x_max < 0.5);
         assert!(zones[1].x_min > 0.5);
+    }
+
+    #[test]
+    fn lists_only_entertainment_areas_in_stable_order() {
+        let groups = serde_json::json!({
+            "4": {"type": "Room", "name": "Living room"},
+            "9": {"type": "Entertainment", "name": "Cinema"},
+            "2": {"type": "Entertainment", "name": "TV area"}
+        });
+        let areas = entertainment_areas_from_groups(&groups).unwrap();
+        assert_eq!(
+            areas
+                .iter()
+                .map(|area| (area.id.as_str(), area.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("2", "TV area"), ("9", "Cinema")]
+        );
     }
 }

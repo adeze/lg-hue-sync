@@ -59,7 +59,7 @@ Official Philips Hue Sync apps are only available on 2024+ LG TVs running webOS 
 ## Key Features
 
 * **Sub-10 MB Footprint:** Consumes $\approx 8\text{ MB}$ of RAM and $< 1.5\%$ CPU on the Alpha 9 Gen 4 processor (compared to $\approx 120\text{ MB}$ for Hyperion/Qt/PicCap).
-* **Apple TV Frame Matching (24 & 30 FPS):** Fully supports 23.976, 24.000, 29.970, and 30.000 FPS cadences to match Apple TV 4K "Match Frame Rate", eliminating micro-stutter and phase beating between film cuts and ambient lights.
+* **Content-adaptive light output:** polls capture at a low-latency ceiling but suppresses duplicate Hue and Nanoleaf frames, so repeated compositor frames do not create unnecessary light changes.
 * **Dynamic Letterbox / Aspect Ratio Auto-Detection:** Automatically detects top/bottom black bars on $2.39:1 / 2.0:1$ widescreen films and re-anchors spatial sampling to the active film frame instead of black pixels.
 * **Saturation-Weighted Dominant Color Sampling:** Weights pixels by chroma saturation ($1.0 + \gamma \cdot S^2$) so vibrant accent colors, neon signs, and explosions punch through without being diluted into muddy grey/brown by dark backgrounds.
 * **Scene-Cut Instant Snap & Adaptive EMA:** Snaps instantly ($\alpha = 1.0$) with zero latency on hard camera cuts while maintaining smooth ($\alpha = 0.35$) temporal tracking during camera pans.
@@ -81,7 +81,7 @@ Official Philips Hue Sync apps are only available on 2024+ LG TVs running webOS 
 | **Runtime Architecture** | Heavy Chromium WebApp + Node/JS bridge | **Pure headless compiled Rust binary** (zero web bloat) |
 | **Memory Consumption** | **$\approx 85\text{–}140\text{ MB}$** (Heavy RAM footprint) | **$\approx 6\text{–}8\text{ MB}$** (15x less memory) |
 | **CPU Utilization** | $\approx 4\text{–}7\%$ CPU | **$< 1.2\%$ CPU** |
-| **Cadence Matching** | Fixed internal 50/60 Hz timer | **Native 23.976, 24.0, 29.97, 30.0, 60.0 Hz frame-cadence** |
+| **Light output cadence** | Fixed internal 50/60 Hz timer | **Content-adaptive duplicate suppression with a measured output rate** |
 | **Letterbox Detection** | Fixed $16:9$ sampling (samples black bars on movies) | **Dynamic real-time auto-crop** (re-anchors to $2.39:1 / 2.0:1$ film frame) |
 | **OLED Near-Black Floor** | Faint 1–2% grey light flicker in dark scenes | **OLED Near-Black Noise Gate** (cuts off below 2% luma to true black) |
 | **Color Dominance** | Proprietary color mixing | **Chroma-weighted saturation boost** ($1.0 + \gamma \cdot S^2$) |
@@ -128,7 +128,11 @@ To achieve the lowest latency, prevent frame drops, and ensure accurate ambient 
 
 ## Quick Start Guide
 
-### Step 1: Pair Your Hue Bridge (Run Locally on Mac)
+### Step 1: Pair Your Hue Bridge
+
+After deploying the daemon, open its dashboard on your local network and use **Device Setup → Pair Hue Bridge**. Leave the Bridge IP blank for discovery or enter it directly, press the physical Bridge button, then start pairing. The TV stores the credentials and a bridge-specific HTTPS certificate fingerprint with owner-only permissions, then restarts the daemon.
+
+The CLI remains useful for development or recovery:
 
 Ensure your Mac is connected to the same local network as your Hue Bridge:
 
@@ -148,7 +152,9 @@ When prompted, press the physical round button on your Hue Bridge. The CLI will:
 
 ---
 
-### Step 1b (Optional): Pair with Nanoleaf 4D (V1) Lightstrip
+### Step 1b (Optional): Pair with Nanoleaf 4D Lightstrip
+
+The dashboard also has **Device Setup → Pair Nanoleaf 4D**. Enter its controller IP, hold the controller power button for 5–7 seconds until it blinks, then start pairing. The token and discovered panel IDs remain on the TV; they are never returned by the dashboard API.
 
 If you have a **Nanoleaf 4D** lightstrip mounted around your TV perimeter:
 
@@ -224,7 +230,7 @@ Run the automated deployment script with your TV's IP address:
 ```
 
 The script will:
-1. Cross-compile `lg-hue-sync` for webOS 32-bit ARM (`armv7-unknown-linux-gnueabihf`).
+1. Cross-compile `lg-hue-sync` for webOS 32-bit ARM (`armv7-unknown-linux-gnueabi`).
 2. Upload the stripped binary and `config.json` to `/var/home/root/lg-hue-sync/`.
 3. Install a systemd service unit at `/etc/systemd/system/lg-hue-sync.service`.
 4. Enable and start the service.
@@ -302,7 +308,7 @@ ssh root@192.168.1.149 'systemctl restart lg-hue-sync'
 
 ### Key Configuration Knobs
 * **`"hue_enabled"` & `"nanoleaf"`**: Enable or disable Philips Hue or Nanoleaf 4D independently or run both in lockstep.
-* **`"fps": 0` (Auto Source Matching)**: Automatically queries the webOS display pipeline to match your video source refresh rate (23.976 / 24.0 / 29.97 / 30.0 / 50.0 / 60.0 Hz). When playing 120 Hz VRR games, it automatically clamps to the Bridge's 60 Hz hardware limit.
+* **`"fps": 0` (Auto source hint)**: Uses a webOS-reported source rate when available, otherwise captures at 60 Hz and suppresses duplicate output frames. The dashboard distinguishes this processing ceiling from measured light updates; it does not claim a 24p source rate unless webOS supplies one.
 * **`"zones"`**: Automatically populated by `cargo run -- pair` or `cargo run -- sync-hue` using your 3D room coordinates from the Philips Hue app. Depth ($Y$) and height ($Z$) are intelligently mapped: front-stage lights sample tight screen borders, while rear surround lights sample diffuse ambient scene reflections.
 * **`"nanoleaf.segments"`**: Number of addressable perimeter LED zones along your TV edges (default 30 for standard 4D strips). Automatically distributed around Left, Top, Right, and Bottom edges based on 16:9 aspect ratio.
 

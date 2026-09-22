@@ -1,8 +1,32 @@
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("failed to open config at {path}")]
+    Open {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse config at {path}")]
+    Parse {
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to write config at {path}")]
+    Write {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to serialize config")]
+    Serialize(#[from] serde_json::Error),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightZone {
@@ -87,6 +111,9 @@ pub struct Config {
     pub bridge_ip: String,
     pub username: String,
     pub clientkey: String,
+    /// SHA-256 fingerprint of the bridge's local V2 HTTPS certificate.
+    #[serde(default)]
+    pub hue_bridge_certificate_sha256: Option<String>,
     /// Legacy V1 group ID used only for stream activation and state queries.
     pub entertainment_area_id: String,
     /// V2 entertainment configuration UUID embedded in HueStream packets.
@@ -101,6 +128,12 @@ pub struct Config {
     pub fps: u32,
     #[serde(default = "default_brightness")]
     pub brightness_multiplier: f32,
+    /// Independent final output trim for Hue Entertainment lights.
+    #[serde(default = "default_output_trim")]
+    pub hue_output_brightness: f32,
+    /// Independent final output trim for the Nanoleaf 4D perimeter.
+    #[serde(default = "default_output_trim")]
+    pub nanoleaf_output_brightness: f32,
     #[serde(default = "default_false")]
     pub use_xy_gamut: bool,
     #[serde(default = "default_true")]
@@ -141,6 +174,10 @@ fn default_fps() -> u32 {
 }
 
 fn default_brightness() -> f32 {
+    1.0
+}
+
+fn default_output_trim() -> f32 {
     1.0
 }
 
@@ -217,12 +254,15 @@ impl Config {
             bridge_ip: bridge_ip.to_string(),
             username: username.to_string(),
             clientkey: clientkey.to_string(),
+            hue_bridge_certificate_sha256: None,
             entertainment_area_id: area_id.to_string(),
             entertainment_configuration_id: None,
             nanoleaf: None,
             nanoleaf_sync_enabled: true,
             fps: default_fps(),
             brightness_multiplier: default_brightness(),
+            hue_output_brightness: default_output_trim(),
+            nanoleaf_output_brightness: default_output_trim(),
             use_xy_gamut: false,
             hdr_tone_mapping: true,
             letterbox_detection: true,
@@ -238,19 +278,50 @@ impl Config {
         }
     }
 
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(&path)
-            .with_context(|| format!("Failed to open config file at {:?}", path.as_ref()))?;
-        let config: Config = serde_json::from_reader(file)
-            .with_context(|| format!("Failed to parse config file at {:?}", path.as_ref()))?;
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let file = File::open(path).map_err(|source| ConfigError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let config: Config =
+            serde_json::from_reader(file).map_err(|source| ConfigError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
         Ok(config)
     }
 
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let mut file = File::create(&path)
-            .with_context(|| format!("Failed to create config file at {:?}", path.as_ref()))?;
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
+        let path = path.as_ref();
+        let temp_path = path.with_extension("new");
         let json = serde_json::to_string_pretty(self)?;
-        file.write_all(json.as_bytes())?;
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .map_err(|source| ConfigError::Write {
+                path: temp_path.clone(),
+                source,
+            })?;
+        file.write_all(json.as_bytes())
+            .map_err(|source| ConfigError::Write {
+                path: temp_path.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| ConfigError::Write {
+            path: temp_path.clone(),
+            source,
+        })?;
+        fs::rename(&temp_path, path).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
         Ok(())
     }
 }

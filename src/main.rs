@@ -11,12 +11,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use capture::{create_capture, detect_source_fps, VtCapture};
 use color::{RgbColor, ZoneSampler};
-use config::Config;
+use config::{Config, ConfigError};
 use hue::{set_stream_active, sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
 use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
@@ -220,8 +221,24 @@ fn frame_average(data: &[u8], width: u32, height: u32, is_bgra: bool) -> RgbColo
     )
 }
 
+/// Suppresses duplicate transport frames while retaining a 2 Hz keepalive.
+fn colors_changed(previous: &[RgbColor], current: &[RgbColor]) -> bool {
+    previous.len() != current.len()
+        || previous
+            .iter()
+            .zip(current)
+            .any(|(left, right)| left.delta(*right) >= 0.005)
+}
+
 async fn run_daemon(config_path: PathBuf) -> Result<()> {
-    let mut config = Config::load(&config_path)?;
+    let mut config = match Config::load(&config_path) {
+        Ok(config) => config,
+        Err(ConfigError::Open { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            info!("No configuration found; starting dashboard setup mode.");
+            Config::new_default("", "", "", "")
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     let hue_active =
         config.hue_enabled && !config.bridge_ip.is_empty() && !config.username.is_empty();
@@ -231,22 +248,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         .map(|n| n.enabled && !n.ip.is_empty() && !n.auth_token.is_empty())
         .unwrap_or(false);
 
-    if !hue_active && !nanoleaf_active {
-        return Err(anyhow!(
-            "Neither Philips Hue nor Nanoleaf is configured and enabled in {:?}",
-            config_path
-        ));
-    }
-
     if hue_active && hue_configuration_id(&config).is_none() {
         match sync_entertainment_areas(
             &config.bridge_ip,
             &config.username,
             Some(&config.entertainment_area_id),
+            config.hue_bridge_certificate_sha256.as_deref(),
         ) {
             Ok(area) => {
                 config.entertainment_area_id = area.legacy_group_id;
                 config.entertainment_configuration_id = Some(area.configuration_id);
+                config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
                 config.zones = area.zones;
                 if let Err(error) = config.save(&config_path) {
                     warn!(
@@ -356,7 +368,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             config.hdr_tone_mapping,
             config.saturation_boost,
             config.noise_gate_threshold,
-            config.brightness_multiplier,
+            config.brightness_multiplier * config.nanoleaf_output_brightness,
         );
         let streamer = if nanoleaf_sync_enabled {
             let port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
@@ -427,6 +439,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     let initial_settings = LiveSettings {
         brightness_multiplier: config.brightness_multiplier,
+        hue_output_brightness: config.hue_output_brightness,
+        nanoleaf_output_brightness: config.nanoleaf_output_brightness,
         saturation_boost: config.saturation_boost,
         peak_weight: config.peak_weight,
         gamma: config.gamma,
@@ -458,17 +472,32 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         .capture_hardware
         .store(capture.is_real_hardware(), Ordering::Relaxed);
 
-    // Start embedded web control server on port 8088
-    if let Err(e) = start_web_server(8088, shared_state.clone()).await {
-        warn!("Failed to start web control server on port 8088: {}", e);
-    }
+    let web_shutdown = CancellationToken::new();
+    let web_tasks = match start_web_server(
+        8088,
+        shared_state.clone(),
+        config_path.clone(),
+        web_shutdown.clone(),
+    )
+    .await
+    {
+        Ok(tasks) => Some(tasks),
+        Err(error) => {
+            warn!("Failed to start web control server on port 8088: {}", error);
+            None
+        }
+    };
 
-    let mut current_brightness = config.brightness_multiplier;
+    let mut current_hue_brightness = config.brightness_multiplier * config.hue_output_brightness;
     let mut current_use_xy = config.use_xy_gamut;
 
     let mut last_channels: Vec<(u8, (u16, u16, u16))> = Vec::new();
+    let mut last_nanoleaf_colors: Vec<RgbColor> = Vec::new();
     let mut static_frame_count: u32 = 0;
     let mut last_heartbeat = tokio::time::Instant::now();
+    let mut last_nanoleaf_heartbeat = tokio::time::Instant::now();
+    let mut light_update_count = 0u32;
+    let mut light_update_window = tokio::time::Instant::now();
     let mut last_watchdog = tokio::time::Instant::now();
     let mut last_status_check = tokio::time::Instant::now();
     let mut last_hw_probe = tokio::time::Instant::now();
@@ -478,6 +507,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     while running.load(Ordering::SeqCst) {
         let loop_start = tokio::time::Instant::now();
+        let mut emitted_light_update = false;
 
         // Feed systemd watchdog every 2 seconds
         if last_watchdog.elapsed() >= Duration::from_secs(2) {
@@ -623,7 +653,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         // 2. Check for live settings update from Web UI
         if shared_state.settings_updated.swap(false, Ordering::SeqCst) {
             let live_st = shared_state.current_settings.read().unwrap().clone();
-            current_brightness = live_st.brightness_multiplier;
+            current_hue_brightness = live_st.brightness_multiplier * live_st.hue_output_brightness;
             current_use_xy = live_st.use_xy_gamut;
             if hue_sync_enabled != live_st.hue_sync_enabled {
                 hue_sync_enabled = live_st.hue_sync_enabled;
@@ -696,15 +726,21 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 ns.set_smoothing_factor(live_st.smoothing_factor);
                 ns.set_hdr_tone_mapping(live_st.hdr_tone_mapping);
                 ns.set_saturation_boost(live_st.saturation_boost);
-                ns.set_brightness_multiplier(live_st.brightness_multiplier);
+                ns.set_brightness_multiplier(
+                    live_st.brightness_multiplier * live_st.nanoleaf_output_brightness,
+                );
                 ns.set_peak_weight(live_st.peak_weight);
                 ns.set_gamma(live_st.gamma);
                 ns.set_noise_gate_threshold(live_st.noise_gate_threshold);
                 ns.set_max_color_step(live_st.max_color_step);
             }
             info!(
-                "Applied live settings: brightness={:.1}x, saturation={:.1}x, smoothing={:.2}, xy_mode={}",
-                current_brightness, live_st.saturation_boost, live_st.smoothing_factor, current_use_xy
+                "Applied live settings: Hue={:.1}x, Nanoleaf={:.1}x, saturation={:.1}x, smoothing={:.2}, xy_mode={}",
+                current_hue_brightness,
+                live_st.brightness_multiplier * live_st.nanoleaf_output_brightness,
+                live_st.saturation_boost,
+                live_st.smoothing_factor,
+                current_use_xy
             );
         }
 
@@ -716,6 +752,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             let live_st = shared_state.current_settings.read().unwrap().clone();
             let mut save_cfg = config.clone();
             save_cfg.brightness_multiplier = live_st.brightness_multiplier;
+            save_cfg.hue_output_brightness = live_st.hue_output_brightness;
+            save_cfg.nanoleaf_output_brightness = live_st.nanoleaf_output_brightness;
             save_cfg.saturation_boost = live_st.saturation_boost;
             save_cfg.peak_weight = live_st.peak_weight;
             save_cfg.gamma = live_st.gamma;
@@ -742,6 +780,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 &config.bridge_ip,
                 &config.username,
                 Some(&config.entertainment_area_id),
+                config.hue_bridge_certificate_sha256.as_deref(),
             ) {
                 Ok(area) if !area.zones.is_empty() => {
                     let group_changed = config.entertainment_area_id != area.legacy_group_id;
@@ -757,6 +796,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     }
                     config.entertainment_area_id = area.legacy_group_id;
                     config.entertainment_configuration_id = Some(area.configuration_id);
+                    config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
                     config.zones = area.zones;
                     *shared_state.hue_zones.write().unwrap() = config.zones.clone();
                     let live_st = shared_state.current_settings.read().unwrap().clone();
@@ -771,6 +811,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     if let Some(ref mut sampler) = hue_sampler {
                         sampler.set_peak_weight(live_st.peak_weight);
                         sampler.set_gamma(live_st.gamma);
+                        sampler.set_max_color_step(live_st.max_color_step);
                     }
                     if group_changed || configuration_changed {
                         hue_packet_builder =
@@ -787,8 +828,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             }
                         }
                     }
+                    if let Err(error) = config.save(&config_path) {
+                        warn!(
+                            "Hue area sync succeeded but could not persist its certificate pin: {}",
+                            error
+                        );
+                    }
                     info!(
-                        "Synced {} Hue channel positions from '{}'. Save to persist them.",
+                        "Synced and persisted {} Hue channel positions from '{}'.",
                         config.zones.len(),
                         area.name
                     );
@@ -802,6 +849,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         // 4. Check for pipeline restart request from Web UI
+        if shared_state
+            .request_reconfigure
+            .swap(false, Ordering::SeqCst)
+        {
+            info!("Device credentials saved; restarting daemon to load the new configuration.");
+            break;
+        }
+
         if shared_state.request_restart.swap(false, Ordering::SeqCst) {
             info!("Pipeline restart requested via Web UI. Re-initializing capture...");
             drop(capture);
@@ -899,11 +954,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                     *color
                                 } else {
                                     RgbColor::new(
-                                        ((color.r as f32) * current_brightness).clamp(0.0, 255.0)
+                                        ((color.r as f32) * current_hue_brightness)
+                                            .clamp(0.0, 255.0)
                                             as u8,
-                                        ((color.g as f32) * current_brightness).clamp(0.0, 255.0)
+                                        ((color.g as f32) * current_hue_brightness)
+                                            .clamp(0.0, 255.0)
                                             as u8,
-                                        ((color.b as f32) * current_brightness).clamp(0.0, 255.0)
+                                        ((color.b as f32) * current_hue_brightness)
+                                            .clamp(0.0, 255.0)
                                             as u8,
                                     )
                                 };
@@ -972,6 +1030,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                 }
                             } else {
                                 shared_state.hue_connected.store(true, Ordering::Relaxed);
+                                emitted_light_update = true;
                             }
                             last_channels = channels;
                         }
@@ -1000,50 +1059,60 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             .nanoleaf_connected
                             .store(true, Ordering::Relaxed);
 
-                        if let Err(e) = nl_streamer.send_frame(&nl_colors, 0) {
-                            shared_state
-                                .nanoleaf_connected
-                                .store(false, Ordering::Relaxed);
-                            warn!(
+                        let nanoleaf_changed = colors_changed(&last_nanoleaf_colors, &nl_colors);
+                        let should_send = !config.adaptive_throttling
+                            || nanoleaf_changed
+                            || last_nanoleaf_heartbeat.elapsed() >= Duration::from_millis(500);
+                        if should_send {
+                            last_nanoleaf_heartbeat = tokio::time::Instant::now();
+                            if let Err(e) = nl_streamer.send_frame(&nl_colors, 0) {
+                                shared_state
+                                    .nanoleaf_connected
+                                    .store(false, Ordering::Relaxed);
+                                warn!(
                                 "Nanoleaf UDP frame send error ({}). Triggering external control refresh...",
                                 e
                             );
-                            if last_nanoleaf_refresh.elapsed() >= Duration::from_secs(3) {
-                                last_nanoleaf_refresh = tokio::time::Instant::now();
-                                if let Some(ref n_cfg) = config.nanoleaf {
-                                    match nanoleaf::enable_external_control(
-                                        &n_cfg.ip,
-                                        &n_cfg.auth_token,
-                                    ) {
-                                        Ok(port) => {
-                                            info!(
+                                if last_nanoleaf_refresh.elapsed() >= Duration::from_secs(3) {
+                                    last_nanoleaf_refresh = tokio::time::Instant::now();
+                                    if let Some(ref n_cfg) = config.nanoleaf {
+                                        match nanoleaf::enable_external_control(
+                                            &n_cfg.ip,
+                                            &n_cfg.auth_token,
+                                        ) {
+                                            Ok(port) => {
+                                                info!(
                                                 "[+] Re-enabled Nanoleaf external control on UDP port {}.",
                                                 port
                                             );
-                                            match NanoleafUdpStreamer::new(
-                                                &n_cfg.ip,
-                                                port,
-                                                nl_streamer.panel_ids().to_vec(),
-                                            ) {
-                                                Ok(new_streamer) => {
-                                                    *nl_streamer = new_streamer;
-                                                }
-                                                Err(recreate_err) => {
-                                                    error!(
+                                                match NanoleafUdpStreamer::new(
+                                                    &n_cfg.ip,
+                                                    port,
+                                                    nl_streamer.panel_ids().to_vec(),
+                                                ) {
+                                                    Ok(new_streamer) => {
+                                                        *nl_streamer = new_streamer;
+                                                    }
+                                                    Err(recreate_err) => {
+                                                        error!(
                                                         "Failed to recreate Nanoleaf streamer: {}",
                                                         recreate_err
                                                     );
+                                                    }
                                                 }
                                             }
-                                        }
-                                        Err(ext_err) => {
-                                            error!(
+                                            Err(ext_err) => {
+                                                error!(
                                                 "Failed to refresh Nanoleaf external control: {}",
                                                 ext_err
                                             );
+                                            }
                                         }
                                     }
                                 }
+                            } else {
+                                last_nanoleaf_colors = nl_colors;
+                                emitted_light_update = true;
                             }
                         }
                     }
@@ -1092,6 +1161,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
         }
 
+        if emitted_light_update {
+            light_update_count = light_update_count.saturating_add(1);
+        }
+        let output_elapsed = light_update_window.elapsed();
+        if output_elapsed >= Duration::from_secs(1) {
+            shared_state
+                .set_light_update_fps(light_update_count as f32 / output_elapsed.as_secs_f32());
+            light_update_count = 0;
+            light_update_window = tokio::time::Instant::now();
+        }
+
         let elapsed = loop_start.elapsed();
         if elapsed < frame_interval {
             tokio::time::sleep(frame_interval - elapsed).await;
@@ -1107,6 +1187,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             &config.entertainment_area_id,
             false,
         );
+    }
+
+    web_shutdown.cancel();
+    if let Some(tasks) = web_tasks {
+        tasks.close();
+        tasks.wait().await;
     }
 
     info!("lg-hue-sync terminated cleanly.");
@@ -1286,6 +1372,7 @@ async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
     config.clientkey = clientkey;
     config.entertainment_area_id = area.legacy_group_id;
     config.entertainment_configuration_id = Some(area.configuration_id);
+    config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
     if !area.zones.is_empty() {
         config.zones = area.zones;
     }
@@ -1306,11 +1393,16 @@ async fn run_sync_hue(config_path: PathBuf, target_area: Option<String>) -> Resu
         config.bridge_ip
     );
 
-    let area =
-        hue::sync_entertainment_areas(&config.bridge_ip, &config.username, target_area.as_deref())?;
+    let area = hue::sync_entertainment_areas(
+        &config.bridge_ip,
+        &config.username,
+        target_area.as_deref(),
+        config.hue_bridge_certificate_sha256.as_deref(),
+    )?;
 
     config.entertainment_area_id = area.legacy_group_id;
     config.entertainment_configuration_id = Some(area.configuration_id);
+    config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
     if !area.zones.is_empty() {
         config.zones = area.zones;
     }
@@ -1372,4 +1464,16 @@ async fn run_pair_nanoleaf(ip_opt: Option<String>, config_path: PathBuf) -> Resu
         config_path
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_output_frames_are_suppressed_but_meaningful_changes_pass() {
+        let previous = vec![RgbColor::new(10, 20, 30)];
+        assert!(!colors_changed(&previous, &previous));
+        assert!(colors_changed(&previous, &[RgbColor::new(13, 20, 30)]));
+    }
 }

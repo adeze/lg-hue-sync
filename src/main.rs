@@ -104,6 +104,14 @@ fn reconnect_hue(config: &Config) -> Result<HueDtlsClient> {
     HueDtlsClient::connect(&config.bridge_ip, &config.username, &config.clientkey)
 }
 
+fn hue_configuration_id(config: &Config) -> Option<String> {
+    config
+        .entertainment_configuration_id
+        .as_deref()
+        .filter(|id| id.len() == 36)
+        .map(ToOwned::to_owned)
+}
+
 fn calibration_pattern(state: &SharedState) -> Option<CalibrationPattern> {
     *state.calibration_pattern.read().unwrap()
 }
@@ -169,6 +177,7 @@ fn calibration_color(pattern: CalibrationPattern, (x, y): (f32, f32)) -> RgbColo
         CalibrationPattern::Blue => RgbColor::new(0, 0, 255),
         CalibrationPattern::White => RgbColor::new(255, 255, 255),
         CalibrationPattern::WarmWhite => RgbColor::new(255, 180, 107),
+        CalibrationPattern::DaylightWhite => RgbColor::new(255, 255, 255),
         CalibrationPattern::Quadrants => {
             if y < 0.33 {
                 RgbColor::new(255, 0, 0)
@@ -229,6 +238,30 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         ));
     }
 
+    if hue_active && hue_configuration_id(&config).is_none() {
+        match sync_entertainment_areas(
+            &config.bridge_ip,
+            &config.username,
+            Some(&config.entertainment_area_id),
+        ) {
+            Ok(area) => {
+                config.entertainment_area_id = area.legacy_group_id;
+                config.entertainment_configuration_id = Some(area.configuration_id);
+                config.zones = area.zones;
+                if let Err(error) = config.save(&config_path) {
+                    warn!(
+                        "Resolved Hue V2 configuration but could not persist it: {}",
+                        error
+                    );
+                }
+            }
+            Err(error) => warn!(
+                "Hue V2 configuration discovery failed; using legacy packet header: {}",
+                error
+            ),
+        }
+    }
+
     info!(
         "Loaded configuration (Hue: {}, Nanoleaf: {})",
         if hue_active {
@@ -281,7 +314,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     });
 
     // 1. Initialize Philips Hue DTLS client if active
-    let mut hue_dtls = if hue_active {
+    let mut hue_sync_enabled = config.hue_sync_enabled;
+    let mut nanoleaf_sync_enabled = config.nanoleaf_sync_enabled;
+    let mut hue_dtls = if hue_active && hue_sync_enabled {
         let client = reconnect_hue(&config)?;
         Some(client)
     } else {
@@ -303,15 +338,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     if let Some(ref mut sampler) = hue_sampler {
         sampler.set_peak_weight(config.peak_weight);
         sampler.set_gamma(config.gamma);
+        sampler.set_max_color_step(config.max_color_step);
     }
 
     let mut hue_packet_builder = if hue_active {
-        let area_uuid = if config.entertainment_area_id.len() == 36 {
-            Some(config.entertainment_area_id.clone())
-        } else {
-            None
-        };
-        Some(HueStreamPacketBuilder::new(area_uuid))
+        Some(HueStreamPacketBuilder::new(hue_configuration_id(&config)))
     } else {
         None
     };
@@ -319,7 +350,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     // 2. Initialize Nanoleaf 4D UDP streamer if active
     let (mut nanoleaf_sampler, mut nanoleaf_streamer) = if nanoleaf_active {
         let n_cfg = config.nanoleaf.as_ref().unwrap();
-        let port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
         let sampler = NanoleafPerimeterSampler::new(
             n_cfg.segments,
             &n_cfg.panel_ids,
@@ -328,19 +358,26 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             config.noise_gate_threshold,
             config.brightness_multiplier,
         );
-        let streamer = NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())?;
-        info!(
-            "[+] Nanoleaf 4D streaming ready: {} perimeter segments on UDP port {}",
-            streamer.panel_count(),
-            port
-        );
-        (Some(sampler), Some(streamer))
+        let streamer = if nanoleaf_sync_enabled {
+            let port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
+            let streamer = NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())?;
+            info!(
+                "[+] Nanoleaf 4D streaming ready: {} perimeter segments on UDP port {}",
+                streamer.panel_count(),
+                port
+            );
+            Some(streamer)
+        } else {
+            None
+        };
+        (Some(sampler), streamer)
     } else {
         (None, None)
     };
     if let Some(ref mut sampler) = nanoleaf_sampler {
         sampler.set_peak_weight(config.peak_weight);
         sampler.set_gamma(config.gamma);
+        sampler.set_max_color_step(config.max_color_step);
     }
 
     // 3. Initialize capture
@@ -398,12 +435,16 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         use_xy_gamut: config.use_xy_gamut,
         letterbox_detection: config.letterbox_detection,
         hdr_tone_mapping: config.hdr_tone_mapping,
+        hue_sync_enabled,
+        nanoleaf_sync_enabled,
+        max_color_step: config.max_color_step,
     };
 
     let shared_state = Arc::new(SharedState::new(
         initial_settings,
         config.bridge_ip.clone(),
         format!("{}x{}", config.capture_width, config.capture_height),
+        config.zones.clone(),
     ));
     shared_state.set_fps(target_fps as f32);
 
@@ -451,7 +492,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         // Periodically verify if the user stopped sync from the official Hue mobile app (every 5s)
         if last_status_check.elapsed() >= Duration::from_secs(5) {
             last_status_check = tokio::time::Instant::now();
-            if hue_active && hue_dtls.is_some() {
+            if hue_active && hue_sync_enabled && hue_dtls.is_some() {
                 if let Ok(state) = hue::get_stream_state(
                     &config.bridge_ip,
                     &config.username,
@@ -584,6 +625,63 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             let live_st = shared_state.current_settings.read().unwrap().clone();
             current_brightness = live_st.brightness_multiplier;
             current_use_xy = live_st.use_xy_gamut;
+            if hue_sync_enabled != live_st.hue_sync_enabled {
+                hue_sync_enabled = live_st.hue_sync_enabled;
+                if hue_sync_enabled && shared_state.is_syncing.load(Ordering::SeqCst) {
+                    match reconnect_hue(&config) {
+                        Ok(client) => {
+                            hue_dtls = Some(client);
+                            shared_state.hue_connected.store(true, Ordering::Relaxed);
+                        }
+                        Err(error) => {
+                            hue_sync_enabled = false;
+                            shared_state.hue_connected.store(false, Ordering::Relaxed);
+                            warn!("Hue sync remains off: {}", error);
+                        }
+                    }
+                } else {
+                    let _ = set_stream_active(
+                        &config.bridge_ip,
+                        &config.username,
+                        &config.entertainment_area_id,
+                        false,
+                    );
+                    hue_dtls = None;
+                    shared_state.hue_connected.store(false, Ordering::Relaxed);
+                }
+            }
+            if nanoleaf_sync_enabled != live_st.nanoleaf_sync_enabled {
+                nanoleaf_sync_enabled = live_st.nanoleaf_sync_enabled;
+                if nanoleaf_sync_enabled && shared_state.is_syncing.load(Ordering::SeqCst) {
+                    if let (Some(n_cfg), Some(sampler)) =
+                        (config.nanoleaf.as_ref(), nanoleaf_sampler.as_ref())
+                    {
+                        match nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)
+                            .and_then(|port| {
+                                NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())
+                            }) {
+                            Ok(streamer) => {
+                                nanoleaf_streamer = Some(streamer);
+                                shared_state
+                                    .nanoleaf_connected
+                                    .store(true, Ordering::Relaxed);
+                            }
+                            Err(error) => {
+                                nanoleaf_sync_enabled = false;
+                                shared_state
+                                    .nanoleaf_connected
+                                    .store(false, Ordering::Relaxed);
+                                warn!("Nanoleaf sync remains off: {}", error);
+                            }
+                        }
+                    }
+                } else {
+                    nanoleaf_streamer = None;
+                    shared_state
+                        .nanoleaf_connected
+                        .store(false, Ordering::Relaxed);
+                }
+            }
             if let Some(ref mut s) = hue_sampler {
                 s.set_smoothing_factor(live_st.smoothing_factor);
                 s.set_hdr_tone_mapping(live_st.hdr_tone_mapping);
@@ -592,6 +690,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 s.set_peak_weight(live_st.peak_weight);
                 s.set_gamma(live_st.gamma);
                 s.set_noise_gate_threshold(live_st.noise_gate_threshold);
+                s.set_max_color_step(live_st.max_color_step);
             }
             if let Some(ref mut ns) = nanoleaf_sampler {
                 ns.set_smoothing_factor(live_st.smoothing_factor);
@@ -601,6 +700,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 ns.set_peak_weight(live_st.peak_weight);
                 ns.set_gamma(live_st.gamma);
                 ns.set_noise_gate_threshold(live_st.noise_gate_threshold);
+                ns.set_max_color_step(live_st.max_color_step);
             }
             info!(
                 "Applied live settings: brightness={:.1}x, saturation={:.1}x, smoothing={:.2}, xy_mode={}",
@@ -623,6 +723,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             save_cfg.use_xy_gamut = live_st.use_xy_gamut;
             save_cfg.letterbox_detection = live_st.letterbox_detection;
             save_cfg.hdr_tone_mapping = live_st.hdr_tone_mapping;
+            save_cfg.hue_sync_enabled = hue_sync_enabled;
+            save_cfg.nanoleaf_sync_enabled = nanoleaf_sync_enabled;
+            save_cfg.max_color_step = live_st.max_color_step;
             if let Err(e) = save_cfg.save(&config_path) {
                 error!("Failed to save updated config to {:?}: {}", config_path, e);
             } else {
@@ -640,9 +743,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 &config.username,
                 Some(&config.entertainment_area_id),
             ) {
-                Ok((area_id, area_name, zones)) if !zones.is_empty() => {
-                    let area_changed = config.entertainment_area_id != area_id;
-                    if area_changed {
+                Ok(area) if !area.zones.is_empty() => {
+                    let group_changed = config.entertainment_area_id != area.legacy_group_id;
+                    let configuration_changed = config.entertainment_configuration_id.as_deref()
+                        != Some(&area.configuration_id);
+                    if group_changed {
                         let _ = set_stream_active(
                             &config.bridge_ip,
                             &config.username,
@@ -650,8 +755,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             false,
                         );
                     }
-                    config.entertainment_area_id = area_id;
-                    config.zones = zones;
+                    config.entertainment_area_id = area.legacy_group_id;
+                    config.entertainment_configuration_id = Some(area.configuration_id);
+                    config.zones = area.zones;
+                    *shared_state.hue_zones.write().unwrap() = config.zones.clone();
                     let live_st = shared_state.current_settings.read().unwrap().clone();
                     hue_sampler = Some(ZoneSampler::new(
                         config.zones.clone(),
@@ -665,8 +772,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         sampler.set_peak_weight(live_st.peak_weight);
                         sampler.set_gamma(live_st.gamma);
                     }
-                    if area_changed {
-                        hue_packet_builder = Some(HueStreamPacketBuilder::new(None));
+                    if group_changed || configuration_changed {
+                        hue_packet_builder =
+                            Some(HueStreamPacketBuilder::new(hue_configuration_id(&config)));
                         match reconnect_hue(&config) {
                             Ok(client) => {
                                 hue_dtls = Some(client);
@@ -682,12 +790,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     info!(
                         "Synced {} Hue channel positions from '{}'. Save to persist them.",
                         config.zones.len(),
-                        area_name
+                        area.name
                     );
                 }
-                Ok((_area_id, area_name, _)) => warn!(
+                Ok(area) => warn!(
                     "Hue area '{}' did not provide channel positions; leaving zones unchanged.",
-                    area_name
+                    area.name
                 ),
                 Err(e) => warn!("Hue bridge sync failed; leaving zones unchanged: {}", e),
             }
@@ -740,7 +848,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             Ok(frame) => {
                 let mut is_scene_cut = false;
 
-                if !hue_active && nanoleaf_active {
+                if !hue_sync_enabled && nanoleaf_sync_enabled {
                     nanoleaf_only_frame_count += 1;
                     let global =
                         frame_average(frame.data, frame.width, frame.height, frame.is_bgra);
@@ -763,7 +871,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
 
                 // 1. Process Philips Hue entertainment zones
-                if hue_active {
+                if hue_active && hue_sync_enabled {
                     if let (Some(ref mut sampler), Some(ref mut dtls), Some(ref mut builder)) =
                         (&mut hue_sampler, &mut hue_dtls, &mut hue_packet_builder)
                     {
@@ -871,7 +979,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
 
                 // 2. Process Nanoleaf 4D TV perimeter lightstrip
-                if nanoleaf_active {
+                if nanoleaf_active && nanoleaf_sync_enabled {
                     if let (Some(ref mut nl_sampler), Some(ref mut nl_streamer)) =
                         (&mut nanoleaf_sampler, &mut nanoleaf_streamer)
                     {
@@ -1022,14 +1130,7 @@ async fn run_test_pattern(config_path: PathBuf) -> Result<()> {
     let mut dtls_client =
         HueDtlsClient::connect(&config.bridge_ip, &config.username, &config.clientkey)?;
 
-    // Resolve CLIP v2 UUID for v2 packet format, or None for CLIP v1 numeric area ID
-    let area_uuid = if config.entertainment_area_id.len() == 36 {
-        Some(config.entertainment_area_id.clone())
-    } else {
-        None
-    };
-
-    let mut packet_builder = HueStreamPacketBuilder::new(area_uuid);
+    let mut packet_builder = HueStreamPacketBuilder::new(hue_configuration_id(&config));
     info!("Streaming fast rainbow test pattern across all Hue entertainment channels for 15 seconds...");
 
     let start = std::time::Instant::now();
@@ -1171,20 +1272,22 @@ async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
         },
     };
 
-    let (username, clientkey, area_id, discovered_zones) = hue::pair_bridge(&bridge_ip, 45)?;
+    let (username, clientkey, area) = hue::pair_bridge(&bridge_ip, 45)?;
     let mut config = if output.exists() {
-        Config::load(&output)
-            .unwrap_or_else(|_| Config::new_default(&bridge_ip, &username, &clientkey, &area_id))
+        Config::load(&output).unwrap_or_else(|_| {
+            Config::new_default(&bridge_ip, &username, &clientkey, &area.legacy_group_id)
+        })
     } else {
-        Config::new_default(&bridge_ip, &username, &clientkey, &area_id)
+        Config::new_default(&bridge_ip, &username, &clientkey, &area.legacy_group_id)
     };
 
     config.bridge_ip = bridge_ip;
     config.username = username;
     config.clientkey = clientkey;
-    config.entertainment_area_id = area_id;
-    if !discovered_zones.is_empty() {
-        config.zones = discovered_zones;
+    config.entertainment_area_id = area.legacy_group_id;
+    config.entertainment_configuration_id = Some(area.configuration_id);
+    if !area.zones.is_empty() {
+        config.zones = area.zones;
     }
 
     config.save(&output)?;
@@ -1203,18 +1306,19 @@ async fn run_sync_hue(config_path: PathBuf, target_area: Option<String>) -> Resu
         config.bridge_ip
     );
 
-    let (area_id, area_name, discovered_zones) =
+    let area =
         hue::sync_entertainment_areas(&config.bridge_ip, &config.username, target_area.as_deref())?;
 
-    config.entertainment_area_id = area_id;
-    if !discovered_zones.is_empty() {
-        config.zones = discovered_zones;
+    config.entertainment_area_id = area.legacy_group_id;
+    config.entertainment_configuration_id = Some(area.configuration_id);
+    if !area.zones.is_empty() {
+        config.zones = area.zones;
     }
     config.save(&config_path)?;
 
     println!(
         "\n[+] Entertainment area '{}' (ID: {}) synced successfully!",
-        area_name, config.entertainment_area_id
+        area.name, config.entertainment_area_id
     );
     println!(
         "    Updated {} light zones in {:?}",

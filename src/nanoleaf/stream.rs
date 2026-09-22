@@ -117,6 +117,17 @@ pub struct NanoleafPerimeterSampler {
     brightness_multiplier: f32,
     peak_weight: f32,
     gamma: f32,
+    max_color_step: u8,
+}
+
+fn limit_color_step(current: RgbColor, target: RgbColor, max_step: u8) -> RgbColor {
+    let limit = max_step as i16;
+    let cap = |from: u8, to: u8| (to as i16 - from as i16).clamp(-limit, limit) + from as i16;
+    RgbColor::new(
+        cap(current.r, target.r) as u8,
+        cap(current.g, target.g) as u8,
+        cap(current.b, target.b) as u8,
+    )
 }
 
 impl NanoleafPerimeterSampler {
@@ -152,6 +163,7 @@ impl NanoleafPerimeterSampler {
             brightness_multiplier,
             peak_weight: 0.35,
             gamma: 1.0,
+            max_color_step: 12,
         }
     }
 
@@ -423,6 +435,10 @@ impl NanoleafPerimeterSampler {
         self.gamma = gamma.clamp(0.5, 3.0);
     }
 
+    pub fn set_max_color_step(&mut self, step: u8) {
+        self.max_color_step = step.max(1);
+    }
+
     pub fn set_noise_gate_threshold(&mut self, threshold: f32) {
         self.noise_gate_threshold = threshold.clamp(0.0, 0.1);
     }
@@ -550,7 +566,11 @@ impl NanoleafPerimeterSampler {
 
             // EMA temporal smoothing
             let current = self.smoothed_colors[i];
-            let smoothed = current.lerp(processed_color, alpha);
+            let smoothed = limit_color_step(
+                current,
+                current.lerp(processed_color, alpha),
+                self.max_color_step,
+            );
             self.smoothed_colors[i] = smoothed;
 
             // Apply brightness multiplier
@@ -641,18 +661,18 @@ mod tests {
     }
 
     #[test]
-    fn test_nanoleaf_scene_cut_snaps_instantly() {
+    fn test_nanoleaf_scene_cut_respects_limiter() {
         let panel_ids = vec![1u16, 2u16, 3u16, 4u16];
         let mut sampler = NanoleafPerimeterSampler::new(4, &panel_ids, false, 1.0, 0.0, 1.0);
 
         // Synthetic 4x4 frame of bright red (RGBA)
         let red_frame = vec![255, 0, 0, 255].repeat(16);
 
-        // Scene cut = true: should snap immediately to red
+        // Scene cuts bypass EMA but must still respect the flash-safety limiter.
         let colors = sampler.sample_frame(&red_frame, 4, 4, false, true);
         assert_eq!(colors.len(), 4);
         for c in &colors {
-            assert_eq!(c.r, 255);
+            assert_eq!(c.r, 12);
             assert_eq!(c.g, 0);
             assert_eq!(c.b, 0);
         }
@@ -694,6 +714,7 @@ mod tests {
             y_min: 0.125,
             y_max: 0.875,
         });
+        sampler.set_max_color_step(255);
 
         // Synthetic 4x4 frame with blue color
         let blue_frame = vec![0, 0, 255, 255].repeat(16);

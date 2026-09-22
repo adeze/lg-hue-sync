@@ -219,6 +219,7 @@ pub struct ZoneSampler {
     noise_gate_threshold: f32,
     peak_weight: f32,
     gamma: f32,
+    max_color_step: u8,
     active_rect: ActiveRect,
     frame_count: u64,
     last_global_color: RgbColor,
@@ -244,6 +245,7 @@ impl ZoneSampler {
             noise_gate_threshold,
             peak_weight: 0.35,
             gamma: 1.0,
+            max_color_step: 12,
             active_rect: ActiveRect::default(),
             frame_count: 0,
             last_global_color: RgbColor::new(0, 0, 0),
@@ -277,6 +279,10 @@ impl ZoneSampler {
 
     pub fn set_noise_gate_threshold(&mut self, threshold: f32) {
         self.noise_gate_threshold = threshold.clamp(0.0, 0.1);
+    }
+
+    pub fn set_max_color_step(&mut self, step: u8) {
+        self.max_color_step = step.max(1);
     }
 
     /// Fast letterbox / pillarbox detector. Evaluates top/bottom row luminance to find black bars.
@@ -560,7 +566,11 @@ impl ZoneSampler {
 
             // Apply Adaptive EMA smoothing
             let current = self.smoothed_colors[i];
-            let smoothed = current.lerp(processed_color, effective_alpha);
+            let smoothed = limit_color_step(
+                current,
+                current.lerp(processed_color, effective_alpha),
+                self.max_color_step,
+            );
             self.smoothed_colors[i] = smoothed;
 
             results.push((zone.channel_id, smoothed));
@@ -573,6 +583,16 @@ impl ZoneSampler {
     pub fn active_rect(&self) -> ActiveRect {
         self.active_rect
     }
+}
+
+fn limit_color_step(current: RgbColor, target: RgbColor, max_step: u8) -> RgbColor {
+    let limit = max_step as i16;
+    let cap = |from: u8, to: u8| (to as i16 - from as i16).clamp(-limit, limit) + from as i16;
+    RgbColor::new(
+        cap(current.r, target.r) as u8,
+        cap(current.g, target.g) as u8,
+        cap(current.b, target.b) as u8,
+    )
 }
 
 #[cfg(test)]
@@ -591,6 +611,7 @@ mod tests {
         };
         let mut sampler = ZoneSampler::new(vec![zone], 1.0, false, false, 2.0, 0.0);
         sampler.set_peak_weight(0.0);
+        sampler.set_max_color_step(255);
 
         // Frame with half dull grey (100, 100, 100) and half bright red (255, 0, 0)
         let width = 4u32;
@@ -649,5 +670,13 @@ mod tests {
         let bright = RgbColor::new(100, 100, 100);
         let not_gated = bright.apply_noise_gate(0.02);
         assert_eq!(not_gated, bright);
+    }
+
+    #[test]
+    fn test_scene_cut_is_limited() {
+        assert_eq!(
+            limit_color_step(RgbColor::new(0, 0, 0), RgbColor::new(255, 255, 255), 12),
+            RgbColor::new(12, 12, 12)
+        );
     }
 }

@@ -81,12 +81,22 @@ fn default_nanoleaf_segments() -> u16 {
 pub struct Config {
     #[serde(default = "default_true")]
     pub hue_enabled: bool,
+    /// Runtime preference: keep Hue configured but release its entertainment area when off.
+    #[serde(default = "default_true")]
+    pub hue_sync_enabled: bool,
     pub bridge_ip: String,
     pub username: String,
     pub clientkey: String,
+    /// Legacy V1 group ID used only for stream activation and state queries.
     pub entertainment_area_id: String,
+    /// V2 entertainment configuration UUID embedded in HueStream packets.
+    #[serde(default)]
+    pub entertainment_configuration_id: Option<String>,
     #[serde(default)]
     pub nanoleaf: Option<NanoleafConfig>,
+    /// Runtime preference: stop sending Nanoleaf UDP frames when off.
+    #[serde(default = "default_true")]
+    pub nanoleaf_sync_enabled: bool,
     #[serde(default = "default_fps")]
     pub fps: u32,
     #[serde(default = "default_brightness")]
@@ -105,6 +115,9 @@ pub struct Config {
     pub gamma: f32,
     #[serde(default = "default_noise_gate")]
     pub noise_gate_threshold: f32,
+    /// Maximum per-component RGB change in one sampled video frame.
+    #[serde(default = "default_max_color_step")]
+    pub max_color_step: u8,
     #[serde(default = "default_true")]
     pub adaptive_throttling: bool,
     #[serde(default = "default_zones")]
@@ -155,6 +168,10 @@ fn default_noise_gate() -> f32 {
     0.02
 }
 
+fn default_max_color_step() -> u8 {
+    12
+}
+
 fn default_zones() -> Vec<LightZone> {
     vec![
         LightZone {
@@ -196,11 +213,14 @@ impl Config {
     pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
         Self {
             hue_enabled: true,
+            hue_sync_enabled: true,
             bridge_ip: bridge_ip.to_string(),
             username: username.to_string(),
             clientkey: clientkey.to_string(),
             entertainment_area_id: area_id.to_string(),
+            entertainment_configuration_id: None,
             nanoleaf: None,
+            nanoleaf_sync_enabled: true,
             fps: default_fps(),
             brightness_multiplier: default_brightness(),
             use_xy_gamut: false,
@@ -210,6 +230,7 @@ impl Config {
             peak_weight: default_peak_weight(),
             gamma: default_gamma(),
             noise_gate_threshold: default_noise_gate(),
+            max_color_step: default_max_color_step(),
             adaptive_throttling: true,
             zones: default_zones(),
             capture_width: default_capture_width(),

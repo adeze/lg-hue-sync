@@ -52,18 +52,29 @@
       position: absolute; top: 0; left: 0; right: 0; bottom: 0;
       display: flex; flex-direction: column; justify-content: space-between;
     }
-    .edge-strip { position: absolute; display: flex; }
+    .edge-strip { position: absolute; display: flex; z-index: 3; }
     .edge-top { top: 0; left: 0; right: 0; height: 10px; flex-direction: row; }
     .edge-bottom { bottom: 0; left: 0; right: 0; height: 10px; flex-direction: row; }
     .edge-left { top: 0; bottom: 0; left: 0; width: 10px; flex-direction: column; }
     .edge-right { top: 0; bottom: 0; right: 0; width: 10px; flex-direction: column; }
     .led-segment { flex: 1; transition: background 0.15s ease; }
     .tv-center-content {
-      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 2;
       text-align: center; color: rgba(255,255,255,0.4); font-size: 0.85rem; pointer-events: none;
     }
 
     /* Hue Zones Overlay */
+    .hue-zone-overlay { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+    .hue-zone {
+      position: absolute; overflow: hidden; border: 1px solid rgba(255,255,255,0.5); border-radius: 4px;
+      background: rgba(255,255,255,0.08); box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25);
+      transition: background 0.2s ease, border-color 0.2s ease;
+    }
+    .hue-zone-label {
+      display: block; width: max-content; max-width: 100%; padding: 2px 4px; overflow: hidden;
+      color: rgba(255,255,255,0.9); background: rgba(0,0,0,0.55); font-size: 0.58rem;
+      font-weight: 700; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap;
+    }
     .hue-badges {
       display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 14px;
     }
@@ -136,6 +147,7 @@
     <div style="font-size: 0.85rem; font-weight: 700; margin-bottom: 8px;">LIVE SCREEN & LIGHTS PREVIEW</div>
     <div class="tv-preview-container">
       <div class="tv-inner">
+        <div class="hue-zone-overlay" id="hueZoneOverlay" aria-label="Hue screen sampling zones"></div>
         <div class="edge-strip edge-top" id="topLeds"></div>
         <div class="edge-strip edge-bottom" id="bottomLeds"></div>
         <div class="edge-strip edge-left" id="leftLeds"></div>
@@ -147,13 +159,29 @@
       </div>
     </div>
 
-    <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-top: 12px;">PHILIPS HUE ENTERTAINMENT (8 ZONES)</div>
+    <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-top: 12px;">PHILIPS HUE ENTERTAINMENT — SCREEN SAMPLING ZONES</div>
     <div class="hue-badges" id="hueBadges"></div>
   </div>
 
   <!-- Tuning Controls -->
   <div class="card">
     <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 16px;">AMBIENT TUNING</div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Hue Entertainment Sync</div>
+        <div class="toggle-desc">Release Hue lights to the Hue app while 4D can keep running</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="toggleHueSync" checked onchange="updateSettings()"><span class="slider"></span></label>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Nanoleaf 4D Sync</div>
+        <div class="toggle-desc">Stop TV-driven UDP updates while Hue can keep running</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="toggleNanoleafSync" checked onchange="updateSettings()"><span class="slider"></span></label>
+    </div>
 
     <div class="control-group">
       <div class="control-header">
@@ -187,6 +215,15 @@
         <span class="control-val" id="valSmoothing">0.35</span>
       </div>
       <input type="range" id="sliderSmoothing" min="0.05" max="0.8" step="0.05" value="0.35" oninput="updateSettings()">
+    </div>
+
+    <div class="control-group">
+      <div class="control-header">
+        <span>Scene-Change Limiter</span>
+        <span class="control-val" id="valColorStep">12 RGB steps</span>
+      </div>
+      <input type="range" id="sliderColorStep" min="4" max="64" step="2" value="12" oninput="updateSettings()">
+      <div class="toggle-desc">Caps each RGB component per captured frame, including hard cuts. Lower = gentler.</div>
     </div>
 
     <div class="control-group">
@@ -232,7 +269,8 @@
     <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 12px;">CALIBRATION</div>
     <button class="secondary-btn" style="width:100%; margin-bottom:10px" onclick="syncHueBridge()">Sync TV Area from Hue Bridge</button>
     <div class="btn-row"><button class="secondary-btn" onclick="testPattern('red')">Red</button><button class="secondary-btn" onclick="testPattern('green')">Green</button><button class="secondary-btn" onclick="testPattern('blue')">Blue</button></div>
-    <div class="btn-row"><button class="secondary-btn" onclick="testPattern('white')">White</button><button class="secondary-btn" onclick="testPattern('warm-white')">Warm 3000K</button><button class="secondary-btn" onclick="testPattern('quadrants')">Quadrants</button></div>
+    <div class="btn-row"><button class="secondary-btn" onclick="testPattern('white')">White</button><button class="secondary-btn" onclick="testPattern('warm-white')">Warm 3000K</button><button class="secondary-btn" onclick="testPattern('daylight-white')">Daylight D65</button></div>
+    <div class="btn-row"><button class="secondary-btn" onclick="testPattern('quadrants')">Quadrants</button></div>
     <div class="btn-row"><button class="secondary-btn" onclick="testPattern('perimeter')">4D Tracer</button><button class="secondary-btn" onclick="testPattern('off')">Return to Sync</button></div>
     <div class="toggle-desc" id="calibrationStatus" style="margin-top:12px">Expected RGB shown by selected pattern; 4D tracer advances one white segment at a time.</div>
   </div>
@@ -300,16 +338,56 @@
       rightLeds.appendChild(seg);
     }
 
-    const HUE_ZONE_NAMES = [
-      "Left Rear", "Left Mid", "Play (Right)", "Play (Top)",
-      "Play (Left)", "Front Center", "Front Right", "Front Left"
-    ];
     const hueBadges = document.getElementById('hueBadges');
-    for (let i = 0; i < 8; i++) {
-      const b = document.createElement('div');
-      b.className = 'hue-badge';
-      b.innerHTML = `<div class="badge-color" id="hueColor_${i}"></div><span>${HUE_ZONE_NAMES[i]}</span>`;
-      hueBadges.appendChild(b);
+    const hueZoneOverlay = document.getElementById('hueZoneOverlay');
+    let hueZoneSignature = '';
+
+    function updateHueZones(zones, colors) {
+      if (!zones) return;
+      const signature = zones.map(zone => [zone.channel_id, zone.name, zone.x_min, zone.x_max, zone.y_min, zone.y_max].join(':')).join('|');
+      if (signature !== hueZoneSignature) {
+        hueZoneOverlay.replaceChildren();
+        for (const zone of zones) {
+          const element = document.createElement('div');
+          element.className = 'hue-zone';
+          element.id = 'hueZone_' + zone.channel_id;
+          element.title = 'Channel ' + zone.channel_id + ': ' + zone.name;
+          element.style.left = (zone.x_min * 100) + '%';
+          element.style.top = (zone.y_min * 100) + '%';
+          element.style.width = ((zone.x_max - zone.x_min) * 100) + '%';
+          element.style.height = ((zone.y_max - zone.y_min) * 100) + '%';
+          const label = document.createElement('span');
+          label.className = 'hue-zone-label';
+          label.textContent = '#' + zone.channel_id;
+          element.appendChild(label);
+          hueZoneOverlay.appendChild(element);
+        }
+        hueZoneSignature = signature;
+      }
+      if (hueBadges.dataset.signature !== signature) {
+        hueBadges.replaceChildren();
+        for (const zone of zones) {
+          const badge = document.createElement('div');
+          badge.className = 'hue-badge';
+          const indicator = document.createElement('div');
+          indicator.className = 'badge-color';
+          indicator.id = 'hueColor_' + zone.channel_id;
+          const name = document.createElement('span');
+          name.textContent = '#' + zone.channel_id + ' · ' + zone.name;
+          badge.append(indicator, name);
+          hueBadges.appendChild(badge);
+        }
+        hueBadges.dataset.signature = signature;
+      }
+      const colorsByChannel = new Map(colors || []);
+      for (const zone of zones) {
+        const color = colorsByChannel.get(zone.channel_id);
+        const element = document.getElementById('hueZone_' + zone.channel_id);
+        if (element && color) {
+          element.style.borderColor = 'rgb(' + color.r + ',' + color.g + ',' + color.b + ')';
+          element.style.background = 'rgba(' + color.r + ',' + color.g + ',' + color.b + ',0.18)';
+        }
+      }
     }
 
     async function pollStatus() {
@@ -357,19 +435,24 @@
         document.getElementById('sliderGamma').value = settings.gamma;
         document.getElementById('sliderBlackGate').value = settings.noise_gate_threshold;
         document.getElementById('sliderSmoothing').value = settings.smoothing_factor;
+        document.getElementById('sliderColorStep').value = settings.max_color_step;
         document.getElementById('toggleRgbMode').checked = !settings.use_xy_gamut;
         document.getElementById('toggleLetterbox').checked = settings.letterbox_detection;
         document.getElementById('toggleHdr').checked = settings.hdr_tone_mapping;
+        document.getElementById('toggleHueSync').checked = settings.hue_sync_enabled;
+        document.getElementById('toggleNanoleafSync').checked = settings.nanoleaf_sync_enabled;
         document.getElementById('valBrightness').innerText = settings.brightness_multiplier.toFixed(1) + 'x';
         document.getElementById('valSaturation').innerText = settings.saturation_boost.toFixed(1) + 'x';
         document.getElementById('valPeak').innerText = Math.round(settings.peak_weight * 100) + '%';
         document.getElementById('valGamma').innerText = settings.gamma.toFixed(2);
         document.getElementById('valBlackGate').innerText = settings.noise_gate_threshold.toFixed(3);
         document.getElementById('valSmoothing').innerText = settings.smoothing_factor.toFixed(2);
+        document.getElementById('valColorStep').innerText = settings.max_color_step + ' RGB steps';
       }
       document.getElementById('calibrationStatus').innerText = data.calibration_pattern
         ? 'Pattern active: ' + data.calibration_pattern + '. Expected RGB values are sent directly to Hue and Nanoleaf.'
         : 'Live video sync active.';
+      updateHueZones(data.hue_zones, data.hue_colors);
 
       // Update Nanoleaf preview LED segments
       if (data.nanoleaf_colors && data.nanoleaf_colors.length >= 40) {
@@ -402,9 +485,8 @@
 
       // Update Hue preview badges
       if (data.hue_colors) {
-        for (let i = 0; i < data.hue_colors.length && i < 8; i++) {
-          const [id, c] = data.hue_colors[i];
-          const badge = document.getElementById('hueColor_' + i);
+        for (const [id, c] of data.hue_colors) {
+          const badge = document.getElementById('hueColor_' + id);
           if (badge && c) badge.style.background = `rgb(${c.r},${c.g},${c.b})`;
         }
       }
@@ -427,9 +509,12 @@
       const gamma = parseFloat(document.getElementById('sliderGamma').value);
       const noiseGate = parseFloat(document.getElementById('sliderBlackGate').value);
       const smoothing = parseFloat(document.getElementById('sliderSmoothing').value);
+      const maxColorStep = parseInt(document.getElementById('sliderColorStep').value, 10);
       const rgbMode = document.getElementById('toggleRgbMode').checked;
       const letterbox = document.getElementById('toggleLetterbox').checked;
       const hdr = document.getElementById('toggleHdr').checked;
+      const hueSync = document.getElementById('toggleHueSync').checked;
+      const nanoleafSync = document.getElementById('toggleNanoleafSync').checked;
 
       document.getElementById('valBrightness').innerText = brightness.toFixed(1) + 'x';
       document.getElementById('valSaturation').innerText = saturation.toFixed(1) + 'x';
@@ -437,6 +522,7 @@
       document.getElementById('valGamma').innerText = gamma.toFixed(2);
       document.getElementById('valBlackGate').innerText = noiseGate.toFixed(3);
       document.getElementById('valSmoothing').innerText = smoothing.toFixed(2);
+      document.getElementById('valColorStep').innerText = maxColorStep + ' RGB steps';
 
       const payload = {
         brightness_multiplier: brightness,
@@ -447,7 +533,10 @@
         smoothing_factor: smoothing,
         use_xy_gamut: !rgbMode,
         letterbox_detection: letterbox,
-        hdr_tone_mapping: hdr
+        hdr_tone_mapping: hdr,
+        hue_sync_enabled: hueSync,
+        nanoleaf_sync_enabled: nanoleafSync,
+        max_color_step: maxColorStep
       };
 
       try {

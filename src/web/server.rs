@@ -1,4 +1,4 @@
-use crate::color::RgbColor;
+use crate::{color::RgbColor, config::LightZone};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -20,6 +20,9 @@ pub struct LiveSettings {
     pub use_xy_gamut: bool,
     pub letterbox_detection: bool,
     pub hdr_tone_mapping: bool,
+    pub hue_sync_enabled: bool,
+    pub nanoleaf_sync_enabled: bool,
+    pub max_color_step: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -29,6 +32,7 @@ pub enum CalibrationPattern {
     Blue,
     White,
     WarmWhite,
+    DaylightWhite,
     Quadrants,
     Perimeter,
 }
@@ -41,6 +45,7 @@ impl CalibrationPattern {
             "blue" => Self::Blue,
             "white" => Self::White,
             "warm-white" => Self::WarmWhite,
+            "daylight-white" => Self::DaylightWhite,
             "quadrants" => Self::Quadrants,
             "perimeter" => Self::Perimeter,
             "off" => return Some(None),
@@ -56,6 +61,7 @@ impl CalibrationPattern {
             Self::Blue => "blue",
             Self::White => "white",
             Self::WarmWhite => "warm-white",
+            Self::DaylightWhite => "daylight-white",
             Self::Quadrants => "quadrants",
             Self::Perimeter => "perimeter",
         }
@@ -79,11 +85,17 @@ pub struct SharedState {
     pub current_settings: RwLock<LiveSettings>,
     pub live_hue_colors: RwLock<Vec<(u8, RgbColor)>>,
     pub live_nanoleaf_colors: RwLock<Vec<RgbColor>>,
+    pub hue_zones: RwLock<Vec<LightZone>>,
     pub calibration_pattern: RwLock<Option<CalibrationPattern>>,
 }
 
 impl SharedState {
-    pub fn new(initial_settings: LiveSettings, hue_bridge_ip: String, capture_res: String) -> Self {
+    pub fn new(
+        initial_settings: LiveSettings,
+        hue_bridge_ip: String,
+        capture_res: String,
+        hue_zones: Vec<LightZone>,
+    ) -> Self {
         Self {
             is_syncing: AtomicBool::new(true),
             request_start: AtomicBool::new(false),
@@ -101,6 +113,7 @@ impl SharedState {
             current_settings: RwLock::new(initial_settings),
             live_hue_colors: RwLock::new(Vec::new()),
             live_nanoleaf_colors: RwLock::new(Vec::new()),
+            hue_zones: RwLock::new(hue_zones),
             calibration_pattern: RwLock::new(None),
         }
     }
@@ -126,6 +139,7 @@ struct StatusResponse {
     settings: LiveSettings,
     nanoleaf_colors: Vec<RgbColor>,
     hue_colors: Vec<(u8, RgbColor)>,
+    hue_zones: Vec<LightZone>,
     calibration_pattern: Option<&'static str>,
 }
 
@@ -235,6 +249,7 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<SharedState>) -> Re
                 let res = state.capture_resolution.read().unwrap().clone();
                 let nl_colors = state.live_nanoleaf_colors.read().unwrap().clone();
                 let hue_colors = state.live_hue_colors.read().unwrap().clone();
+                let hue_zones = state.hue_zones.read().unwrap().clone();
                 let calibration_pattern = state
                     .calibration_pattern
                     .read()
@@ -251,6 +266,7 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<SharedState>) -> Re
                     settings,
                     nanoleaf_colors: nl_colors,
                     hue_colors,
+                    hue_zones,
                     calibration_pattern,
                 }
             };

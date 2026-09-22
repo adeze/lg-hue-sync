@@ -9,6 +9,14 @@ use tracing::info;
 pub use dtls::HueDtlsClient;
 pub use stream::HueStreamPacketBuilder;
 
+#[derive(Debug, Clone)]
+pub struct EntertainmentArea {
+    pub legacy_group_id: String,
+    pub name: String,
+    pub configuration_id: String,
+    pub zones: Vec<crate::config::LightZone>,
+}
+
 /// Auto-discovers Hue Bridge on LAN via official discovery service
 pub fn discover_bridge() -> Result<String> {
     info!("Searching for Hue Bridge via discovery.meethue.com...");
@@ -35,7 +43,7 @@ pub fn discover_bridge() -> Result<String> {
 pub fn pair_bridge(
     bridge_ip: &str,
     timeout_secs: u64,
-) -> Result<(String, String, String, Vec<crate::config::LightZone>)> {
+) -> Result<(String, String, EntertainmentArea)> {
     let url = format!("http://{}/api", bridge_ip);
     let payload = serde_json::json!({
         "devicetype": "lg-hue-sync#tv",
@@ -89,10 +97,9 @@ pub fn pair_bridge(
         return Err(anyhow!("Timed out waiting for Hue Bridge button press"));
     }
 
-    let (area_id, _area_name, discovered_zones) =
-        sync_entertainment_areas(bridge_ip, &username, None)?;
+    let area = sync_entertainment_areas(bridge_ip, &username, None)?;
 
-    Ok((username, clientkey, area_id, discovered_zones))
+    Ok((username, clientkey, area))
 }
 
 /// Queries the Hue Bridge for Entertainment Areas and translates 3D light coordinates into screen sampling zones.
@@ -101,7 +108,7 @@ pub fn sync_entertainment_areas(
     bridge_ip: &str,
     username: &str,
     target_area: Option<&str>,
-) -> Result<(String, String, Vec<crate::config::LightZone>)> {
+) -> Result<EntertainmentArea> {
     let groups_url = format!("http://{}/api/{}/groups", bridge_ip, username);
     let groups_resp = ureq::get(&groups_url)
         .call()
@@ -146,6 +153,12 @@ pub fn sync_entertainment_areas(
         .ok_or_else(|| anyhow!("Hue v2 Entertainment configurations response has no data"))?;
     let (area_id, area_name, configuration) =
         select_entertainment_area(&entertainment_areas, configuration_data, target_area)?;
+    let configuration_id = configuration
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| id.len() == 36)
+        .ok_or_else(|| anyhow!("Hue v2 configuration '{}' has no UUID", area_name))?
+        .to_string();
     let discovered_zones = zones_from_v2_configuration(configuration)?;
     if discovered_zones.is_empty() {
         return Err(anyhow!(
@@ -153,7 +166,12 @@ pub fn sync_entertainment_areas(
             area_name
         ));
     }
-    Ok((area_id, area_name, discovered_zones))
+    Ok(EntertainmentArea {
+        legacy_group_id: area_id,
+        name: area_name,
+        configuration_id,
+        zones: discovered_zones,
+    })
 }
 
 fn select_entertainment_area<'a>(

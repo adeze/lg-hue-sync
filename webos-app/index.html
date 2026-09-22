@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Hue &amp; Nanoleaf Sync</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: #07090e;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      text-align: center;
+      padding: 24px;
+    }
+    .icon-container {
+      width: 96px;
+      height: 96px;
+      border-radius: 24px;
+      background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 24px;
+      box-shadow: 0 10px 30px rgba(99, 102, 241, 0.4);
+    }
+    .icon-container svg {
+      width: 48px;
+      height: 48px;
+      fill: #ffffff;
+    }
+    .spinner {
+      width: 44px;
+      height: 44px;
+      border: 4px solid rgba(99, 102, 241, 0.2);
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    h1 {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 8px;
+      color: #ffffff;
+    }
+    p {
+      font-size: 16px;
+      color: #94a3b8;
+      max-width: 400px;
+      line-height: 1.5;
+    }
+    .status-msg {
+      margin-top: 16px;
+      font-size: 14px;
+      color: #6366f1;
+      font-weight: 500;
+    }
+    .error-box {
+      display: none;
+      margin-top: 24px;
+      padding: 16px 20px;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 12px;
+      color: #fca5a5;
+      font-size: 14px;
+      max-width: 450px;
+    }
+    button {
+      margin-top: 16px;
+      padding: 12px 24px;
+      background: #6366f1;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:focus {
+      outline: 3px solid #ffffff;
+    }
+  </style>
+</head>
+<body>
+  <div class="icon-container">
+    <svg viewBox="0 0 24 24">
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+    </svg>
+  </div>
+  <div class="spinner" id="spinner"></div>
+  <h1>Hue &amp; Nanoleaf Sync</h1>
+  <p>Connecting to local ambient lighting service...</p>
+  <div class="status-msg" id="status">Checking port 8088...</div>
+
+  <div class="error-box" id="errorBox">
+    Service not responding on port 8088. Please verify <code>lg-hue-sync.service</code> is running.
+    <br>
+    <button id="retryBtn" onclick="retryConnection()">Retry Now</button>
+  </div>
+
+  <script>
+    const TARGET = "http://127.0.0.1:8088/";
+    let attempts = 0;
+    const maxAttempts = 15;
+
+    async function checkService() {
+      attempts++;
+      try {
+        const res = await fetch("http://127.0.0.1:8088/api/status", { cache: "no-store" });
+        if (res.ok) {
+          document.getElementById("status").textContent = "Service active! Loading UI...";
+          window.location.replace(TARGET);
+          return;
+        }
+      } catch (err) {
+        // daemon still starting up
+      }
+
+      if (attempts >= maxAttempts) {
+        document.getElementById("spinner").style.display = "none";
+        document.getElementById("status").style.display = "none";
+        document.getElementById("errorBox").style.display = "block";
+        document.getElementById("retryBtn").focus();
+      } else {
+        document.getElementById("status").textContent = "Connecting... (attempt " + attempts + "/" + maxAttempts + ")";
+        setTimeout(checkService, 600);
+      }
+    }
+
+    function retryConnection() {
+      attempts = 0;
+      document.getElementById("spinner").style.display = "block";
+      document.getElementById("status").style.display = "block";
+      document.getElementById("errorBox").style.display = "none";
+      checkService();
+    }
+
+    // Handle webOS back button
+    window.addEventListener("keydown", function(e) {
+      if (e.keyCode === 461) { // webOS Back Key
+        window.close();
+      }
+    });
+
+    checkService();
+  </script>
+</body>
+</html>

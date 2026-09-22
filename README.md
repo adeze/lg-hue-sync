@@ -198,6 +198,10 @@ Your entertainment lights will cycle through a smooth 10-second rainbow pattern.
 
 To allow the background daemon to capture hardware display buffers, root access is required once to open SSH.
 
+#### webOS Homebrew discussion and compatibility
+
+Before changing a TV, check the community [OLED65C1 compatibility search](https://cani.rootmy.tv/?q=OLED65C1) and the [webOS Brew projects](https://github.com/webosbrew). They are useful references for model support, packaging, service conventions, and recovery options; they are not part of this daemon or a guarantee that a particular TV can be modified safely.
+
 1. Format a USB flash drive as **FAT32**.
 2. Run the staging script:
    ```bash

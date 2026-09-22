@@ -91,7 +91,7 @@ pub struct Config {
     pub fps: u32,
     #[serde(default = "default_brightness")]
     pub brightness_multiplier: f32,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub use_xy_gamut: bool,
     #[serde(default = "default_true")]
     pub hdr_tone_mapping: bool,
@@ -99,12 +99,28 @@ pub struct Config {
     pub letterbox_detection: bool,
     #[serde(default = "default_saturation_boost")]
     pub saturation_boost: f32,
+    #[serde(default = "default_peak_weight")]
+    pub peak_weight: f32,
+    #[serde(default = "default_gamma")]
+    pub gamma: f32,
     #[serde(default = "default_noise_gate")]
     pub noise_gate_threshold: f32,
     #[serde(default = "default_true")]
     pub adaptive_throttling: bool,
     #[serde(default = "default_zones")]
     pub zones: Vec<LightZone>,
+    #[serde(default = "default_capture_width")]
+    pub capture_width: u32,
+    #[serde(default = "default_capture_height")]
+    pub capture_height: u32,
+}
+
+fn default_capture_width() -> u32 {
+    320
+}
+
+fn default_capture_height() -> u32 {
+    180
 }
 
 fn default_fps() -> u32 {
@@ -119,8 +135,20 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_saturation_boost() -> f32 {
     1.5
+}
+
+fn default_peak_weight() -> f32 {
+    0.35
+}
+
+fn default_gamma() -> f32 {
+    1.0
 }
 
 fn default_noise_gate() -> f32 {
@@ -175,13 +203,17 @@ impl Config {
             nanoleaf: None,
             fps: default_fps(),
             brightness_multiplier: default_brightness(),
-            use_xy_gamut: true,
+            use_xy_gamut: false,
             hdr_tone_mapping: true,
             letterbox_detection: true,
             saturation_boost: default_saturation_boost(),
+            peak_weight: default_peak_weight(),
+            gamma: default_gamma(),
             noise_gate_threshold: default_noise_gate(),
             adaptive_throttling: true,
             zones: default_zones(),
+            capture_width: default_capture_width(),
+            capture_height: default_capture_height(),
         }
     }
 
@@ -214,9 +246,20 @@ mod tests {
         let span_y = zone.y_max - zone.y_min;
 
         // Front lights should have tight directional focus (~0.25)
-        assert!((span_x - 0.25).abs() < 0.05, "Front light span_x should be tight ~0.25, got {}", span_x);
-        assert!((span_y - 0.25).abs() < 0.05, "Front light span_y should be tight ~0.25, got {}", span_y);
-        assert!(zone.x_min < 0.2, "Front left should be on left edge of screen");
+        assert!(
+            (span_x - 0.25).abs() < 0.05,
+            "Front light span_x should be tight ~0.25, got {}",
+            span_x
+        );
+        assert!(
+            (span_y - 0.25).abs() < 0.05,
+            "Front light span_y should be tight ~0.25, got {}",
+            span_y
+        );
+        assert!(
+            zone.x_min < 0.2,
+            "Front left should be on left edge of screen"
+        );
     }
 
     #[test]
@@ -227,24 +270,42 @@ mod tests {
         let span_y = center_rear.y_max - center_rear.y_min;
 
         // Rear lights should expand into wide diffuse ambient reflection (~0.65)
-        assert!((span_x - 0.65).abs() < 0.05, "Center rear light span_x should be wide ~0.65, got {}", span_x);
-        assert!((span_y - 0.60).abs() < 0.05, "Center rear light span_y should be wide ~0.60, got {}", span_y);
+        assert!(
+            (span_x - 0.65).abs() < 0.05,
+            "Center rear light span_x should be wide ~0.65, got {}",
+            span_x
+        );
+        assert!(
+            (span_y - 0.60).abs() < 0.05,
+            "Center rear light span_y should be wide ~0.60, got {}",
+            span_y
+        );
 
         // Rear Right surround (X = 0.8, Y = -1.0): reaches right edge and extends deep into screen
         let rear_right = LightZone::from_3d_position(2, "Rear Right", [0.8, -1.0, 0.0]);
         assert_eq!(rear_right.x_max, 1.0);
-        assert!(rear_right.x_min <= 0.60, "Rear right should cover broad portion of right screen");
+        assert!(
+            rear_right.x_min <= 0.60,
+            "Rear right should cover broad portion of right screen"
+        );
     }
 
     #[test]
     fn test_3d_height_mapping() {
         // Ceiling light (Z = 1.0): maps to top of screen (Y near 0.0)
         let ceiling = LightZone::from_3d_position(2, "Top Atmos", [0.0, 0.5, 1.0]);
-        assert!(ceiling.y_min < 0.1, "Ceiling light should map to top of screen (y_min < 0.1), got {}", ceiling.y_min);
+        assert!(
+            ceiling.y_min < 0.1,
+            "Ceiling light should map to top of screen (y_min < 0.1), got {}",
+            ceiling.y_min
+        );
 
         // Floor light (Z = -1.0): maps to bottom of screen (Y near 1.0)
         let floor = LightZone::from_3d_position(3, "Floor Light", [0.0, 0.5, -1.0]);
-        assert!(floor.y_max > 0.9, "Floor light should map to bottom of screen (y_max > 0.9), got {}", floor.y_max);
+        assert!(
+            floor.y_max > 0.9,
+            "Floor light should map to bottom of screen (y_max > 0.9), got {}",
+            floor.y_max
+        );
     }
 }
-

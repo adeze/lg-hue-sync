@@ -71,7 +71,9 @@ pub fn pair_nanoleaf(ip: &str, timeout_secs: u64) -> Result<(String, u16, Vec<u1
     }
 
     if auth_token.is_empty() {
-        return Err(anyhow!("Timed out waiting for Nanoleaf pairing button press"));
+        return Err(anyhow!(
+            "Timed out waiting for Nanoleaf pairing button press"
+        ));
     }
 
     // Retrieve panel layout to discover segments
@@ -92,13 +94,17 @@ pub fn pair_nanoleaf(ip: &str, timeout_secs: u64) -> Result<(String, u16, Vec<u1
 
 /// Retrieves the physical panel/segment layout and IDs from the controller
 pub fn get_panel_layout(ip: &str, auth_token: &str) -> Result<PanelLayout> {
-    let url = format!("http://{}:16021/api/v1/{}/panelLayout/layout", ip, auth_token);
+    let url = format!(
+        "http://{}:16021/api/v1/{}/panelLayout/layout",
+        ip, auth_token
+    );
     let resp = ureq::get(&url)
         .set("Content-Type", "application/json")
         .call()
         .with_context(|| format!("Failed to fetch panel layout from {}", url))?;
 
-    let layout: PanelLayout = resp.into_json()
+    let layout: PanelLayout = resp
+        .into_json()
         .with_context(|| "Failed to parse Nanoleaf panel layout JSON")?;
 
     Ok(layout)
@@ -116,8 +122,12 @@ pub fn enable_external_control(ip: &str, auth_token: &str) -> Result<u16> {
         }
     });
 
-    info!("Enabling Nanoleaf external control (UDP v2) mode on {}...", ip);
+    info!(
+        "Enabling Nanoleaf external control (UDP v2) mode on {}...",
+        ip
+    );
     let resp = ureq::put(&url)
+        .timeout(Duration::from_secs(3))
         .set("Content-Type", "application/json")
         .send_json(payload)
         .with_context(|| format!("Failed to enable extControl on {}", url))?;

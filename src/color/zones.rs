@@ -1,7 +1,9 @@
 use crate::color::gamut::{rgb_to_xy_brightness, HueGamut, HueXYBrightness};
 use crate::config::LightZone;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RgbColor {
     pub r: u8,
     pub g: u8,
@@ -102,6 +104,89 @@ impl RgbColor {
         let db = (self.b as f32 - other.b as f32) / 255.0;
         (dr * dr + dg * dg + db * db).sqrt()
     }
+
+    /// Converts RGB (0..255) to HSV: H in [0, 360), S in [0, 1], V in [0, 1]
+    pub fn to_hsv(self) -> (f32, f32, f32) {
+        let r = self.r as f32 / 255.0;
+        let g = self.g as f32 / 255.0;
+        let b = self.b as f32 / 255.0;
+
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let delta = max - min;
+
+        let v = max;
+        let s = if max > 0.0 { delta / max } else { 0.0 };
+
+        let h = if delta == 0.0 {
+            0.0
+        } else if (max - r).abs() < 1e-5 {
+            60.0 * (((g - b) / delta) % 6.0)
+        } else if (max - g).abs() < 1e-5 {
+            60.0 * (((b - r) / delta) + 2.0)
+        } else {
+            60.0 * (((r - g) / delta) + 4.0)
+        };
+
+        let h = if h < 0.0 { h + 360.0 } else { h };
+        (h, s, v)
+    }
+
+    /// Converts HSV to RGB
+    pub fn from_hsv(h: f32, s: f32, v: f32) -> Self {
+        let s = s.clamp(0.0, 1.0);
+        let v = v.clamp(0.0, 1.0);
+        let h = (h % 360.0 + 360.0) % 360.0;
+
+        let c = v * s;
+        let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+        let m = v - c;
+
+        let (r1, g1, b1) = if h < 60.0 {
+            (c, x, 0.0)
+        } else if h < 120.0 {
+            (x, c, 0.0)
+        } else if h < 180.0 {
+            (0.0, c, x)
+        } else if h < 240.0 {
+            (0.0, x, c)
+        } else if h < 300.0 {
+            (x, 0.0, c)
+        } else {
+            (c, 0.0, x)
+        };
+
+        Self::new(
+            ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+            ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+            ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        )
+    }
+
+    /// Amplifies color saturation while preserving hue and luminance
+    pub fn boost_saturation(self, boost: f32) -> Self {
+        if boost <= 1.0 {
+            return self;
+        }
+        let (h, s, v) = self.to_hsv();
+        let new_s = (s * boost).clamp(0.0, 1.0);
+        Self::from_hsv(h, new_s, v)
+    }
+
+    /// Applies gamma contrast expansion: C_out = C_in^gamma
+    pub fn apply_gamma(self, gamma: f32) -> Self {
+        if (gamma - 1.0).abs() < 0.01 {
+            return self;
+        }
+        let r_f = (self.r as f32 / 255.0).powf(gamma).clamp(0.0, 1.0);
+        let g_f = (self.g as f32 / 255.0).powf(gamma).clamp(0.0, 1.0);
+        let b_f = (self.b as f32 / 255.0).powf(gamma).clamp(0.0, 1.0);
+        Self::new(
+            (r_f * 255.0).round() as u8,
+            (g_f * 255.0).round() as u8,
+            (b_f * 255.0).round() as u8,
+        )
+    }
 }
 
 /// Active viewport bounds after detecting letterbox/pillarbox bars (normalized 0.0 to 1.0)
@@ -132,6 +217,8 @@ pub struct ZoneSampler {
     letterbox_detection: bool,
     saturation_boost: f32,
     noise_gate_threshold: f32,
+    peak_weight: f32,
+    gamma: f32,
     active_rect: ActiveRect,
     frame_count: u64,
     last_global_color: RgbColor,
@@ -155,6 +242,8 @@ impl ZoneSampler {
             letterbox_detection,
             saturation_boost,
             noise_gate_threshold,
+            peak_weight: 0.35,
+            gamma: 1.0,
             active_rect: ActiveRect::default(),
             frame_count: 0,
             last_global_color: RgbColor::new(0, 0, 0),
@@ -164,6 +253,30 @@ impl ZoneSampler {
     /// Dynamically update smoothing factor based on Hue mobile app sync intensity
     pub fn set_smoothing_factor(&mut self, factor: f32) {
         self.smoothing_factor = factor.clamp(0.05, 1.0);
+    }
+
+    pub fn set_hdr_tone_mapping(&mut self, enabled: bool) {
+        self.hdr_tone_mapping = enabled;
+    }
+
+    pub fn set_letterbox_detection(&mut self, enabled: bool) {
+        self.letterbox_detection = enabled;
+    }
+
+    pub fn set_saturation_boost(&mut self, boost: f32) {
+        self.saturation_boost = boost.clamp(1.0, 3.0);
+    }
+
+    pub fn set_peak_weight(&mut self, weight: f32) {
+        self.peak_weight = weight.clamp(0.0, 1.0);
+    }
+
+    pub fn set_gamma(&mut self, gamma: f32) {
+        self.gamma = gamma.clamp(0.5, 3.0);
+    }
+
+    pub fn set_noise_gate_threshold(&mut self, threshold: f32) {
+        self.noise_gate_threshold = threshold.clamp(0.0, 0.1);
     }
 
     /// Fast letterbox / pillarbox detector. Evaluates top/bottom row luminance to find black bars.
@@ -183,9 +296,17 @@ impl ZoneSampler {
                 let pixel_offset = row_offset + (x * 4);
                 if pixel_offset + 2 < data.len() {
                     let (r, g, b) = if is_bgra {
-                        (data[pixel_offset + 2] as u32, data[pixel_offset + 1] as u32, data[pixel_offset] as u32)
+                        (
+                            data[pixel_offset + 2] as u32,
+                            data[pixel_offset + 1] as u32,
+                            data[pixel_offset] as u32,
+                        )
                     } else {
-                        (data[pixel_offset] as u32, data[pixel_offset + 1] as u32, data[pixel_offset + 2] as u32)
+                        (
+                            data[pixel_offset] as u32,
+                            data[pixel_offset + 1] as u32,
+                            data[pixel_offset + 2] as u32,
+                        )
                     };
                     let luma = (r * 299 + g * 587 + b * 114) / 1000;
                     row_luma_sum += luma;
@@ -212,9 +333,17 @@ impl ZoneSampler {
                 let pixel_offset = row_offset + (x * 4);
                 if pixel_offset + 2 < data.len() {
                     let (r, g, b) = if is_bgra {
-                        (data[pixel_offset + 2] as u32, data[pixel_offset + 1] as u32, data[pixel_offset] as u32)
+                        (
+                            data[pixel_offset + 2] as u32,
+                            data[pixel_offset + 1] as u32,
+                            data[pixel_offset] as u32,
+                        )
                     } else {
-                        (data[pixel_offset] as u32, data[pixel_offset + 1] as u32, data[pixel_offset + 2] as u32)
+                        (
+                            data[pixel_offset] as u32,
+                            data[pixel_offset + 1] as u32,
+                            data[pixel_offset + 2] as u32,
+                        )
                     };
                     let luma = (r * 299 + g * 587 + b * 114) / 1000;
                     row_luma_sum += luma;
@@ -230,13 +359,17 @@ impl ZoneSampler {
         }
 
         // Require symmetry within 6 pixels to avoid false positives from dark shadows
-        let y_min = if top_bar_height >= 4 && (top_bar_height as i32 - bottom_bar_height as i32).abs() <= 6 {
+        let y_min = if top_bar_height >= 4
+            && (top_bar_height as i32 - bottom_bar_height as i32).abs() <= 6
+        {
             top_bar_height as f32 / height as f32
         } else {
             0.0
         };
 
-        let y_max = if bottom_bar_height >= 4 && (top_bar_height as i32 - bottom_bar_height as i32).abs() <= 6 {
+        let y_max = if bottom_bar_height >= 4
+            && (top_bar_height as i32 - bottom_bar_height as i32).abs() <= 6
+        {
             (height - bottom_bar_height) as f32 / height as f32
         } else {
             1.0
@@ -262,7 +395,9 @@ impl ZoneSampler {
         self.frame_count += 1;
 
         // Run letterbox detector periodically (every 15 frames) or on first frame
-        if self.letterbox_detection && (self.frame_count == 1 || self.frame_count % 15 == 0) {
+        if self.letterbox_detection
+            && (self.frame_count == 1 || self.frame_count.is_multiple_of(15))
+        {
             self.active_rect = Self::detect_active_rect(data, width, height, is_bgra);
         }
 
@@ -284,9 +419,17 @@ impl ZoneSampler {
                 let pixel_offset = row_offset + (x * 4);
                 if pixel_offset + 2 < data.len() {
                     let (r, g, b) = if is_bgra {
-                        (data[pixel_offset + 2] as u64, data[pixel_offset + 1] as u64, data[pixel_offset] as u64)
+                        (
+                            data[pixel_offset + 2] as u64,
+                            data[pixel_offset + 1] as u64,
+                            data[pixel_offset] as u64,
+                        )
                     } else {
-                        (data[pixel_offset] as u64, data[pixel_offset + 1] as u64, data[pixel_offset + 2] as u64)
+                        (
+                            data[pixel_offset] as u64,
+                            data[pixel_offset + 1] as u64,
+                            data[pixel_offset + 2] as u64,
+                        )
                     };
                     global_r += r;
                     global_g += g;
@@ -296,22 +439,23 @@ impl ZoneSampler {
             }
         }
 
-        let current_global_color = if global_count > 0 {
-            RgbColor::new(
-                (global_r / global_count) as u8,
-                (global_g / global_count) as u8,
-                (global_b / global_count) as u8,
-            )
-        } else {
-            RgbColor::new(0, 0, 0)
-        };
+        let current_global_color = RgbColor::new(
+            global_r.checked_div(global_count).unwrap_or(0) as u8,
+            global_g.checked_div(global_count).unwrap_or(0) as u8,
+            global_b.checked_div(global_count).unwrap_or(0) as u8,
+        );
 
         // If global frame difference exceeds 0.35, classify as a sudden scene cut
-        let is_scene_cut = self.frame_count > 1 && current_global_color.delta(self.last_global_color) > 0.35;
+        let is_scene_cut =
+            self.frame_count > 1 && current_global_color.delta(self.last_global_color) > 0.35;
         self.last_global_color = current_global_color;
 
         // Effective smoothing factor: snap to 1.0 (zero latency) on scene cuts, else smooth EMA
-        let effective_alpha = if is_scene_cut { 1.0 } else { self.smoothing_factor };
+        let effective_alpha = if is_scene_cut {
+            1.0
+        } else {
+            self.smoothing_factor
+        };
 
         let mut results = Vec::with_capacity(self.zones.len());
 
@@ -336,6 +480,8 @@ impl ZoneSampler {
             let mut weighted_g: f32 = 0.0;
             let mut weighted_b: f32 = 0.0;
             let mut total_weight: f32 = 0.0;
+            let mut peak_pixel = RgbColor::new(0, 0, 0);
+            let mut max_luma = 0.0f32;
 
             for y in (y_start..y_end).step_by(2) {
                 let row_offset = (y * width * 4) as usize;
@@ -343,12 +489,26 @@ impl ZoneSampler {
                     let pixel_offset = row_offset + (x * 4) as usize;
                     if pixel_offset + 3 < data.len() {
                         let (r, g, b) = if is_bgra {
-                            (data[pixel_offset + 2], data[pixel_offset + 1], data[pixel_offset])
+                            (
+                                data[pixel_offset + 2],
+                                data[pixel_offset + 1],
+                                data[pixel_offset],
+                            )
                         } else {
-                            (data[pixel_offset], data[pixel_offset + 1], data[pixel_offset + 2])
+                            (
+                                data[pixel_offset],
+                                data[pixel_offset + 1],
+                                data[pixel_offset + 2],
+                            )
                         };
 
                         let pix = RgbColor::new(r, g, b);
+                        let luma = pix.luminance();
+                        if luma > max_luma {
+                            max_luma = luma;
+                            peak_pixel = pix;
+                        }
+
                         // Saturation weighting: vivid accents get higher weight so they aren't diluted by grey
                         let sat = pix.saturation();
                         let weight = 1.0 + self.saturation_boost * (sat * sat);
@@ -361,7 +521,7 @@ impl ZoneSampler {
                 }
             }
 
-            let mut raw_color = if total_weight > 0.0 {
+            let mean_color = if total_weight > 0.0 {
                 RgbColor::new(
                     (weighted_r / total_weight).clamp(0.0, 255.0) as u8,
                     (weighted_g / total_weight).clamp(0.0, 255.0) as u8,
@@ -371,19 +531,36 @@ impl ZoneSampler {
                 RgbColor::new(0, 0, 0)
             };
 
+            // Blend mean with peak highlight luminance
+            let mut processed_color = if self.peak_weight > 0.0 && max_luma > 0.0 {
+                mean_color.lerp(peak_pixel, self.peak_weight)
+            } else {
+                mean_color
+            };
+
             // Apply OLED near-black noise gate
             if self.noise_gate_threshold > 0.0 {
-                raw_color = raw_color.apply_noise_gate(self.noise_gate_threshold);
+                processed_color = processed_color.apply_noise_gate(self.noise_gate_threshold);
+            }
+
+            // True HSV saturation amplification
+            if self.saturation_boost > 1.0 {
+                processed_color = processed_color.boost_saturation(self.saturation_boost);
+            }
+
+            // Dynamic gamma contrast curve
+            if (self.gamma - 1.0).abs() >= 0.01 {
+                processed_color = processed_color.apply_gamma(self.gamma);
             }
 
             // Apply Reinhard HDR tone mapping
             if self.hdr_tone_mapping {
-                raw_color = raw_color.tone_map_hdr();
+                processed_color = processed_color.tone_map_hdr();
             }
 
             // Apply Adaptive EMA smoothing
             let current = self.smoothed_colors[i];
-            let smoothed = current.lerp(raw_color, effective_alpha);
+            let smoothed = current.lerp(processed_color, effective_alpha);
             self.smoothed_colors[i] = smoothed;
 
             results.push((zone.channel_id, smoothed));
@@ -413,6 +590,7 @@ mod tests {
             y_max: 1.0,
         };
         let mut sampler = ZoneSampler::new(vec![zone], 1.0, false, false, 2.0, 0.0);
+        sampler.set_peak_weight(0.0);
 
         // Frame with half dull grey (100, 100, 100) and half bright red (255, 0, 0)
         let width = 4u32;
@@ -436,7 +614,7 @@ mod tests {
 
         let (results, _) = sampler.sample_frame(&data, width, height, false);
         let color = results[0].1;
-        assert!(color.r > 190);
+        assert!(color.r > 200, "sampled color: {color:?}");
         assert!(color.g < 80);
     }
 

@@ -10,8 +10,8 @@ Native screen capture and Philips Hue Entertainment synchronization for LG webOS
 ## Tooling & Environment Discipline
 
 - **Python Scripting**: Always execute Python scripts using `uv run <script.py>`. Never invoke `python3` or `python` directly.
-- **Rust Tooling**: Cross-compile for webOS using `cross build --target armv7-unknown-linux-gnueabihf --release` or local `cargo` for test/mock validation.
-- **File Editing**: Always use designated Antigravity editing tools (`write_to_file`, `replace_file_content`), never ad-hoc shell redirects.
+- **Rust Tooling**: Run host checks with `cargo test` and `cargo clippy -- -D warnings`. The TV target is `armv7-unknown-linux-gnueabi`, not `gnueabihf`; a macOS build is never deployable to webOS.
+- **File Editing**: Use scoped patch-based edits; preserve unrelated working-tree changes.
 
 ---
 
@@ -69,18 +69,26 @@ lg-hue-sync/
 ## Deterministic Automation Workflow
 
 ```bash
-# Step 1: Stage the DejaVuln autoroot USB exploit
-./scripts/prepare_dejavuln_usb.sh /Volumes/<USB_DRIVE>
+# Step 1: Root the TV over the LAN using SlopBro (No USB drive required)
+uv run scripts/root_tv.py --webos-version 6 192.168.1.149
 
-# Step 2: Once TV is rooted and SSH is enabled in Homebrew Channel:
-./scripts/provision_tv.sh 192.168.1.149
+# Step 2: Cross-compile & deploy lg-hue-sync daemon to the TV over SSH:
+./scripts/deploy.sh 192.168.1.149
 
-# Step 3: Discover Hue Bridge and pair pushlink button:
+# Step 3: Discover Hue Bridge and pair pushlink button (if needed):
 uv run scripts/pair_hue.py --tv-ip 192.168.1.149
-
-# Step 4: (Alternative) Run native Rust Hue sync daemon:
-./target/debug/lg-hue-sync test-capture --config config.example.json
 ```
+
+---
+
+## Native Build and Deployment Policy
+
+- **Current target baseline**: 32-bit ARMv7 GNU EABI userspace with a glibc 2.28 ceiling. Build a Linux ELF using a matching ARM linker and sysroot; host macOS binaries and newer Linux glibc outputs are invalid deployment artifacts.
+- **Why Debian Buster Docker exists**: it supplies the ARM GNU toolchain and an old-enough libc/sysroot, preventing newer host symbols from leaking into a C1 binary. It is compatibility isolation, not an arbitrary container preference.
+- **Current implementation**: `make build` and `scripts/deploy.sh` use an archived Debian Buster container. The script rebuilds by default; `--reuse` is permitted only after confirming the binary corresponds to the checked-out source. Do not claim a target build works until `file`/`readelf` checks and a supervised TV probe pass.
+- **Native-toolchain assessment (2026-09-22)**: webOS Brew's macOS arm64 `native-toolchain` SDK was downloaded, relocated, and attempted against this daemon. Its relocated Buildroot compiler retains a stale CI sysroot path; explicit target-only `--sysroot` repairs that. The resulting link still fails because the SDK libc lacks `getauxval`, required by Rust's supported `armv7-unknown-linux-gnueabi` standard library and `ring`. Do not add a fake `getauxval` shim or promote this SDK as a Rust build path. Docker remains canonical unless a custom Rust standard library is built and verified against the SDK, which is not a simplification.
+- **Ares CLI status**: official Node Ares commands are already on `PATH`. `ares-cli-rs` v0.7.0 is installed separately under `~/.local/share/ares-cli-rs/v0.7.0`, checksum-verified, and intentionally does not shadow them. This repository currently uses root `ssh`/`scp` and `luna-send`; no committed script invokes Ares, and historic deployment claims are not live evidence. `ares-cli-rs` can package/install IPKs and push/shell files, including root SSH devices, but it does not by itself replace the daemon's root-owned service, Luna permissions, or webOS Brew boot hook. Adopt it first for IPK install/developer workflows; retain SSH for privileged daemon provisioning until equivalence is tested.
+- **Deployment safety**: build and static artifact inspection are local. Upload, install, service restart, autoroot, Luna mutation, or light output require explicit user direction and post-action readback; never infer success from a CLI exit code.
 
 ---
 

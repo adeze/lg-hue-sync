@@ -1,7 +1,7 @@
 /// Official Philips Hue color gamuts and chromaticity conversions
 /// ported from HueEntertainmentKit (Swift) to native Rust.
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[allow(dead_code)]
 pub enum HueGamut {
     /// LivingColors, Bloom, Aura, Iris
@@ -9,13 +9,8 @@ pub enum HueGamut {
     /// Hue bulbs Gen 1 and 2, Lightstrips Gen 1, Spotlights
     GamutB,
     /// Hue White and Color Ambiance Gen 3+, Lightstrip Plus, Play Bars, Signe, Iris Gen 4
+    #[default]
     GamutC,
-}
-
-impl Default for HueGamut {
-    fn default() -> Self {
-        HueGamut::GamutC
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -26,7 +26,9 @@ pub fn discover_bridge() -> Result<String> {
             }
         }
     }
-    Err(anyhow!("No Hue Bridge detected on network via discovery API"))
+    Err(anyhow!(
+        "No Hue Bridge detected on network via discovery API"
+    ))
 }
 
 /// Polls the bridge for pushlink button press and authenticates
@@ -58,8 +60,16 @@ pub fn pair_bridge(
             if let Ok(Value::Array(items)) = r.into_json::<Value>() {
                 if let Some(first) = items.first() {
                     if let Some(success) = first.get("success") {
-                        username = success.get("username").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                        clientkey = success.get("clientkey").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        username = success
+                            .get("username")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        clientkey = success
+                            .get("clientkey")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
                         println!("\n[+] Successfully paired with Hue Bridge!");
                         break;
                     } else if let Some(err) = first.get("error") {
@@ -79,7 +89,8 @@ pub fn pair_bridge(
         return Err(anyhow!("Timed out waiting for Hue Bridge button press"));
     }
 
-    let (area_id, _area_name, discovered_zones) = sync_entertainment_areas(bridge_ip, &username, None)?;
+    let (area_id, _area_name, discovered_zones) =
+        sync_entertainment_areas(bridge_ip, &username, None)?;
 
     Ok((username, clientkey, area_id, discovered_zones))
 }
@@ -97,70 +108,177 @@ pub fn sync_entertainment_areas(
         .context("Failed to query groups from Hue Bridge")?;
 
     let groups_json: Value = groups_resp.into_json()?;
-    let mut area_id = "1".to_string();
-    let mut area_name = "Default".to_string();
-    let mut discovered_zones: Vec<crate::config::LightZone> = Vec::new();
+    let groups = groups_json
+        .as_object()
+        .ok_or_else(|| anyhow!("Hue Bridge groups response was not an object"))?;
+    let mut entertainment_areas: Vec<_> = groups
+        .iter()
+        .filter(|(_, group)| group.get("type").and_then(Value::as_str) == Some("Entertainment"))
+        .map(|(id, group)| {
+            (
+                id.clone(),
+                group
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unnamed")
+                    .to_string(),
+            )
+        })
+        .collect();
+    entertainment_areas.sort_by(|left, right| left.0.cmp(&right.0));
+    let configurations_url = format!(
+        "https://{}/clip/v2/resource/entertainment_configuration",
+        bridge_ip
+    );
+    let configurations: Value = ureq::get(&configurations_url)
+        .set("hue-application-key", username)
+        .call()
+        .with_context(|| {
+            format!(
+                "Failed to query Hue v2 Entertainment configurations at {}",
+                configurations_url
+            )
+        })?
+        .into_json()?;
+    let configuration_data = configurations
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Hue v2 Entertainment configurations response has no data"))?;
+    let (area_id, area_name, configuration) =
+        select_entertainment_area(&entertainment_areas, configuration_data, target_area)?;
+    let discovered_zones = zones_from_v2_configuration(configuration)?;
+    if discovered_zones.is_empty() {
+        return Err(anyhow!(
+            "Hue v2 configuration '{}' has no channel positions",
+            area_name
+        ));
+    }
+    Ok((area_id, area_name, discovered_zones))
+}
 
-    if let Value::Object(groups) = groups_json {
-        let mut entertainment_areas = Vec::new();
-        for (gid, gdata) in groups {
-            if gdata.get("type").and_then(|v| v.as_str()) == Some("Entertainment") {
-                let name = gdata.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed");
-                let locations = gdata.get("locations").cloned();
-                entertainment_areas.push((gid, name.to_string(), locations));
-            }
-        }
+fn select_entertainment_area<'a>(
+    groups: &[(String, String)],
+    configurations: &'a [Value],
+    target: Option<&str>,
+) -> Result<(String, String, &'a Value)> {
+    let find_configuration = |name: &str| {
+        configurations.iter().find(|item| {
+            item.pointer("/metadata/name")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case(name))
+        })
+    };
+    let selected_group = target
+        .and_then(|value| {
+            groups
+                .iter()
+                .find(|(id, name)| id == value || name.eq_ignore_ascii_case(value))
+        })
+        .or_else(|| (target.is_none() && groups.len() == 1).then(|| &groups[0]));
+    if let Some((area_id, area_name)) = selected_group {
+        let configuration = find_configuration(area_name)
+            .ok_or_else(|| anyhow!("Hue v2 configuration named '{}' was not found", area_name))?;
+        return Ok((area_id.clone(), area_name.clone(), configuration));
+    }
 
-        if !entertainment_areas.is_empty() {
-            println!("\nFound {} Entertainment Area(s) on Hue Bridge:", entertainment_areas.len());
-            for (i, (gid, name, _)) in entertainment_areas.iter().enumerate() {
-                println!("  [{}] ID: {} - '{}'", i + 1, gid, name);
-            }
-
-            // Find matching area if specified
-            let selected = if let Some(target) = target_area {
-                let target_lower = target.to_lowercase();
-                entertainment_areas
-                    .iter()
-                    .find(|(gid, name, _)| gid == target || name.to_lowercase().contains(&target_lower))
-                    .or_else(|| entertainment_areas.first())
-            } else {
-                entertainment_areas.first()
-            };
-
-            if let Some((gid, name, locs_opt)) = selected {
-                area_id = gid.clone();
-                area_name = name.clone();
-                println!("[+] Selected Entertainment Area: '{}' (ID: {})", area_name, area_id);
-
-                // If locations are present, auto-derive 2D screen sampling zones using 3D coordinates
-                if let Some(Value::Object(locs)) = locs_opt {
-                    for (channel_idx, (light_id, coords_val)) in locs.iter().enumerate() {
-                        if let Some(coords_arr) = coords_val.as_array() {
-                            if coords_arr.len() >= 3 {
-                                let x = coords_arr[0].as_f64().unwrap_or(0.0) as f32;
-                                let y = coords_arr[1].as_f64().unwrap_or(0.0) as f32;
-                                let z = coords_arr[2].as_f64().unwrap_or(0.0) as f32;
-                                let zone_name = format!("Light {}", light_id);
-                                let zone = crate::config::LightZone::from_3d_position(
-                                    channel_idx as u8,
-                                    &zone_name,
-                                    [x, y, z],
-                                );
-                                println!("  -> Light {} at 3D [X:{:.2}, Y:{:.2}, Z:{:.2}] => Screen Box [{:.2}..{:.2}, {:.2}..{:.2}]",
-                                    light_id, x, y, z, zone.x_min, zone.x_max, zone.y_min, zone.y_max);
-                                discovered_zones.push(zone);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            println!("\n[!] Warning: No Entertainment Areas found. Please configure one in Philips Hue app.");
+    if let Some(target) = target {
+        let configuration = configurations.iter().find(|item| {
+            item.get("id").and_then(Value::as_str) == Some(target)
+                || item
+                    .pointer("/metadata/name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.eq_ignore_ascii_case(target))
+        });
+        if let Some(configuration) = configuration {
+            let name = configuration
+                .pointer("/metadata/name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Hue v2 configuration has no metadata name"))?;
+            let (area_id, area_name) = groups
+                .iter()
+                .find(|(_, group_name)| group_name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Hue v2 configuration '{}' has no matching v1 Entertainment group",
+                        name
+                    )
+                })?;
+            return Ok((area_id.clone(), area_name.clone(), configuration));
         }
     }
 
-    Ok((area_id, area_name, discovered_zones))
+    Err(anyhow!(
+        "Select an explicit Hue Entertainment Area when more than one exists"
+    ))
+}
+
+fn zones_from_v2_configuration(configuration: &Value) -> Result<Vec<crate::config::LightZone>> {
+    let mut zones = configuration
+        .get("channels")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Hue v2 configuration has no channels"))?
+        .iter()
+        .map(|channel| {
+            let channel_id = channel
+                .get("channel_id")
+                .and_then(Value::as_u64)
+                .and_then(|id| u8::try_from(id).ok())
+                .ok_or_else(|| anyhow!("Hue v2 channel has an invalid channel_id"))?;
+            let position = channel
+                .get("position")
+                .ok_or_else(|| anyhow!("Hue v2 channel {} has no position", channel_id))?;
+            let coordinate = |axis| {
+                position
+                    .get(axis)
+                    .and_then(Value::as_f64)
+                    .map(|value| value as f32)
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Hue v2 channel {} has invalid {} coordinate",
+                            channel_id,
+                            axis
+                        )
+                    })
+            };
+            Ok(crate::config::LightZone::from_3d_position(
+                channel_id,
+                &format!("Hue channel {}", channel_id),
+                [coordinate("x")?, coordinate("y")?, coordinate("z")?],
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    zones.sort_by_key(|zone| zone.channel_id);
+    Ok(zones)
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn v2_configuration_id_resolves_to_matching_v1_group() {
+        let groups = vec![
+            ("1".to_string(), "Cinema".to_string()),
+            ("2".to_string(), "Music".to_string()),
+        ];
+        let configurations = vec![serde_json::json!({
+            "id": "12345678-1234-1234-1234-123456789abc",
+            "metadata": { "name": "Cinema" },
+            "channels": []
+        })];
+
+        let (id, name, configuration) = select_entertainment_area(
+            &groups,
+            &configurations,
+            Some("12345678-1234-1234-1234-123456789abc"),
+        )
+        .unwrap();
+
+        assert_eq!(id, "1");
+        assert_eq!(name, "Cinema");
+        assert_eq!(configuration["id"], "12345678-1234-1234-1234-123456789abc");
+    }
 }
 
 /// Activates or deactivates the entertainment streaming session on the Hue Bridge
@@ -203,11 +321,7 @@ pub struct StreamState {
 }
 
 /// Queries whether the entertainment area is currently active on the Hue Bridge and reads settings
-pub fn get_stream_state(
-    bridge_ip: &str,
-    username: &str,
-    group_id: &str,
-) -> Result<StreamState> {
+pub fn get_stream_state(bridge_ip: &str, username: &str, group_id: &str) -> Result<StreamState> {
     let url = format!("http://{}/api/{}/groups/{}", bridge_ip, username, group_id);
     let resp = ureq::get(&url)
         .timeout(Duration::from_secs(3))
@@ -241,10 +355,28 @@ pub fn get_stream_state(
 
 /// Queries whether the entertainment area is currently active on the Hue Bridge
 #[allow(dead_code)]
-pub fn get_stream_status(
-    bridge_ip: &str,
-    username: &str,
-    group_id: &str,
-) -> Result<bool> {
+pub fn get_stream_status(bridge_ip: &str, username: &str, group_id: &str) -> Result<bool> {
     get_stream_state(bridge_ip, username, group_id).map(|s| s.active)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v2_channels_keep_explicit_channel_ids() {
+        let configuration = serde_json::json!({
+            "channels": [
+                {"channel_id": 7, "position": {"x": 1.0, "y": 1.0, "z": 0.0}},
+                {"channel_id": 2, "position": {"x": -1.0, "y": -1.0, "z": 0.0}}
+            ]
+        });
+        let zones = zones_from_v2_configuration(&configuration).unwrap();
+        assert_eq!(
+            zones.iter().map(|zone| zone.channel_id).collect::<Vec<_>>(),
+            vec![2, 7]
+        );
+        assert!(zones[0].x_max < 0.5);
+        assert!(zones[1].x_min > 0.5);
+    }
 }

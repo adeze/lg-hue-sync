@@ -212,7 +212,8 @@ impl Default for ActiveRect {
 pub struct ZoneSampler {
     zones: Vec<LightZone>,
     smoothed_colors: Vec<RgbColor>,
-    smoothing_factor: f32,
+    rise_smoothing_factor: f32,
+    fall_smoothing_factor: f32,
     hdr_tone_mapping: bool,
     letterbox_detection: bool,
     saturation_boost: f32,
@@ -220,6 +221,7 @@ pub struct ZoneSampler {
     peak_weight: f32,
     gamma: f32,
     max_color_step: u8,
+    strict_blackout: bool,
     active_rect: ActiveRect,
     frame_count: u64,
     last_global_color: RgbColor,
@@ -238,7 +240,8 @@ impl ZoneSampler {
         Self {
             zones,
             smoothed_colors: vec![RgbColor::new(0, 0, 0); len],
-            smoothing_factor,
+            rise_smoothing_factor: smoothing_factor,
+            fall_smoothing_factor: smoothing_factor,
             hdr_tone_mapping,
             letterbox_detection,
             saturation_boost,
@@ -246,6 +249,7 @@ impl ZoneSampler {
             peak_weight: 0.35,
             gamma: 1.0,
             max_color_step: 12,
+            strict_blackout: false,
             active_rect: ActiveRect::default(),
             frame_count: 0,
             last_global_color: RgbColor::new(0, 0, 0),
@@ -254,7 +258,18 @@ impl ZoneSampler {
 
     /// Dynamically update smoothing factor based on Hue mobile app sync intensity
     pub fn set_smoothing_factor(&mut self, factor: f32) {
-        self.smoothing_factor = factor.clamp(0.05, 1.0);
+        let factor = factor.clamp(0.05, 1.0);
+        self.rise_smoothing_factor = factor;
+        self.fall_smoothing_factor = factor;
+    }
+
+    pub fn set_temporal_response(&mut self, rise: f32, fall: f32) {
+        self.rise_smoothing_factor = rise.clamp(0.05, 1.0);
+        self.fall_smoothing_factor = fall.clamp(0.05, 1.0);
+    }
+
+    pub fn set_strict_blackout(&mut self, enabled: bool) {
+        self.strict_blackout = enabled;
     }
 
     pub fn set_hdr_tone_mapping(&mut self, enabled: bool) {
@@ -456,13 +471,6 @@ impl ZoneSampler {
             self.frame_count > 1 && current_global_color.delta(self.last_global_color) > 0.35;
         self.last_global_color = current_global_color;
 
-        // Effective smoothing factor: snap to 1.0 (zero latency) on scene cuts, else smooth EMA
-        let effective_alpha = if is_scene_cut {
-            1.0
-        } else {
-            self.smoothing_factor
-        };
-
         let mut results = Vec::with_capacity(self.zones.len());
 
         let act_x_min = self.active_rect.x_min;
@@ -566,11 +574,22 @@ impl ZoneSampler {
 
             // Apply Adaptive EMA smoothing
             let current = self.smoothed_colors[i];
-            let smoothed = limit_color_step(
-                current,
-                current.lerp(processed_color, effective_alpha),
-                self.max_color_step,
-            );
+            let smoothed = if self.strict_blackout && processed_color == RgbColor::new(0, 0, 0) {
+                processed_color
+            } else {
+                let alpha = if is_scene_cut {
+                    1.0
+                } else if processed_color.luminance() < current.luminance() {
+                    self.fall_smoothing_factor
+                } else {
+                    self.rise_smoothing_factor
+                };
+                limit_color_step(
+                    current,
+                    current.lerp(processed_color, alpha),
+                    self.max_color_step,
+                )
+            };
             self.smoothed_colors[i] = smoothed;
 
             results.push((zone.channel_id, smoothed));
@@ -670,6 +689,26 @@ mod tests {
         let bright = RgbColor::new(100, 100, 100);
         let not_gated = bright.apply_noise_gate(0.02);
         assert_eq!(not_gated, bright);
+    }
+
+    #[test]
+    fn strict_blackout_does_not_leave_a_black_afterglow() {
+        let zone = LightZone {
+            channel_id: 0,
+            name: "Test".to_string(),
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0,
+        };
+        let mut sampler = ZoneSampler::new(vec![zone], 0.35, false, false, 1.0, 0.02);
+        sampler.set_strict_blackout(true);
+        let bright = vec![255; 16];
+        sampler.sample_frame(&bright, 2, 2, false);
+
+        let black = vec![0; 16];
+        let (colors, _) = sampler.sample_frame(&black, 2, 2, false);
+        assert_eq!(colors[0].1, RgbColor::new(0, 0, 0));
     }
 
     #[test]

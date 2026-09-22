@@ -148,6 +148,15 @@ pub struct Config {
     pub gamma: f32,
     #[serde(default = "default_noise_gate")]
     pub noise_gate_threshold: f32,
+    #[serde(default = "default_smoothing_factor")]
+    pub smoothing_factor: f32,
+    #[serde(default = "default_smoothing_factor")]
+    pub rise_smoothing_factor: f32,
+    #[serde(default = "default_smoothing_factor")]
+    pub fall_smoothing_factor: f32,
+    /// When a sampled region passes the black gate, turn that output fully off without afterglow.
+    #[serde(default)]
+    pub strict_blackout: bool,
     /// Maximum per-component RGB change in one sampled video frame.
     #[serde(default = "default_max_color_step")]
     pub max_color_step: u8,
@@ -203,6 +212,10 @@ fn default_gamma() -> f32 {
 
 fn default_noise_gate() -> f32 {
     0.02
+}
+
+fn default_smoothing_factor() -> f32 {
+    0.35
 }
 
 fn default_max_color_step() -> u8 {
@@ -270,6 +283,10 @@ impl Config {
             peak_weight: default_peak_weight(),
             gamma: default_gamma(),
             noise_gate_threshold: default_noise_gate(),
+            smoothing_factor: default_smoothing_factor(),
+            rise_smoothing_factor: default_smoothing_factor(),
+            fall_smoothing_factor: default_smoothing_factor(),
+            strict_blackout: false,
             max_color_step: default_max_color_step(),
             adaptive_throttling: true,
             zones: default_zones(),

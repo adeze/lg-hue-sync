@@ -110,7 +110,8 @@ pub struct NanoleafPerimeterSampler {
     zones: Vec<PerimeterZone>,
     smoothed_colors: Vec<RgbColor>,
     active_rect: Option<ActiveRect>,
-    smoothing_factor: f32,
+    rise_smoothing_factor: f32,
+    fall_smoothing_factor: f32,
     hdr_tone_mapping: bool,
     saturation_boost: f32,
     noise_gate_threshold: f32,
@@ -118,6 +119,7 @@ pub struct NanoleafPerimeterSampler {
     peak_weight: f32,
     gamma: f32,
     max_color_step: u8,
+    strict_blackout: bool,
 }
 
 fn limit_color_step(current: RgbColor, target: RgbColor, max_step: u8) -> RgbColor {
@@ -156,7 +158,8 @@ impl NanoleafPerimeterSampler {
             zones,
             smoothed_colors,
             active_rect: None,
-            smoothing_factor: 0.35,
+            rise_smoothing_factor: 0.35,
+            fall_smoothing_factor: 0.35,
             hdr_tone_mapping,
             saturation_boost,
             noise_gate_threshold,
@@ -164,6 +167,7 @@ impl NanoleafPerimeterSampler {
             peak_weight: 0.35,
             gamma: 1.0,
             max_color_step: 12,
+            strict_blackout: false,
         }
     }
 
@@ -412,7 +416,18 @@ impl NanoleafPerimeterSampler {
     }
 
     pub fn set_smoothing_factor(&mut self, factor: f32) {
-        self.smoothing_factor = factor.clamp(0.05, 1.0);
+        let factor = factor.clamp(0.05, 1.0);
+        self.rise_smoothing_factor = factor;
+        self.fall_smoothing_factor = factor;
+    }
+
+    pub fn set_temporal_response(&mut self, rise: f32, fall: f32) {
+        self.rise_smoothing_factor = rise.clamp(0.05, 1.0);
+        self.fall_smoothing_factor = fall.clamp(0.05, 1.0);
+    }
+
+    pub fn set_strict_blackout(&mut self, enabled: bool) {
+        self.strict_blackout = enabled;
     }
 
     pub fn set_brightness_multiplier(&mut self, mult: f32) {
@@ -457,12 +472,6 @@ impl NanoleafPerimeterSampler {
         is_bgra: bool,
         is_scene_cut: bool,
     ) -> Vec<RgbColor> {
-        let alpha = if is_scene_cut {
-            1.0
-        } else {
-            self.smoothing_factor
-        };
-
         let (act_x_min, act_x_max, act_y_min, act_y_max) = match self.active_rect {
             Some(rect) => (rect.x_min, rect.x_max, rect.y_min, rect.y_max),
             None => (0.0, 1.0, 0.0, 1.0),
@@ -566,11 +575,22 @@ impl NanoleafPerimeterSampler {
 
             // EMA temporal smoothing
             let current = self.smoothed_colors[i];
-            let smoothed = limit_color_step(
-                current,
-                current.lerp(processed_color, alpha),
-                self.max_color_step,
-            );
+            let smoothed = if self.strict_blackout && processed_color == RgbColor::new(0, 0, 0) {
+                processed_color
+            } else {
+                let alpha = if is_scene_cut {
+                    1.0
+                } else if processed_color.luminance() < current.luminance() {
+                    self.fall_smoothing_factor
+                } else {
+                    self.rise_smoothing_factor
+                };
+                limit_color_step(
+                    current,
+                    current.lerp(processed_color, alpha),
+                    self.max_color_step,
+                )
+            };
             self.smoothed_colors[i] = smoothed;
 
             // Apply brightness multiplier
@@ -624,6 +644,17 @@ mod tests {
             assert!(zone.x_max >= zone.x_min, "Zone {} x_max < x_min", i);
             assert!(zone.y_max >= zone.y_min, "Zone {} y_max < y_min", i);
         }
+    }
+
+    #[test]
+    fn strict_blackout_turns_off_gated_segments() {
+        let panel_ids = vec![1, 2, 3, 4];
+        let mut sampler = NanoleafPerimeterSampler::new(4, &panel_ids, false, 1.0, 0.02, 1.0);
+        sampler.set_strict_blackout(true);
+        sampler.sample_frame(&vec![255; 64], 4, 4, false, false);
+
+        let colors = sampler.sample_frame(&vec![0; 64], 4, 4, false, false);
+        assert!(colors.iter().all(|color| *color == RgbColor::new(0, 0, 0)));
     }
 
     #[test]

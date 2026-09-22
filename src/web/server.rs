@@ -32,7 +32,14 @@ pub struct LiveSettings {
     pub peak_weight: f32,
     pub gamma: f32,
     pub noise_gate_threshold: f32,
+    #[serde(default = "default_smoothing_factor")]
     pub smoothing_factor: f32,
+    #[serde(default = "default_smoothing_factor")]
+    pub rise_smoothing_factor: f32,
+    #[serde(default = "default_smoothing_factor")]
+    pub fall_smoothing_factor: f32,
+    #[serde(default)]
+    pub strict_blackout: bool,
     pub use_xy_gamut: bool,
     pub letterbox_detection: bool,
     pub hdr_tone_mapping: bool,
@@ -43,6 +50,10 @@ pub struct LiveSettings {
 
 fn default_output_trim() -> f32 {
     1.0
+}
+
+fn default_smoothing_factor() -> f32 {
+    0.35
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

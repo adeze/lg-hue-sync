@@ -348,6 +348,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         None
     };
     if let Some(ref mut sampler) = hue_sampler {
+        sampler.set_temporal_response(config.rise_smoothing_factor, config.fall_smoothing_factor);
+        sampler.set_strict_blackout(config.strict_blackout);
         sampler.set_peak_weight(config.peak_weight);
         sampler.set_gamma(config.gamma);
         sampler.set_max_color_step(config.max_color_step);
@@ -387,6 +389,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         (None, None)
     };
     if let Some(ref mut sampler) = nanoleaf_sampler {
+        sampler.set_temporal_response(config.rise_smoothing_factor, config.fall_smoothing_factor);
+        sampler.set_strict_blackout(config.strict_blackout);
         sampler.set_peak_weight(config.peak_weight);
         sampler.set_gamma(config.gamma);
         sampler.set_max_color_step(config.max_color_step);
@@ -445,7 +449,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         peak_weight: config.peak_weight,
         gamma: config.gamma,
         noise_gate_threshold: config.noise_gate_threshold,
-        smoothing_factor: 0.35,
+        smoothing_factor: config.smoothing_factor,
+        rise_smoothing_factor: config.rise_smoothing_factor,
+        fall_smoothing_factor: config.fall_smoothing_factor,
+        strict_blackout: config.strict_blackout,
         use_xy_gamut: config.use_xy_gamut,
         letterbox_detection: config.letterbox_detection,
         hdr_tone_mapping: config.hdr_tone_mapping,
@@ -713,7 +720,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
             if let Some(ref mut s) = hue_sampler {
-                s.set_smoothing_factor(live_st.smoothing_factor);
+                s.set_temporal_response(
+                    live_st.rise_smoothing_factor,
+                    live_st.fall_smoothing_factor,
+                );
+                s.set_strict_blackout(live_st.strict_blackout);
                 s.set_hdr_tone_mapping(live_st.hdr_tone_mapping);
                 s.set_letterbox_detection(live_st.letterbox_detection);
                 s.set_saturation_boost(live_st.saturation_boost);
@@ -723,7 +734,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 s.set_max_color_step(live_st.max_color_step);
             }
             if let Some(ref mut ns) = nanoleaf_sampler {
-                ns.set_smoothing_factor(live_st.smoothing_factor);
+                ns.set_temporal_response(
+                    live_st.rise_smoothing_factor,
+                    live_st.fall_smoothing_factor,
+                );
+                ns.set_strict_blackout(live_st.strict_blackout);
                 ns.set_hdr_tone_mapping(live_st.hdr_tone_mapping);
                 ns.set_saturation_boost(live_st.saturation_boost);
                 ns.set_brightness_multiplier(
@@ -758,6 +773,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             save_cfg.peak_weight = live_st.peak_weight;
             save_cfg.gamma = live_st.gamma;
             save_cfg.noise_gate_threshold = live_st.noise_gate_threshold;
+            save_cfg.smoothing_factor = live_st.smoothing_factor;
+            save_cfg.rise_smoothing_factor = live_st.rise_smoothing_factor;
+            save_cfg.fall_smoothing_factor = live_st.fall_smoothing_factor;
+            save_cfg.strict_blackout = live_st.strict_blackout;
             save_cfg.use_xy_gamut = live_st.use_xy_gamut;
             save_cfg.letterbox_detection = live_st.letterbox_detection;
             save_cfg.hdr_tone_mapping = live_st.hdr_tone_mapping;
@@ -809,6 +828,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         live_st.noise_gate_threshold,
                     ));
                     if let Some(ref mut sampler) = hue_sampler {
+                        sampler.set_temporal_response(
+                            live_st.rise_smoothing_factor,
+                            live_st.fall_smoothing_factor,
+                        );
+                        sampler.set_strict_blackout(live_st.strict_blackout);
                         sampler.set_peak_weight(live_st.peak_weight);
                         sampler.set_gamma(live_st.gamma);
                         sampler.set_max_color_step(live_st.max_color_step);

@@ -372,10 +372,36 @@ fn zones_from_v2_configuration(
     entertainment_services: Option<&Vec<Value>>,
     devices: Option<&Vec<Value>>,
 ) -> Result<Vec<crate::config::LightZone>> {
-    let mut zones = configuration
+    let channels = configuration
         .get("channels")
         .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("Hue v2 configuration has no channels"))?
+        .ok_or_else(|| anyhow!("Hue v2 configuration has no channels"))?;
+    let member_counts = channels
+        .iter()
+        .flat_map(|channel| {
+            channel
+                .get("members")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|member| {
+            Some((
+                member.pointer("/service/rid")?.as_str()?.to_string(),
+                u8::try_from(member.get("index")?.as_u64()?.saturating_add(1)).ok()?,
+            ))
+        })
+        .fold(
+            std::collections::BTreeMap::<String, u8>::new(),
+            |mut counts, (id, count)| {
+                counts
+                    .entry(id)
+                    .and_modify(|existing| *existing = (*existing).max(count))
+                    .or_insert(count);
+                counts
+            },
+        );
+    let mut zones = channels
         .iter()
         .map(|channel| {
             let channel_id = channel
@@ -400,8 +426,14 @@ fn zones_from_v2_configuration(
                         )
                     })
             };
-            let service_id = channel
-                .pointer("/members/0/service/rid")
+            let members = channel
+                .get("members")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let service_id = members
+                .first()
+                .and_then(|member| member.pointer("/service/rid"))
                 .and_then(Value::as_str);
             let service = service_id.and_then(|id| {
                 entertainment_services?
@@ -420,17 +452,50 @@ fn zones_from_v2_configuration(
                 .and_then(|device| device.pointer("/metadata/name"))
                 .and_then(Value::as_str)
                 .unwrap_or("Hue light");
-            let segment_index = channel
-                .pointer("/members/0/index")
-                .and_then(Value::as_u64)
-                .and_then(|index| u8::try_from(index).ok());
-            let segment_count = service
+            let mut segment_indices: Vec<u8> = members
+                .iter()
+                .filter(|member| {
+                    member.pointer("/service/rid").and_then(Value::as_str) == service_id
+                })
+                .filter_map(|member| member.get("index").and_then(Value::as_u64))
+                .filter_map(|index| u8::try_from(index).ok())
+                .collect();
+            segment_indices.sort_unstable();
+            segment_indices.dedup();
+            let segment_index = segment_indices.first().copied();
+            let service_segment_count = service
                 .and_then(|service| service.get("segments"))
                 .and_then(Value::as_array)
-                .and_then(|segments| u8::try_from(segments.len()).ok());
-            let name = match (segment_index, segment_count) {
-                (Some(index), Some(count)) if count > 1 => {
+                .and_then(|segments| u8::try_from(segments.len()).ok())
+                .filter(|count| *count > 0);
+            let segment_count = service_segment_count
+                .into_iter()
+                .chain(service_id.and_then(|id| member_counts.get(id).copied()))
+                .max();
+            let name = match (segment_indices.as_slice(), segment_count) {
+                ([index], Some(count)) if count > 1 => {
                     format!("{device_name} · Segment {}", index + 1)
+                }
+                ([first, rest @ ..], Some(_)) if !rest.is_empty() => {
+                    let contiguous = segment_indices
+                        .windows(2)
+                        .all(|pair| pair[1] == pair[0].saturating_add(1));
+                    if contiguous {
+                        format!(
+                            "{device_name} · Segments {}–{}",
+                            first + 1,
+                            segment_indices.last().unwrap() + 1
+                        )
+                    } else {
+                        format!(
+                            "{device_name} · Segments {}",
+                            segment_indices
+                                .iter()
+                                .map(|index| (index + 1).to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
                 }
                 _ if service_id.is_some() => device_name.to_string(),
                 _ => format!("Hue channel {channel_id}"),
@@ -446,40 +511,6 @@ fn zones_from_v2_configuration(
             Ok(zone)
         })
         .collect::<Result<Vec<_>>>()?;
-    // Some Bridge firmwares omit `entertainment.segments`; the configuration's
-    // indexed members still authoritatively describe the exposed gradient channels.
-    let segment_counts = zones
-        .iter()
-        .filter_map(|zone| {
-            Some((
-                zone.hue_device_id.as_deref()?,
-                zone.hue_segment_index?.saturating_add(1),
-            ))
-        })
-        .fold(
-            std::collections::BTreeMap::<String, u8>::new(),
-            |mut counts, (device_id, count)| {
-                counts
-                    .entry(device_id.to_string())
-                    .and_modify(|existing| *existing = (*existing).max(count))
-                    .or_insert(count);
-                counts
-            },
-        );
-    for zone in &mut zones {
-        if let (Some(device_id), Some(segment_index)) =
-            (zone.hue_device_id.as_deref(), zone.hue_segment_index)
-        {
-            if let Some(segment_count) = segment_counts.get(device_id).copied() {
-                let segment_count = zone.hue_segment_count.unwrap_or(segment_count);
-                zone.hue_segment_count = Some(segment_count);
-                if segment_count > 1 {
-                    let device_name = zone.name.split(" · Segment").next().unwrap_or(&zone.name);
-                    zone.name = format!("{device_name} · Segment {}", segment_index + 1);
-                }
-            }
-        }
-    }
     zones.sort_by_key(|zone| zone.channel_id);
     Ok(zones)
 }
@@ -636,5 +667,83 @@ mod tests {
         assert_eq!(zones[0].name, "Hue Flux · Segment 2");
         assert_eq!(zones[0].hue_device_id.as_deref(), Some("device-1"));
         assert_eq!(zones[0].hue_segment_count, Some(3));
+    }
+
+    #[test]
+    fn v2_configuration_maps_all_three_gradient_segments() {
+        let configuration = serde_json::json!({
+            "channels": [
+                {"channel_id": 3, "position": {"x": 0.5, "y": 1.0, "z": 0.0}, "members": [{"service": {"rid": "service-1"}, "index": 0}]},
+                {"channel_id": 4, "position": {"x": 0.5, "y": 1.0, "z": 0.0}, "members": [{"service": {"rid": "service-1"}, "index": 1}]},
+                {"channel_id": 5, "position": {"x": 0.5, "y": 1.0, "z": 0.0}, "members": [{"service": {"rid": "service-1"}, "index": 2}]}
+            ]
+        });
+        let services = vec![serde_json::json!({
+            "id": "service-1", "owner": {"rid": "device-1"}, "segments": [{}, {}, {}]
+        })];
+        let devices = vec![serde_json::json!({
+            "id": "device-1", "metadata": {"name": "Hue Flux"}
+        })];
+
+        let zones =
+            zones_from_v2_configuration(&configuration, Some(&services), Some(&devices)).unwrap();
+
+        assert_eq!(zones.len(), 3);
+        assert_eq!(
+            zones
+                .iter()
+                .map(|zone| zone.hue_segment_index.unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            zones
+                .iter()
+                .map(|zone| zone.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Hue Flux · Segment 1",
+                "Hue Flux · Segment 2",
+                "Hue Flux · Segment 3"
+            ]
+        );
+    }
+
+    #[test]
+    fn v2_grouped_gradient_members_report_the_actual_channel_ranges() {
+        let configuration = serde_json::json!({
+            "channels": [
+                {"channel_id": 3, "position": {"x": 0.8, "y": -0.8, "z": 0.0}, "members": [
+                    {"service": {"rid": "service-1"}, "index": 0},
+                    {"service": {"rid": "service-1"}, "index": 1}
+                ]},
+                {"channel_id": 4, "position": {"x": 0.4, "y": 0.8, "z": 0.0}, "members": [
+                    {"service": {"rid": "service-1"}, "index": 2},
+                    {"service": {"rid": "service-1"}, "index": 3},
+                    {"service": {"rid": "service-1"}, "index": 4},
+                    {"service": {"rid": "service-1"}, "index": 5},
+                    {"service": {"rid": "service-1"}, "index": 6}
+                ]}
+            ]
+        });
+        let services = vec![serde_json::json!({
+            "id": "service-1", "owner": {"rid": "device-1"}
+        })];
+        let devices = vec![serde_json::json!({
+            "id": "device-1", "metadata": {"name": "Hue Flux ultra bright SL 1"}
+        })];
+
+        let zones =
+            zones_from_v2_configuration(&configuration, Some(&services), Some(&devices)).unwrap();
+
+        assert_eq!(
+            zones.len(),
+            2,
+            "Hue output has two independently driven channels"
+        );
+        assert_eq!(zones[0].name, "Hue Flux ultra bright SL 1 · Segments 1–2");
+        assert_eq!(zones[1].name, "Hue Flux ultra bright SL 1 · Segments 3–7");
+        assert_eq!(zones[0].hue_segment_count, Some(7));
+        assert_eq!(zones[1].hue_segment_count, Some(7));
     }
 }

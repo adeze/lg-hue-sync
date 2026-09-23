@@ -18,7 +18,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use capture::{create_capture, detect_source_fps, VtCapture};
 use color::{RgbColor, ZoneSampler};
-use config::{Config, ConfigError, HueLightTrim};
+use config::{Config, ConfigError, NanoleafAlignment};
 use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
 use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
@@ -119,50 +119,6 @@ fn set_hue_stream_active(config: &Config, active: bool) -> Result<()> {
         config.hue_bridge_certificate_sha256.as_deref(),
         active,
     )
-}
-
-fn retain_hue_output_trims(
-    new_zones: &mut [config::LightZone],
-    previous_zones: &[config::LightZone],
-) {
-    for zone in new_zones {
-        if let Some(device_id) = zone.hue_device_id.as_deref() {
-            if let Some(previous) = previous_zones
-                .iter()
-                .find(|previous| previous.hue_device_id.as_deref() == Some(device_id))
-            {
-                zone.output_trim = previous.output_trim;
-            }
-        }
-    }
-}
-
-fn hue_light_trims(zones: &[config::LightZone]) -> Vec<HueLightTrim> {
-    let mut trims = Vec::new();
-    for zone in zones {
-        if let Some(device_id) = zone.hue_device_id.as_deref() {
-            if !trims
-                .iter()
-                .any(|trim: &HueLightTrim| trim.device_id == device_id)
-            {
-                trims.push(HueLightTrim {
-                    device_id: device_id.to_string(),
-                    output_trim: zone.output_trim,
-                });
-            }
-        }
-    }
-    trims
-}
-
-fn apply_hue_light_trims(zones: &mut [config::LightZone], trims: &[HueLightTrim]) {
-    for zone in zones {
-        if let Some(device_id) = zone.hue_device_id.as_deref() {
-            if let Some(trim) = trims.iter().find(|trim| trim.device_id == device_id) {
-                zone.output_trim = trim.output_trim.clamp(0.25, 1.5);
-            }
-        }
-    }
 }
 
 fn calibration_pattern(state: &SharedState) -> Option<CalibrationPattern> {
@@ -324,12 +280,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             config.hue_bridge_certificate_sha256.as_deref(),
         ) {
             Ok(area) => {
-                let previous_zones = config.zones.clone();
                 config.entertainment_area_id = area.configuration_id.clone();
                 config.entertainment_configuration_id = Some(area.configuration_id);
                 config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
                 config.zones = area.zones;
-                retain_hue_output_trims(&mut config.zones, &previous_zones);
                 if let Err(error) = config.save(&config_path) {
                     warn!(
                         "Resolved Hue V2 configuration but could not persist it: {}",
@@ -434,13 +388,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     // 2. Initialize Nanoleaf 4D UDP streamer if active
     let (mut nanoleaf_sampler, mut nanoleaf_streamer) = if nanoleaf_active {
         let n_cfg = config.nanoleaf.as_ref().unwrap();
-        let sampler = NanoleafPerimeterSampler::new(
+        let sampler = NanoleafPerimeterSampler::new_aligned(
             n_cfg.segments,
             &n_cfg.panel_ids,
             config.hdr_tone_mapping,
             config.saturation_boost,
             config.noise_gate_threshold,
             config.brightness_multiplier * config.nanoleaf_output_brightness,
+            n_cfg.alignment,
         );
         let streamer = if nanoleaf_sync_enabled && pipeline_should_run {
             let port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
@@ -514,7 +469,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let initial_settings = LiveSettings {
         brightness_multiplier: config.brightness_multiplier,
         hue_output_brightness: config.hue_output_brightness,
-        hue_light_trims: hue_light_trims(&config.zones),
         nanoleaf_output_brightness: config.nanoleaf_output_brightness,
         saturation_boost: config.saturation_boost,
         peak_weight: config.peak_weight,
@@ -530,12 +484,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         hue_sync_enabled,
         nanoleaf_sync_enabled,
         auto_tv_power: config.auto_tv_power,
+        nanoleaf_alignment: config
+            .nanoleaf
+            .as_ref()
+            .map(|nanoleaf| nanoleaf.alignment)
+            .unwrap_or_default(),
         max_color_step: config.max_color_step,
     };
 
     let shared_state = Arc::new(SharedState::new(
         initial_settings,
         config.bridge_ip.clone(),
+        config
+            .nanoleaf
+            .as_ref()
+            .map(|nanoleaf| nanoleaf.ip.clone())
+            .unwrap_or_default(),
         format!("{}x{}", config.capture_width, config.capture_height),
         config.zones.clone(),
     ));
@@ -611,7 +575,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         .map(|previous| previous != active)
                         .unwrap_or(!active && shared_state.is_syncing.load(Ordering::Relaxed));
                     if changed {
-                        info!("TV power changed: {}", if active { "active" } else { "standby" });
+                        info!(
+                            "TV power changed: {}",
+                            if active { "active" } else { "standby" }
+                        );
                         if active {
                             shared_state.request_start.store(true, Ordering::SeqCst);
                         } else {
@@ -686,11 +653,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
 
-                let configured_auto_tv_power = shared_state
-                    .current_settings
-                    .read()
-                    .unwrap()
-                    .auto_tv_power;
+                let configured_auto_tv_power =
+                    shared_state.current_settings.read().unwrap().auto_tv_power;
                 if auto_tv_power != configured_auto_tv_power {
                     auto_tv_power = configured_auto_tv_power;
                     observed_tv_power = None;
@@ -782,11 +746,18 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                         ) {
                                             Ok(new_streamer) => {
                                                 nanoleaf_streamer = Some(new_streamer);
-                                                shared_state.nanoleaf_connected.store(true, Ordering::Relaxed);
+                                                shared_state
+                                                    .nanoleaf_connected
+                                                    .store(true, Ordering::Relaxed);
                                             }
                                             Err(e) => {
-                                                shared_state.nanoleaf_connected.store(false, Ordering::Relaxed);
-                                                error!("Failed to recreate Nanoleaf streamer: {}", e);
+                                                shared_state
+                                                    .nanoleaf_connected
+                                                    .store(false, Ordering::Relaxed);
+                                                error!(
+                                                    "Failed to recreate Nanoleaf streamer: {}",
+                                                    e
+                                                );
                                             }
                                         }
                                     }
@@ -813,7 +784,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             current_hue_brightness = live_st.brightness_multiplier * live_st.hue_output_brightness;
             current_use_xy = live_st.use_xy_gamut;
-            apply_hue_light_trims(&mut config.zones, &live_st.hue_light_trims);
             *shared_state.hue_zones.write().unwrap() = config.zones.clone();
             if hue_sync_enabled != live_st.hue_sync_enabled {
                 hue_sync_enabled = live_st.hue_sync_enabled;
@@ -896,6 +866,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 ns.set_gamma(live_st.gamma);
                 ns.set_noise_gate_threshold(live_st.noise_gate_threshold);
                 ns.set_max_color_step(live_st.max_color_step);
+                ns.set_alignment(live_st.nanoleaf_alignment);
             }
             info!(
                 "Applied live settings: Hue={:.1}x, Nanoleaf={:.1}x, saturation={:.1}x, smoothing={:.2}, xy_mode={}",
@@ -931,6 +902,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             save_cfg.hue_sync_enabled = hue_sync_enabled;
             save_cfg.nanoleaf_sync_enabled = nanoleaf_sync_enabled;
             save_cfg.auto_tv_power = live_st.auto_tv_power;
+            if let Some(nanoleaf) = save_cfg.nanoleaf.as_mut() {
+                nanoleaf.alignment = live_st.nanoleaf_alignment;
+            }
             save_cfg.max_color_step = live_st.max_color_step;
             if let Err(e) = save_cfg.save(&config_path) {
                 error!("Failed to save updated config to {:?}: {}", config_path, e);
@@ -956,12 +930,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     if configuration_changed {
                         let _ = set_hue_stream_active(&config, false);
                     }
-                    let previous_zones = config.zones.clone();
                     config.entertainment_area_id = area.configuration_id.clone();
                     config.entertainment_configuration_id = Some(area.configuration_id);
                     config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
                     config.zones = area.zones;
-                    retain_hue_output_trims(&mut config.zones, &previous_zones);
                     *shared_state.hue_zones.write().unwrap() = config.zones.clone();
                     let live_st = shared_state.current_settings.read().unwrap().clone();
                     hue_sampler = Some(ZoneSampler::new(
@@ -1119,23 +1091,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         let channels: Vec<(u8, (u16, u16, u16))> = sampled_zones
                             .iter()
                             .map(|(channel_id, color)| {
-                                let channel_trim = config
-                                    .zones
-                                    .iter()
-                                    .find(|zone| zone.channel_id == *channel_id)
-                                    .map(|zone| zone.output_trim)
-                                    .unwrap_or(1.0);
                                 let scaled = if calibration.is_some() {
                                     *color
                                 } else {
                                     RgbColor::new(
-                                        ((color.r as f32) * current_hue_brightness * channel_trim)
+                                        ((color.r as f32) * current_hue_brightness)
                                             .clamp(0.0, 255.0)
                                             as u8,
-                                        ((color.g as f32) * current_hue_brightness * channel_trim)
+                                        ((color.g as f32) * current_hue_brightness)
                                             .clamp(0.0, 255.0)
                                             as u8,
-                                        ((color.b as f32) * current_hue_brightness * channel_trim)
+                                        ((color.b as f32) * current_hue_brightness)
                                             .clamp(0.0, 255.0)
                                             as u8,
                                     )
@@ -1530,13 +1496,11 @@ async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
     config.bridge_ip = bridge_ip;
     config.username = username;
     config.clientkey = clientkey;
-    let previous_zones = config.zones.clone();
     config.entertainment_area_id = area.configuration_id.clone();
     config.entertainment_configuration_id = Some(area.configuration_id);
     config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
     if !area.zones.is_empty() {
         config.zones = area.zones;
-        retain_hue_output_trims(&mut config.zones, &previous_zones);
     }
 
     config.save(&output)?;
@@ -1562,13 +1526,11 @@ async fn run_sync_hue(config_path: PathBuf, target_area: Option<String>) -> Resu
         config.hue_bridge_certificate_sha256.as_deref(),
     )?;
 
-    let previous_zones = config.zones.clone();
     config.entertainment_area_id = area.configuration_id.clone();
     config.entertainment_configuration_id = Some(area.configuration_id);
     config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
     if !area.zones.is_empty() {
         config.zones = area.zones;
-        retain_hue_output_trims(&mut config.zones, &previous_zones);
     }
     config.save(&config_path)?;
 
@@ -1612,6 +1574,7 @@ async fn run_pair_nanoleaf(ip_opt: Option<String>, config_path: PathBuf) -> Resu
         udp_port: 60222,
         segments: num_panels.max(30),
         panel_ids,
+        alignment: NanoleafAlignment::default(),
     });
 
     config.save(&config_path)?;

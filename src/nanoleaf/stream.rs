@@ -3,7 +3,10 @@ use byteorder::{BigEndian, ByteOrder};
 use std::net::{SocketAddr, UdpSocket};
 use tracing::error;
 
-use crate::color::{ActiveRect, RgbColor};
+use crate::{
+    color::{ActiveRect, RgbColor},
+    config::{NanoleafAlignment, NanoleafStartCorner},
+};
 
 /// Manages high-speed binary UDP streaming to Nanoleaf 4D on port 60222 (extControl v2 protocol)
 pub struct NanoleafUdpStreamer {
@@ -107,6 +110,7 @@ pub struct PerimeterZone {
 
 /// Computes sampling coordinates and smooths colors around the TV border for Nanoleaf 4D lightstrip
 pub struct NanoleafPerimeterSampler {
+    base_zones: Vec<PerimeterZone>,
     zones: Vec<PerimeterZone>,
     smoothed_colors: Vec<RgbColor>,
     active_rect: Option<ActiveRect>,
@@ -137,6 +141,7 @@ impl NanoleafPerimeterSampler {
     /// Uses exact hardware coordinates from Nanoleaf 4D (NL69) controller:
     /// Starts at bottom-center (panel 0) and routes counter-clockwise:
     /// Bottom-Left (0..7) -> Up Left (8..15) -> Across Top (16..28) -> Down Right (29..35) -> Across Bottom (36..39).
+    #[cfg(test)]
     pub fn new(
         segment_count: u16,
         panel_ids: &[u16],
@@ -145,18 +150,37 @@ impl NanoleafPerimeterSampler {
         noise_gate_threshold: f32,
         brightness_multiplier: f32,
     ) -> Self {
+        Self::new_aligned(
+            segment_count,
+            panel_ids,
+            hdr_tone_mapping,
+            saturation_boost,
+            noise_gate_threshold,
+            brightness_multiplier,
+            NanoleafAlignment::default(),
+        )
+    }
+
+    pub fn new_aligned(
+        segment_count: u16,
+        panel_ids: &[u16],
+        hdr_tone_mapping: bool,
+        saturation_boost: f32,
+        noise_gate_threshold: f32,
+        brightness_multiplier: f32,
+        alignment: NanoleafAlignment,
+    ) -> Self {
         let border_depth = 0.08f32; // Sample outer 8% edge of screen
-        let zones = if segment_count == 40 {
+        let base_zones = if segment_count == 40 {
             Self::build_nanoleaf_4d_40_zones(panel_ids, border_depth)
         } else {
             Self::build_generic_perimeter_zones(segment_count, panel_ids, border_depth)
         };
 
-        let smoothed_colors = vec![RgbColor::new(0, 0, 0); zones.len()];
-
-        Self {
-            zones,
-            smoothed_colors,
+        let mut sampler = Self {
+            base_zones,
+            zones: Vec::new(),
+            smoothed_colors: Vec::new(),
             active_rect: None,
             rise_smoothing_factor: 0.35,
             fall_smoothing_factor: 0.35,
@@ -168,7 +192,40 @@ impl NanoleafPerimeterSampler {
             gamma: 1.0,
             max_color_step: 12,
             strict_blackout: false,
+        };
+        sampler.set_alignment(alignment);
+        sampler
+    }
+
+    pub fn set_alignment(&mut self, alignment: NanoleafAlignment) {
+        let len = self.base_zones.len();
+        if len == 0 {
+            return;
         }
+        let corner_index = match alignment.start_corner {
+            NanoleafStartCorner::BottomCenter => 0,
+            NanoleafStartCorner::BottomLeft => 7,
+            NanoleafStartCorner::TopLeft => 15,
+            NanoleafStartCorner::TopRight => 28,
+            NanoleafStartCorner::BottomRight => 35,
+        };
+        let start = if len == 40 {
+            corner_index
+        } else {
+            corner_index * len / 40
+        };
+        let direction = if alignment.reverse_direction { -1 } else { 1 };
+        let offset = alignment.perimeter_offset as isize;
+        self.zones = (0..len)
+            .map(|index| {
+                let source = (start as isize + offset + direction * index as isize)
+                    .rem_euclid(len as isize) as usize;
+                let mut zone = self.base_zones[index].clone();
+                zone.panel_id = self.base_zones[source].panel_id;
+                zone
+            })
+            .collect();
+        self.smoothed_colors = vec![RgbColor::new(0, 0, 0); len];
     }
 
     /// Builds 40 dedicated perimeter sampling zones calibrated to the exact physical
@@ -769,5 +826,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             panel_ids
         );
+    }
+
+    #[test]
+    fn alignment_remaps_panel_ids_without_moving_sampling_zones() {
+        let panel_ids: Vec<u16> = (0..40).collect();
+        let mut sampler = NanoleafPerimeterSampler::new(40, &panel_ids, false, 1.0, 0.0, 1.0);
+        let original_zones = sampler.zones.clone();
+
+        sampler.set_alignment(NanoleafAlignment {
+            start_corner: NanoleafStartCorner::BottomLeft,
+            reverse_direction: true,
+            perimeter_offset: 2,
+        });
+
+        assert_eq!(sampler.panel_ids()[0], 9);
+        assert_eq!(sampler.panel_ids()[1], 8);
+        for (aligned, original) in sampler.zones.iter().zip(original_zones) {
+            assert_eq!(aligned.x_min, original.x_min);
+            assert_eq!(aligned.x_max, original.x_max);
+            assert_eq!(aligned.y_min, original.y_min);
+            assert_eq!(aligned.y_max, original.y_max);
+        }
     }
 }

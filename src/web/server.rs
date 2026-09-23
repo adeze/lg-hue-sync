@@ -1,6 +1,6 @@
 use crate::{
     color::RgbColor,
-    config::{Config, ConfigError, HueLightTrim, LightZone, NanoleafConfig},
+    config::{Config, ConfigError, LightZone, NanoleafAlignment, NanoleafConfig},
     hue, nanoleaf,
 };
 use axum::{
@@ -26,8 +26,6 @@ pub struct LiveSettings {
     pub brightness_multiplier: f32,
     #[serde(default = "default_output_trim")]
     pub hue_output_brightness: f32,
-    #[serde(default)]
-    pub hue_light_trims: Vec<HueLightTrim>,
     #[serde(default = "default_output_trim")]
     pub nanoleaf_output_brightness: f32,
     pub saturation_boost: f32,
@@ -49,6 +47,8 @@ pub struct LiveSettings {
     pub nanoleaf_sync_enabled: bool,
     #[serde(default = "default_true")]
     pub auto_tv_power: bool,
+    #[serde(default)]
+    pub nanoleaf_alignment: NanoleafAlignment,
     pub max_color_step: u8,
 }
 
@@ -121,6 +121,7 @@ pub struct SharedState {
     /// Successful light-output updates measured over the preceding second.
     pub light_updates_x100: AtomicU32,
     pub hue_bridge_ip: String,
+    pub nanoleaf_ip: RwLock<String>,
     pub hue_connected: AtomicBool,
     pub nanoleaf_connected: AtomicBool,
     pub capture_hardware: AtomicBool,
@@ -138,6 +139,7 @@ impl SharedState {
     pub fn new(
         initial_settings: LiveSettings,
         hue_bridge_ip: String,
+        nanoleaf_ip: String,
         capture_res: String,
         hue_zones: Vec<LightZone>,
     ) -> Self {
@@ -153,6 +155,7 @@ impl SharedState {
             fps_x100: AtomicU32::new(6000),
             light_updates_x100: AtomicU32::new(0),
             hue_bridge_ip,
+            nanoleaf_ip: RwLock::new(nanoleaf_ip),
             hue_connected: AtomicBool::new(false),
             nanoleaf_connected: AtomicBool::new(false),
             capture_hardware: AtomicBool::new(false),
@@ -210,6 +213,7 @@ struct StatusResponse {
     hue_connected: bool,
     hue_bridge_ip: String,
     nanoleaf_connected: bool,
+    nanoleaf_ip: String,
     capture_hardware: bool,
     capture_resolution: String,
     settings: LiveSettings,
@@ -276,6 +280,7 @@ pub async fn start_web_server(
         .route("/api/stop", post(stop))
         .route("/api/toggle", post(toggle))
         .route("/api/settings", post(settings))
+        .route("/api/nanoleaf/alignment", post(update_nanoleaf_alignment))
         .route("/api/hue/areas", get(hue_areas))
         .route("/api/hue/area", post(select_hue_area))
         .route("/api/save-config", post(save_config))
@@ -317,6 +322,7 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         hue_connected: shared.hue_connected.load(Ordering::Relaxed),
         hue_bridge_ip: shared.hue_bridge_ip.clone(),
         nanoleaf_connected: shared.nanoleaf_connected.load(Ordering::Relaxed),
+        nanoleaf_ip: shared.nanoleaf_ip.read().unwrap().clone(),
         capture_hardware: shared.capture_hardware.load(Ordering::Relaxed),
         capture_resolution: shared.capture_resolution.read().unwrap().clone(),
         settings: shared.current_settings.read().unwrap().clone(),
@@ -358,6 +364,38 @@ async fn settings(
     *state.shared.current_settings.write().unwrap() = settings;
     state.shared.settings_updated.store(true, Ordering::SeqCst);
     Json(StatusMessage { status: "ok" })
+}
+
+async fn update_nanoleaf_alignment(
+    State(state): State<AppState>,
+    Json(alignment): Json<NanoleafAlignment>,
+) -> Result<Json<StatusMessage>, ApiError> {
+    if alignment.perimeter_offset >= 40 {
+        return Err(ApiError::BadRequest(
+            "Nanoleaf perimeter offset must be between 0 and 39".to_string(),
+        ));
+    }
+    let config_path = state.config_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut config = load_setup_config(&config_path)?;
+        let nanoleaf = config
+            .nanoleaf
+            .as_mut()
+            .ok_or_else(|| "Pair a Nanoleaf 4D before applying its alignment".to_string())?;
+        nanoleaf.alignment = alignment;
+        config.save(&config_path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| ApiError::SetupFailed(format!("Nanoleaf alignment task failed: {error}")))?
+    .map_err(ApiError::SetupFailed)?;
+    state
+        .shared
+        .current_settings
+        .write()
+        .unwrap()
+        .nanoleaf_alignment = alignment;
+    state.shared.settings_updated.store(true, Ordering::SeqCst);
+    Ok(Json(StatusMessage { status: "saved" }))
 }
 
 async fn save_config(State(state): State<AppState>) -> Json<StatusMessage> {
@@ -434,21 +472,10 @@ async fn select_hue_area(
             config.hue_bridge_certificate_sha256.as_deref(),
         )
         .map_err(|error| error.to_string())?;
-        let previous_zones = config.zones.clone();
         config.entertainment_area_id = area.configuration_id.clone();
         config.entertainment_configuration_id = Some(area.configuration_id);
         config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
         config.zones = area.zones;
-        for zone in &mut config.zones {
-            if let Some(device_id) = zone.hue_device_id.as_deref() {
-                if let Some(previous) = previous_zones
-                    .iter()
-                    .find(|previous| previous.hue_device_id.as_deref() == Some(device_id))
-                {
-                    zone.output_trim = previous.output_trim;
-                }
-            }
-        }
         config.save(&config_path).map_err(|error| error.to_string())
     })
     .await
@@ -523,18 +550,23 @@ async fn pair_nanoleaf(
         let mut config = load_setup_config(&config_path)?;
         config.nanoleaf = Some(NanoleafConfig {
             enabled: true,
-            ip,
+            ip: ip.clone(),
             auth_token,
             udp_port: 60222,
             segments: segments.max(30),
             panel_ids,
+            alignment: NanoleafAlignment::default(),
         });
         config.nanoleaf_sync_enabled = true;
-        config.save(&config_path).map_err(|error| error.to_string())
+        config
+            .save(&config_path)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>(ip)
     })
     .await
     .map_err(|error| ApiError::SetupFailed(format!("Nanoleaf pairing task failed: {error}")))?;
-    result.map_err(ApiError::SetupFailed)?;
+    let ip = result.map_err(ApiError::SetupFailed)?;
+    *state.shared.nanoleaf_ip.write().unwrap() = ip;
     state
         .shared
         .request_reconfigure

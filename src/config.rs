@@ -40,20 +40,11 @@ pub struct LightZone {
     pub hue_segment_index: Option<u8>,
     #[serde(default)]
     pub hue_segment_count: Option<u8>,
-    /// Bounded, per-device output calibration; shared by all of a gradient light's channels.
-    #[serde(default = "default_output_trim")]
-    pub output_trim: f32,
     /// Normalized coordinates: 0.0 to 1.0
     pub x_min: f32,
     pub x_max: f32,
     pub y_min: f32,
     pub y_max: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HueLightTrim {
-    pub device_id: String,
-    pub output_trim: f32,
 }
 
 impl LightZone {
@@ -89,7 +80,6 @@ impl LightZone {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
-            output_trim: default_output_trim(),
             x_min,
             x_max,
             y_min,
@@ -112,6 +102,29 @@ pub struct NanoleafConfig {
     /// Specific panel IDs retrieved from Nanoleaf layout
     #[serde(default)]
     pub panel_ids: Vec<u16>,
+    #[serde(default)]
+    pub alignment: NanoleafAlignment,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NanoleafAlignment {
+    #[serde(default)]
+    pub start_corner: NanoleafStartCorner,
+    #[serde(default)]
+    pub reverse_direction: bool,
+    #[serde(default)]
+    pub perimeter_offset: u8,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NanoleafStartCorner {
+    #[default]
+    BottomCenter,
+    BottomLeft,
+    TopLeft,
+    TopRight,
+    BottomRight,
 }
 
 fn default_nanoleaf_port() -> u16 {
@@ -255,7 +268,6 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
-            output_trim: default_output_trim(),
             x_min: 0.0,
             x_max: 0.25,
             y_min: 0.1,
@@ -267,7 +279,6 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
-            output_trim: default_output_trim(),
             x_min: 0.2,
             x_max: 0.8,
             y_min: 0.0,
@@ -279,7 +290,6 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
-            output_trim: default_output_trim(),
             x_min: 0.75,
             x_max: 1.0,
             y_min: 0.1,
@@ -291,7 +301,6 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
-            output_trim: default_output_trim(),
             x_min: 0.2,
             x_max: 0.8,
             y_min: 0.7,
@@ -388,6 +397,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_per_light_trim_fields_are_ignored() {
+        let config: Config = serde_json::from_str(
+            r#"{"bridge_ip":"127.0.0.1","username":"user","clientkey":"key","entertainment_area_id":"area","hue_light_trims":[{"device_id":"id","output_trim":1.3}],"zones":[{"channel_id":0,"name":"Hue","output_trim":1.3,"x_min":0.0,"x_max":1.0,"y_min":0.0,"y_max":1.0}]}"#,
+        )
+        .unwrap();
+        let saved = serde_json::to_value(config).unwrap();
+        assert!(saved.get("hue_light_trims").is_none());
+        assert!(saved["zones"][0].get("output_trim").is_none());
+    }
 
     #[test]
     fn test_3d_front_light_has_tight_directional_span() {

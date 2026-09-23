@@ -11,7 +11,7 @@ and optionally configures Hyperion.NG on your LG C1 TV via JSON-RPC.
 
 Usage:
     uv run scripts/pair_hue.py
-    uv run scripts/pair_hue.py --tv-ip 192.168.1.149
+    uv run scripts/pair_hue.py --tv-ip <tv-ip>
 """
 
 import argparse

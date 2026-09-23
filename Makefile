@@ -8,15 +8,14 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 # --- Configuration & Defaults -------------------------------------------------
-TV_IP          ?= 192.168.1.149
+TV_IP          ?=
 SSH_PORT       ?= 22
-HUE_BRIDGE_IP  ?= 192.168.1.151
 TARGET         := armv7-unknown-linux-gnueabi
 BINARY         := target/$(TARGET)/release/lg-hue-sync
 REMOTE_DIR     := /var/home/root/lg-hue-sync
 
-SSH_OPTS       := -p $(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5
-SCP_OPTS       := -P $(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5
+SSH_OPTS       := -p $(SSH_PORT) -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5
+SCP_OPTS       := -P $(SSH_PORT) -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5
 
 # Colors for terminal output
 BOLD   := \033[1m
@@ -26,7 +25,7 @@ YELLOW := \033[33m
 RED    := \033[31m
 RESET  := \033[0m
 
-.PHONY: help build build-local test test-pattern deploy deploy-bin deploy-config deploy-app \
+.PHONY: help require-tv build build-local test test-pattern deploy deploy-bin deploy-config deploy-app \
         provision-luna status logs start stop restart test-capture ssh root pair clean
 
 ## display available targets and usage
@@ -103,31 +102,36 @@ test-pattern:
 	cargo run -- test-pattern --config config.json
 
 ## full deployment: build if needed, configure TV, deploy binary & config, restart
-deploy:
+require-tv:
+	@test -n "$(TV_IP)" || { echo "TV_IP is required, for example: make status TV_IP=192.0.2.10" >&2; exit 2; }
+
+deploy: require-tv
 	@if [ ! -f "$(BINARY)" ]; then \
 	  $(MAKE) build; \
 	fi
 	@./scripts/deploy.sh $(TV_IP) $(SSH_PORT)
 
 ## quick deploy: upload binary only to TV, provision Luna, and restart daemon
-deploy-bin: provision-luna
+deploy-bin: require-tv provision-luna
 	@if [ ! -f "$(BINARY)" ]; then \
 	  printf "$(RED)[-] Binary $(BINARY) not found. Run 'make build' first.$(RESET)\n"; \
 	  exit 1; \
 	fi
 	@printf "$(CYAN)[*] Deploying binary to root@$(TV_IP)...$(RESET)\n"
-	ssh $(SSH_OPTS) root@$(TV_IP) "systemctl stop lg-hue-sync 2>/dev/null || true; mkdir -p $(REMOTE_DIR)"
-	sleep 2
+	ssh $(SSH_OPTS) root@$(TV_IP) "mkdir -p $(REMOTE_DIR)"
 	scp $(SCP_OPTS) $(BINARY) root@$(TV_IP):$(REMOTE_DIR)/lg-hue-sync.new
-	ssh $(SSH_OPTS) root@$(TV_IP) "mv -f $(REMOTE_DIR)/lg-hue-sync.new $(REMOTE_DIR)/lg-hue-sync && chmod +x $(REMOTE_DIR)/lg-hue-sync && systemctl start lg-hue-sync"
+	@LOCAL_SHA=$$(shasum -a 256 $(BINARY) | awk '{print $$1}'); \
+	REMOTE_SHA=$$(ssh $(SSH_OPTS) root@$(TV_IP) "sha256sum $(REMOTE_DIR)/lg-hue-sync.new" | awk '{print $$1}'); \
+	test "$$LOCAL_SHA" = "$$REMOTE_SHA" || { echo "Binary checksum mismatch" >&2; exit 1; }
+	ssh $(SSH_OPTS) root@$(TV_IP) "systemctl stop lg-hue-sync 2>/dev/null || true; if [ -x $(REMOTE_DIR)/lg-hue-sync ]; then cp -f $(REMOTE_DIR)/lg-hue-sync $(REMOTE_DIR)/lg-hue-sync.previous; fi; mv -f $(REMOTE_DIR)/lg-hue-sync.new $(REMOTE_DIR)/lg-hue-sync; chmod +x $(REMOTE_DIR)/lg-hue-sync; systemctl start lg-hue-sync"
 	@printf "$(GREEN)[+] Binary deployed and service started.$(RESET)\n"
 
 ## provision Luna Service 2 manifests and permissions on TV
-provision-luna:
+provision-luna: require-tv
 	@./scripts/provision_luna.sh $(TV_IP) $(SSH_PORT)
 
 ## quick deploy: upload config.json only to TV and restart daemon
-deploy-config:
+deploy-config: require-tv
 	@if [ ! -f "config.json" ]; then \
 	  printf "$(RED)[-] config.json not found.$(RESET)\n"; \
 	  exit 1; \
@@ -139,52 +143,52 @@ deploy-config:
 	@printf "$(GREEN)[+] Config deployed and service restarted.$(RESET)\n"
 
 ## package and deploy webOS application to Home Dashboard ribbon
-deploy-app:
+deploy-app: require-tv
 	@printf "$(CYAN)[*] Packaging webOS application...$(RESET)\n"
 	uv run scripts/package_ipk.py
 	@printf "$(CYAN)[*] Installing application on TV...$(RESET)\n"
-	scp $(SCP_OPTS) target/org.webosbrew.lg-hue-sync_0.3.0_all.ipk root@$(TV_IP):/tmp/org.webosbrew.lg-hue-sync.ipk
+	IPK_PATH=$$(find target -maxdepth 1 -name 'org.webosbrew.lg-hue-sync_*_all.ipk' -type f | sort | tail -1); test -n "$$IPK_PATH"; scp $(SCP_OPTS) "$$IPK_PATH" root@$(TV_IP):/tmp/org.webosbrew.lg-hue-sync.ipk
 	ssh $(SSH_OPTS) root@$(TV_IP) "luna-send -n 1 -f luna://com.webos.appInstallService/dev/install '{\"id\":\"org.webosbrew.lg-hue-sync\", \"ipkUrl\":\"/tmp/org.webosbrew.lg-hue-sync.ipk\", \"subscribe\":false}'"
 	@printf "$(GREEN)[+] Application installed on TV Home Dashboard.$(RESET)\n"
 
 ## run vtcapture screen capture probe on TV over SSH
-test-capture:
+test-capture: require-tv
 	@printf "$(CYAN)[*] Running test-capture on TV (160x90 vtcapture HDMI probe)...$(RESET)\n"
 	ssh -t $(SSH_OPTS) root@$(TV_IP) "$(REMOTE_DIR)/lg-hue-sync test-capture --config $(REMOTE_DIR)/config.json"
 
 ## check daemon systemd service status on TV
-status:
+status: require-tv
 	@ssh $(SSH_OPTS) root@$(TV_IP) "systemctl status lg-hue-sync --no-pager -l || true"
 
 ## follow live logs from TV daemon
-logs:
+logs: require-tv
 	@ssh -t $(SSH_OPTS) root@$(TV_IP) "touch $(REMOTE_DIR)/daemon.log && tail -f -n 50 $(REMOTE_DIR)/daemon.log"
 
 ## start daemon service on TV
-start:
+start: require-tv
 	@ssh $(SSH_OPTS) root@$(TV_IP) "systemctl start lg-hue-sync"
 	@printf "$(GREEN)[+] lg-hue-sync started.$(RESET)\n"
 
 ## stop daemon service on TV
-stop:
+stop: require-tv
 	@ssh $(SSH_OPTS) root@$(TV_IP) "systemctl stop lg-hue-sync"
 	@printf "$(YELLOW)[+] lg-hue-sync stopped.$(RESET)\n"
 
 ## restart daemon service on TV
-restart:
+restart: require-tv
 	@ssh $(SSH_OPTS) root@$(TV_IP) "systemctl stop lg-hue-sync 2>/dev/null || true; sleep 2; systemctl start lg-hue-sync"
 	@printf "$(GREEN)[+] lg-hue-sync restarted.$(RESET)\n"
 
 ## open interactive root SSH session to TV
-ssh:
+ssh: require-tv
 	@ssh -t $(SSH_OPTS) root@$(TV_IP)
 
 ## autoroot TV over LAN using SlopBro (webOS 6.x)
-root:
+root: require-tv
 	uv run scripts/root_tv.py --webos-version 6 $(TV_IP)
 
 ## pair Hue Bridge and discover entertainment zones
-pair:
+pair: require-tv
 	uv run scripts/pair_hue.py --tv-ip $(TV_IP)
 
 ## clean cargo target directory

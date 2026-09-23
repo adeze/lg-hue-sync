@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TV_IP="${1:-192.168.1.149}"
+TV_IP="${1:?Usage: ./scripts/install_remote_shortcut.sh <tv-ip> [ssh-port]}"
 SSH_PORT="${2:-22}"
-SSH_OPTS="-p $SSH_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_OPTS="-p $SSH_PORT -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5"
 
 echo "[*] Creating webOS quick-toggle app on TV at $TV_IP..."
 
@@ -14,7 +14,7 @@ mkdir -p "$APP_DIR"
 cat << 'EOF' > "$APP_DIR/appinfo.json"
 {
   "id": "com.adeze.lghuesync",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "vendor": "adeze",
   "type": "native",
   "main": "toggle.sh",

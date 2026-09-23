@@ -5,10 +5,10 @@ set -euo pipefail
 # Provisions Luna Service 2 security manifests, roles, and client permissions
 # for org.webosbrew.lg-hue-sync on LG webOS 6.x (LG C1 OLED).
 
-TV_IP="${1:-192.168.1.149}"
+TV_IP="${1:?Usage: ./scripts/provision_luna.sh <tv-ip|local> [ssh-port]}"
 SSH_PORT="${2:-22}"
 
-SSH_OPTS="-p $SSH_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
+SSH_OPTS="-p $SSH_PORT -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5"
 
 echo "[*] Provisioning Luna permissions for org.webosbrew.lg-hue-sync on $TV_IP:$SSH_PORT..."
 

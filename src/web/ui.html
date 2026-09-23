@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Local control dashboard for LG webOS ambient lighting with Philips Hue Entertainment and Nanoleaf 4D.">
+  <meta name="application-name" content="lg-hue-sync">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#090a0f">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f4f8">
   <title>LG C1 Ambient Lighting Sync</title>
   <style>
     :root {
@@ -283,6 +287,8 @@
     </div>
   </header>
 
+  <main>
+
   <!-- Main Power Button -->
   <div class="card" style="padding: 14px;">
     <button id="toggleBtn" class="power-btn" type="button" role="switch" aria-checked="false" aria-label="Screen synchronization" onclick="toggleSync()">
@@ -496,6 +502,8 @@
     <button class="secondary-btn" onclick="restartPipeline()">Restart Pipeline</button>
     <details class="restart-info"><summary aria-label="About Restart Pipeline">ⓘ</summary><div class="info-tip">Restarts the capture and lighting pipelines. Output pauses briefly; saved configuration remains. Confirm is required before restart.</div></details>
   </div>
+
+  </main>
 
   <script>
     document.getElementById('advancedSection').after(document.getElementById('devicesSection'));

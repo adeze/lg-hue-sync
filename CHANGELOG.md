@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-23
+
 ### Added
 - Optional TV power following: pause Hue and Nanoleaf sync in standby and resume when the TV becomes active; can be disabled for manual control.
+- Responsive dashboard with device pairing, Entertainment Area selection, independent outputs, themes, presets, calibration, and semantic WebMCP controls.
+- Nanoleaf 4D corner, direction, and perimeter-offset alignment.
+- Hue API v2 discovery that preserves grouped gradient-member identity.
+
+### Changed
+- Single-maintainer changes go directly to `main`; pull requests are opt-in.
+- Deployment requires an explicit TV address and preserves existing credentials by default.
+- Public runbooks now distinguish host checks, target builds, transfer, verification, rollback, uninstall, and release evidence.
+
+### Fixed
+- Hue recovery reactivates its v2 Entertainment configuration before reconnecting DTLS.
+- Nanoleaf alignment remaps panel IDs without moving screen sampling coordinates.
+- Device status and refresh controls are grouped with their corresponding setup controls.
 
 ## [0.3.0] - 2026-09-18
 

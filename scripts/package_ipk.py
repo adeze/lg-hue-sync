@@ -2,15 +2,19 @@
 """
 Package the webOS application directory into an installable .ipk (ar archive).
 """
+import hashlib
 import io
+import json
 import os
 import tarfile
-import subprocess
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 APP_DIR = ROOT_DIR / "webos-app"
-OUTPUT_IPK = ROOT_DIR / "target" / "org.webosbrew.lg-hue-sync_0.3.0_all.ipk"
+APP_INFO = json.loads((APP_DIR / "appinfo.json").read_text(encoding="utf-8"))
+VERSION = APP_INFO["version"]
+OUTPUT_IPK = ROOT_DIR / "target" / f"org.webosbrew.lg-hue-sync_{VERSION}_all.ipk"
+OUTPUT_MANIFEST = ROOT_DIR / "target" / "org.webosbrew.lg-hue-sync.manifest.json"
 
 def make_tarfile_bytes(files_dict):
     """Create a tar.gz in memory from a dict of {arcname: (bytes, mode)}"""
@@ -36,7 +40,7 @@ def build_ipk():
     # 2. control.tar.gz
     control_content = (
         "Package: org.webosbrew.lg-hue-sync\n"
-        "Version: 0.3.0\n"
+        f"Version: {VERSION}\n"
         "Section: misc\n"
         "Priority: optional\n"
         "Architecture: all\n"
@@ -91,8 +95,24 @@ def build_ipk():
         f.write(ar_entry("debian-binary", debian_binary))
         f.write(ar_entry("control.tar.gz", control_tar))
         f.write(ar_entry("data.tar.gz", data_tar))
-        
+
+    manifest = {
+        "id": APP_INFO["id"],
+        "version": VERSION,
+        "type": APP_INFO["type"],
+        "title": APP_INFO["title"],
+        "appDescription": APP_INFO["appDescription"],
+        "iconUri": "https://raw.githubusercontent.com/adeze/lg-hue-sync/main/webos-app/icon130.png",
+        "sourceUrl": "https://github.com/adeze/lg-hue-sync",
+        "rootRequired": True,
+        "ipkUrl": OUTPUT_IPK.name,
+        "ipkHash": {"sha256": hashlib.sha256(OUTPUT_IPK.read_bytes()).hexdigest()},
+        "ipkSize": OUTPUT_IPK.stat().st_size,
+    }
+    OUTPUT_MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
     print(f"Successfully created {OUTPUT_IPK} ({os.path.getsize(OUTPUT_IPK)} bytes)")
+    print(f"Successfully created {OUTPUT_MANIFEST}")
 
 if __name__ == "__main__":
     build_ipk()

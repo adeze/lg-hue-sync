@@ -13,6 +13,10 @@ SSH_PORT       ?= 22
 TARGET         := armv7-unknown-linux-gnueabi
 BINARY         := target/$(TARGET)/release/lg-hue-sync
 REMOTE_DIR     := /var/home/root/lg-hue-sync
+RUST_VERSION   ?= 1.98.1
+CROSS_IMAGE    ?= lg-hue-sync-cross:rust-$(RUST_VERSION)
+CARGO_CACHE    ?= lg-hue-sync-cargo
+TARGET_CACHE   ?= lg-hue-sync-target
 
 SSH_OPTS       := -p $(SSH_PORT) -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5
 SCP_OPTS       := -P $(SSH_PORT) -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5
@@ -25,18 +29,23 @@ YELLOW := \033[33m
 RED    := \033[31m
 RESET  := \033[0m
 
-.PHONY: help require-tv build build-local test test-pattern deploy deploy-bin deploy-config deploy-app \
-        provision-luna status logs start stop restart test-capture ssh root pair clean
+.PHONY: help require-tv cross-image build build-local test test-pattern deps-check deps-update \
+        deploy deploy-bin deploy-config deploy-app provision-luna status logs start stop restart \
+        test-capture ssh root pair clean cross-clean
 
 ## display available targets and usage
 help:
 	@printf "$(BOLD)LG Hue Sync — Automation Commands$(RESET)\n\n"
 	@printf "$(CYAN)Build Targets:$(RESET)\n"
+	@printf "  $(GREEN)make cross-image$(RESET)   Build the cached Debian Buster/Rust cross-toolchain image\n"
 	@printf "  $(GREEN)make build$(RESET)         Cross-compile release binary for LG webOS (ARMv7, Debian Buster container)\n"
 	@printf "  $(GREEN)make build-local$(RESET)   Build binary for host OS (macOS) via local cargo\n"
-	@printf "  $(GREEN)make clean$(RESET)         Clean build artifacts\n\n"
+	@printf "  $(GREEN)make clean$(RESET)         Clean host build artifacts\n"
+	@printf "  $(GREEN)make cross-clean$(RESET)   Remove cross-build image and Docker caches\n\n"
 	@printf "$(CYAN)Testing & Validation:$(RESET)\n"
 	@printf "  $(GREEN)make test$(RESET)          Run local Rust unit and integration tests\n"
+	@printf "  $(GREEN)make deps-check$(RESET)    Report available compatible dependency updates\n"
+	@printf "  $(GREEN)make deps-update$(RESET)   Update Cargo.lock within Cargo.toml constraints\n"
 	@printf "  $(GREEN)make test-pattern$(RESET)  Run local rainbow test pattern across Hue and Nanoleaf (Mac -> Lights)\n"
 	@printf "  $(GREEN)make test-capture$(RESET)  Run vtcapture HDMI screen capture probe directly on TV over SSH\n\n"
 	@printf "$(CYAN)Deployment (TV IP: $(TV_IP)):$(RESET)\n"
@@ -55,34 +64,18 @@ help:
 	@printf "  $(GREEN)make root$(RESET)          Execute SlopBro network autoroot on TV (if SSH is closed)\n"
 	@printf "  $(GREEN)make pair$(RESET)          Pair Hue Bridge and discover entertainment zones\n\n"
 
-## cross-compile ARMv7 binary matching webOS 6.x glibc 2.28 in Docker container
-build:
+## build the reusable ARMv7/glibc 2.28 cross-toolchain image
+cross-image:
+	docker build --build-arg RUST_VERSION=$(RUST_VERSION) -t $(CROSS_IMAGE) -f docker/Dockerfile.cross docker
+
+## cross-compile ARMv7 binary matching webOS 6.x glibc 2.28
+build: cross-image
 	@printf "$(CYAN)[*] Cross-compiling for $(TARGET) in Debian Buster container...$(RESET)\n"
-	mkdir -p /tmp/docker_root/.cargo /tmp/docker_root/.rustup
 	docker run --rm \
 	  -v "$$PWD":/app -w /app \
-	  -v /tmp/docker_root/.cargo:/root/.cargo \
-	  -v /tmp/docker_root/.rustup:/root/.rustup \
-	  debian:buster bash -c '\
-	    set -e; \
-	    echo "deb [trusted=yes] http://archive.debian.org/debian buster main" > /etc/apt/sources.list; \
-	    echo "deb [trusted=yes] http://archive.debian.org/debian-security buster/updates main" >> /etc/apt/sources.list; \
-	    apt-get -o Acquire::Check-Valid-Until=false update -qq; \
-	    apt-get install --allow-unauthenticated -y -qq build-essential gcc-arm-linux-gnueabi libc6-dev-armel-cross binutils-arm-linux-gnueabi make perl curl ca-certificates > /dev/null; \
-	    if ! command -v rustup &> /dev/null; then \
-	      curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal > /dev/null; \
-	    fi; \
-	    source /root/.cargo/env; \
-	    rustup target add $(TARGET); \
-	    export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER=arm-linux-gnueabi-gcc; \
-	    export CC_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-gcc; \
-	    export AR_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-ar; \
-	    export RANLIB_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-ranlib; \
-	    export CARGO_TARGET_DIR=/tmp/target; \
-	    cargo build --target $(TARGET) --release; \
-	    mkdir -p /app/target/$(TARGET)/release; \
-	    cp /tmp/target/$(TARGET)/release/lg-hue-sync /app/target/$(TARGET)/release/lg-hue-sync; \
-	  '
+	  -v $(CARGO_CACHE):/cargo-cache \
+	  -v $(TARGET_CACHE):/target-cache \
+	  $(CROSS_IMAGE)
 	@printf "$(GREEN)[+] Build complete: $(BINARY) ($$(du -h $(BINARY) | cut -f1))$(RESET)\n"
 
 ## build binary locally on host machine
@@ -95,6 +88,13 @@ build-local:
 test:
 	@printf "$(CYAN)[*] Running test suite...$(RESET)\n"
 	cargo test
+
+deps-check:
+	cargo update --dry-run
+	cargo tree --duplicates
+
+deps-update:
+	cargo update
 
 ## run live test pattern locally from Mac against Hue and Nanoleaf
 test-pattern:
@@ -194,3 +194,7 @@ pair: require-tv
 ## clean cargo target directory
 clean:
 	cargo clean
+
+cross-clean:
+	-docker image rm $(CROSS_IMAGE)
+	-docker volume rm $(CARGO_CACHE) $(TARGET_CACHE)

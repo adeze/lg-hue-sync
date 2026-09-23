@@ -5,7 +5,8 @@ Rust daemon and LAN dashboard for screen-derived Philips Hue Entertainment and N
 ## Commands
 
 - Host gate: `cargo fmt --all -- --check && cargo test && cargo clippy --bin lg-hue-sync -- -D warnings`
-- Target build: `make build` (`armv7-unknown-linux-gnueabi`, Debian Buster/glibc 2.28 baseline)
+- Target build: `make build` (`armv7-unknown-linux-gnueabi`, cached `docker/Dockerfile.cross`, Debian Buster/glibc 2.28 baseline)
+- Dependencies: `make deps-check`; update compatible versions with `make deps-update`, then run host and target gates
 - Reference SDK: `webosbrew/native-toolchain`; see `docs/operations.md` before changing the canonical build
 - Ares tools: `ares-rs-*` (official Rust v0.7.0 aliases) or existing Node `ares-*`
 - Safe update: `make deploy-bin TV_IP=<tv-ip>`; preserve the paired TV `config.json`

@@ -22,3 +22,11 @@ jobs:
       - run: cargo clippy --bin lg-hue-sync -- -D warnings
       - name: Validate embedded dashboard JavaScript
         run: perl -0777 -ne 'print $1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -
+
+  webos-target:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make build
+      - name: Verify ARMv7 Linux artifact
+        run: file target/armv7-unknown-linux-gnueabi/release/lg-hue-sync | grep -q 'ELF 32-bit.*ARM'

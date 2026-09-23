@@ -23,6 +23,19 @@ llvm-readelf --version-info target/armv7-unknown-linux-gnueabi/release/lg-hue-sy
 
 Required result: 32-bit ARM Linux ELF with no required symbol newer than `GLIBC_2.28`. On Linux, GNU `readelf` is equivalent.
 
+`make build` uses `docker/Dockerfile.cross`, which bakes the archived Debian Buster packages, pinned Rust toolchain, ARMv7 target, and linker into `lg-hue-sync-cross`. Cargo registry and target artifacts live in named Docker volumes, so subsequent builds are incremental. `make cross-clean` removes the image and both caches when disk space matters.
+
+Codex and developers use this same target rather than maintaining separate toolchains. GitHub Actions also runs it on every push to `main`; the ordinary CI job separately checks formatting, host tests, Clippy, and embedded dashboard JavaScript.
+
+## Dependencies
+
+```bash
+make deps-check   # dry-run compatible Cargo.lock updates and show duplicate versions
+make deps-update  # update Cargo.lock within Cargo.toml version constraints
+```
+
+Dependency updates are deliberate direct-to-`main` changes: inspect `Cargo.lock`, run the local gate and `make build`, then commit. Automated dependency pull requests are intentionally not enabled for this single-maintainer workflow.
+
 ### webOS Brew native toolchain
 
 [`webosbrew/native-toolchain`](https://github.com/webosbrew/native-toolchain) is the community reference SDK. On macOS, download the matching Darwin archive, extract it to a path without spaces, and run its `relocate-sdk.sh`. Its CMake toolchain file is under `share/buildroot/toolchainfile.cmake`.

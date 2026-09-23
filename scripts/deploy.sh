@@ -36,31 +36,7 @@ if [ -f "$BINARY" ] && $REUSE; then
     echo "    (Pass --reuse as 3rd argument only after verifying it matches this source tree)"
 else
     echo "[*] Compiling release binary for $TARGET matching webOS 6.x glibc 2.28 in container..."
-    docker run --rm \
-      -v "$PWD":/app -w /app \
-      -v cargo-cache:/root/.cargo \
-      -v rustup-cache:/root/.rustup \
-      debian:buster bash -c '
-        set -e
-        echo "deb [trusted=yes] http://archive.debian.org/debian buster main" > /etc/apt/sources.list
-        echo "deb [trusted=yes] http://archive.debian.org/debian-security buster/updates main" >> /etc/apt/sources.list
-        apt-get -o Acquire::Check-Valid-Until=false update -qq
-        apt-get install --allow-unauthenticated -y -qq build-essential gcc-arm-linux-gnueabi libc6-dev-armel-cross binutils-arm-linux-gnueabi make perl curl ca-certificates > /dev/null
-        if ! command -v rustup &> /dev/null; then
-            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal > /dev/null
-        fi
-        source $HOME/.cargo/env
-        rustup default stable
-        rustup target add armv7-unknown-linux-gnueabi
-        export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER=arm-linux-gnueabi-gcc
-        export CC_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-gcc
-        export AR_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-ar
-        export RANLIB_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-ranlib
-        export CARGO_TARGET_DIR=/tmp/target
-        cargo build --target armv7-unknown-linux-gnueabi --release
-        mkdir -p /app/target/armv7-unknown-linux-gnueabi/release
-        cp /tmp/target/armv7-unknown-linux-gnueabi/release/lg-hue-sync /app/target/armv7-unknown-linux-gnueabi/release/lg-hue-sync
-    '
+    make build
 fi
 
 if [ ! -f "$BINARY" ]; then

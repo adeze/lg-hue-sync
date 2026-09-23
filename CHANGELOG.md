@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Replaced per-build Debian/Rust provisioning with one cached, pinned cross-toolchain image shared by local, Codex, deployment, and CI builds.
+- Added explicit compatible dependency check/update targets and ARMv7 target-build CI coverage.
+
 ## [0.4.1] - 2026-09-23
 
 ### Changed

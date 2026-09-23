@@ -1,0 +1,30 @@
+FROM debian:buster
+
+ARG RUST_VERSION=1.98.1
+ENV RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/cargo-cache \
+    PATH=/opt/rust/cargo/bin:${PATH} \
+    CARGO_TARGET_DIR=/target-cache \
+    CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER=arm-linux-gnueabi-gcc \
+    CC_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-gcc \
+    AR_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-ar \
+    RANLIB_armv7_unknown_linux_gnueabi=arm-linux-gnueabi-ranlib
+
+RUN printf '%s\n' \
+      'deb [trusted=yes] http://archive.debian.org/debian buster main' \
+      'deb [trusted=yes] http://archive.debian.org/debian-security buster/updates main' \
+      > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update -qq \
+    && apt-get install --allow-unauthenticated -y -qq \
+      build-essential gcc-arm-linux-gnueabi libc6-dev-armel-cross \
+      binutils-arm-linux-gnueabi make perl curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/rust/cargo /opt/rust/rustup /cargo-cache /target-cache \
+    && CARGO_HOME=/opt/rust/cargo curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | CARGO_HOME=/opt/rust/cargo sh -s -- -y --no-modify-path \
+        --default-toolchain "${RUST_VERSION}" --profile minimal \
+        --target armv7-unknown-linux-gnueabi
+
+WORKDIR /app
+
+CMD ["bash", "-c", "cargo build --locked --target armv7-unknown-linux-gnueabi --release && mkdir -p /app/target/armv7-unknown-linux-gnueabi/release && cp /target-cache/armv7-unknown-linux-gnueabi/release/lg-hue-sync /app/target/armv7-unknown-linux-gnueabi/release/lg-hue-sync"]

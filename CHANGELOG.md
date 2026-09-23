@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Replaced independent dashboard request flags with an ordered Tokio command channel and explicit pipeline state.
+- Unified Hue and Nanoleaf colour transforms in one processor while preserving device-specific geometry and protocols.
+- Added bounded exponential backoff for Hue and Nanoleaf reconnection attempts.
+
 ## [0.4.0] - 2026-09-23
 
 ### Added

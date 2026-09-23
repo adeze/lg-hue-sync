@@ -8,6 +8,15 @@
 4. `src/nanoleaf/` maps perimeter samples to discovered panel IDs and sends UDP frames.
 5. `src/web/` serves the LAN dashboard and configuration API on port 8088.
 
+Dashboard actions enter the daemon through a bounded typed command channel. `src/runtime.rs`
+coalesces desired start/stop state while preserving restart, reconfiguration, save, and Bridge
+refresh actions. Runtime output state remains distinct from the persisted configuration.
+
+Hue and Nanoleaf sampling share `ColorProcessor` for peak weighting, noise gating, saturation,
+gamma, HDR tone mapping, temporal response, strict black, and scene-change limits. Device modules
+retain only geometry and wire-protocol responsibilities. Failed output reconnections use the same
+bounded exponential-backoff policy so a disconnected device cannot trigger frame-rate retries.
+
 ## Ownership boundaries
 
 - Hue app: Entertainment Area membership and physical 3D placement.

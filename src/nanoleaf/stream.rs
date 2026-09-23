@@ -4,7 +4,7 @@ use std::net::{SocketAddr, UdpSocket};
 use tracing::error;
 
 use crate::{
-    color::{ActiveRect, RgbColor},
+    color::{ActiveRect, ColorProcessor, RgbColor},
     config::{NanoleafAlignment, NanoleafStartCorner},
 };
 
@@ -114,26 +114,8 @@ pub struct NanoleafPerimeterSampler {
     zones: Vec<PerimeterZone>,
     smoothed_colors: Vec<RgbColor>,
     active_rect: Option<ActiveRect>,
-    rise_smoothing_factor: f32,
-    fall_smoothing_factor: f32,
-    hdr_tone_mapping: bool,
-    saturation_boost: f32,
-    noise_gate_threshold: f32,
+    processor: ColorProcessor,
     brightness_multiplier: f32,
-    peak_weight: f32,
-    gamma: f32,
-    max_color_step: u8,
-    strict_blackout: bool,
-}
-
-fn limit_color_step(current: RgbColor, target: RgbColor, max_step: u8) -> RgbColor {
-    let limit = max_step as i16;
-    let cap = |from: u8, to: u8| (to as i16 - from as i16).clamp(-limit, limit) + from as i16;
-    RgbColor::new(
-        cap(current.r, target.r) as u8,
-        cap(current.g, target.g) as u8,
-        cap(current.b, target.b) as u8,
-    )
 }
 
 impl NanoleafPerimeterSampler {
@@ -182,16 +164,13 @@ impl NanoleafPerimeterSampler {
             zones: Vec::new(),
             smoothed_colors: Vec::new(),
             active_rect: None,
-            rise_smoothing_factor: 0.35,
-            fall_smoothing_factor: 0.35,
-            hdr_tone_mapping,
-            saturation_boost,
-            noise_gate_threshold,
+            processor: ColorProcessor::new(
+                0.35,
+                hdr_tone_mapping,
+                saturation_boost,
+                noise_gate_threshold,
+            ),
             brightness_multiplier,
-            peak_weight: 0.35,
-            gamma: 1.0,
-            max_color_step: 12,
-            strict_blackout: false,
         };
         sampler.set_alignment(alignment);
         sampler
@@ -473,18 +452,15 @@ impl NanoleafPerimeterSampler {
     }
 
     pub fn set_smoothing_factor(&mut self, factor: f32) {
-        let factor = factor.clamp(0.05, 1.0);
-        self.rise_smoothing_factor = factor;
-        self.fall_smoothing_factor = factor;
+        self.processor.set_smoothing(factor);
     }
 
     pub fn set_temporal_response(&mut self, rise: f32, fall: f32) {
-        self.rise_smoothing_factor = rise.clamp(0.05, 1.0);
-        self.fall_smoothing_factor = fall.clamp(0.05, 1.0);
+        self.processor.set_temporal_response(rise, fall);
     }
 
     pub fn set_strict_blackout(&mut self, enabled: bool) {
-        self.strict_blackout = enabled;
+        self.processor.set_strict_blackout(enabled);
     }
 
     pub fn set_brightness_multiplier(&mut self, mult: f32) {
@@ -492,27 +468,27 @@ impl NanoleafPerimeterSampler {
     }
 
     pub fn set_saturation_boost(&mut self, boost: f32) {
-        self.saturation_boost = boost.clamp(1.0, 3.0);
+        self.processor.set_saturation_boost(boost);
     }
 
     pub fn set_hdr_tone_mapping(&mut self, enabled: bool) {
-        self.hdr_tone_mapping = enabled;
+        self.processor.set_hdr_tone_mapping(enabled);
     }
 
     pub fn set_peak_weight(&mut self, weight: f32) {
-        self.peak_weight = weight.clamp(0.0, 1.0);
+        self.processor.set_peak_weight(weight);
     }
 
     pub fn set_gamma(&mut self, gamma: f32) {
-        self.gamma = gamma.clamp(0.5, 3.0);
+        self.processor.set_gamma(gamma);
     }
 
     pub fn set_max_color_step(&mut self, step: u8) {
-        self.max_color_step = step.max(1);
+        self.processor.set_max_color_step(step);
     }
 
     pub fn set_noise_gate_threshold(&mut self, threshold: f32) {
-        self.noise_gate_threshold = threshold.clamp(0.0, 0.1);
+        self.processor.set_noise_gate_threshold(threshold);
     }
 
     /// Sets the active illuminated screen area to compensate for widescreen black letterbox bars.
@@ -584,7 +560,7 @@ impl NanoleafPerimeterSampler {
                     }
 
                     let sat = pix.saturation();
-                    let weight = 1.0 + self.saturation_boost * (sat * sat);
+                    let weight = self.processor.sample_weight(sat);
 
                     weighted_r += (r_raw as f32) * weight;
                     weighted_g += (g_raw as f32) * weight;
@@ -603,62 +579,13 @@ impl NanoleafPerimeterSampler {
                 RgbColor::new(0, 0, 0)
             };
 
-            // Blend mean with peak highlight luminance
-            let mut processed_color = if self.peak_weight > 0.0 && max_luma > 0.0 {
-                mean_color.lerp(peak_pixel, self.peak_weight)
-            } else {
-                mean_color
-            };
-
-            // OLED near-black noise gate
-            if self.noise_gate_threshold > 0.0 {
-                processed_color = processed_color.apply_noise_gate(self.noise_gate_threshold);
-            }
-
-            // True HSV saturation amplification
-            if self.saturation_boost > 1.0 {
-                processed_color = processed_color.boost_saturation(self.saturation_boost);
-            }
-
-            // Dynamic gamma contrast curve
-            if (self.gamma - 1.0).abs() >= 0.01 {
-                processed_color = processed_color.apply_gamma(self.gamma);
-            }
-
-            // Reinhard HDR tone mapping
-            if self.hdr_tone_mapping {
-                processed_color = processed_color.tone_map_hdr();
-            }
-
-            // EMA temporal smoothing
             let current = self.smoothed_colors[i];
-            let smoothed = if self.strict_blackout && processed_color == RgbColor::new(0, 0, 0) {
-                processed_color
-            } else {
-                let alpha = if is_scene_cut {
-                    1.0
-                } else if processed_color.luminance() < current.luminance() {
-                    self.fall_smoothing_factor
-                } else {
-                    self.rise_smoothing_factor
-                };
-                limit_color_step(
-                    current,
-                    current.lerp(processed_color, alpha),
-                    self.max_color_step,
-                )
-            };
+            let smoothed =
+                self.processor
+                    .process(mean_color, peak_pixel, max_luma, current, is_scene_cut);
             self.smoothed_colors[i] = smoothed;
 
-            // Apply brightness multiplier
-            let final_r =
-                ((smoothed.r as f32 * self.brightness_multiplier).clamp(0.0, 255.0)) as u8;
-            let final_g =
-                ((smoothed.g as f32 * self.brightness_multiplier).clamp(0.0, 255.0)) as u8;
-            let final_b =
-                ((smoothed.b as f32 * self.brightness_multiplier).clamp(0.0, 255.0)) as u8;
-
-            result.push(RgbColor::new(final_r, final_g, final_b));
+            result.push(smoothed.scale(self.brightness_multiplier));
         }
 
         result

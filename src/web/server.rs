@@ -16,10 +16,22 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info};
 
 pub const EMBEDDED_UI_HTML: &str = include_str!("ui.html");
+
+#[derive(Debug, Clone)]
+pub enum ControlCommand {
+    Start,
+    Stop,
+    Restart,
+    Reconfigure,
+    SyncBridge,
+    SaveConfig,
+    ApplySettings(LiveSettings),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveSettings {
@@ -109,13 +121,7 @@ impl CalibrationPattern {
 
 pub struct SharedState {
     pub is_syncing: AtomicBool,
-    pub request_start: AtomicBool,
-    pub request_stop: AtomicBool,
-    pub request_restart: AtomicBool,
-    pub request_reconfigure: AtomicBool,
-    pub request_sync_bridge: AtomicBool,
-    pub request_save_config: AtomicBool,
-    pub settings_updated: AtomicBool,
+    command_tx: mpsc::Sender<ControlCommand>,
     /// Capture polling ceiling, not the media frame rate.
     pub fps_x100: AtomicU32,
     /// Successful light-output updates measured over the preceding second.
@@ -142,16 +148,11 @@ impl SharedState {
         nanoleaf_ip: String,
         capture_res: String,
         hue_zones: Vec<LightZone>,
+        command_tx: mpsc::Sender<ControlCommand>,
     ) -> Self {
         Self {
             is_syncing: AtomicBool::new(true),
-            request_start: AtomicBool::new(false),
-            request_stop: AtomicBool::new(false),
-            request_restart: AtomicBool::new(false),
-            request_reconfigure: AtomicBool::new(false),
-            request_sync_bridge: AtomicBool::new(false),
-            request_save_config: AtomicBool::new(false),
-            settings_updated: AtomicBool::new(false),
+            command_tx,
             fps_x100: AtomicU32::new(6000),
             light_updates_x100: AtomicU32::new(0),
             hue_bridge_ip,
@@ -195,6 +196,13 @@ impl SharedState {
             },
             Ordering::Relaxed,
         );
+    }
+
+    async fn send_command(&self, command: ControlCommand) -> Result<(), ApiError> {
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| ApiError::SetupFailed("sync controller is unavailable".to_string()))
     }
 }
 
@@ -337,19 +345,19 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     })
 }
 
-async fn start(State(state): State<AppState>) -> Json<StatusMessage> {
-    state.shared.request_start.store(true, Ordering::SeqCst);
+async fn start(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
+    state.shared.send_command(ControlCommand::Start).await?;
     state.shared.is_syncing.store(true, Ordering::SeqCst);
-    Json(StatusMessage { status: "starting" })
+    Ok(Json(StatusMessage { status: "starting" }))
 }
 
-async fn stop(State(state): State<AppState>) -> Json<StatusMessage> {
-    state.shared.request_stop.store(true, Ordering::SeqCst);
+async fn stop(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
+    state.shared.send_command(ControlCommand::Stop).await?;
     state.shared.is_syncing.store(false, Ordering::SeqCst);
-    Json(StatusMessage { status: "stopping" })
+    Ok(Json(StatusMessage { status: "stopping" }))
 }
 
-async fn toggle(State(state): State<AppState>) -> Json<StatusMessage> {
+async fn toggle(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
     if state.shared.is_syncing.load(Ordering::SeqCst) {
         stop(State(state)).await
     } else {
@@ -360,10 +368,13 @@ async fn toggle(State(state): State<AppState>) -> Json<StatusMessage> {
 async fn settings(
     State(state): State<AppState>,
     Json(settings): Json<LiveSettings>,
-) -> Json<StatusMessage> {
-    *state.shared.current_settings.write().unwrap() = settings;
-    state.shared.settings_updated.store(true, Ordering::SeqCst);
-    Json(StatusMessage { status: "ok" })
+) -> Result<Json<StatusMessage>, ApiError> {
+    *state.shared.current_settings.write().unwrap() = settings.clone();
+    state
+        .shared
+        .send_command(ControlCommand::ApplySettings(settings))
+        .await?;
+    Ok(Json(StatusMessage { status: "ok" }))
 }
 
 async fn update_nanoleaf_alignment(
@@ -388,40 +399,44 @@ async fn update_nanoleaf_alignment(
     .await
     .map_err(|error| ApiError::SetupFailed(format!("Nanoleaf alignment task failed: {error}")))?
     .map_err(ApiError::SetupFailed)?;
+    let settings = {
+        let mut settings = state.shared.current_settings.write().unwrap();
+        settings.nanoleaf_alignment = alignment;
+        settings.clone()
+    };
     state
         .shared
-        .current_settings
-        .write()
-        .unwrap()
-        .nanoleaf_alignment = alignment;
-    state.shared.settings_updated.store(true, Ordering::SeqCst);
+        .send_command(ControlCommand::ApplySettings(settings))
+        .await?;
     Ok(Json(StatusMessage { status: "saved" }))
 }
 
-async fn save_config(State(state): State<AppState>) -> Json<StatusMessage> {
+async fn save_config(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
     state
         .shared
-        .request_save_config
-        .store(true, Ordering::SeqCst);
-    Json(StatusMessage { status: "saved" })
+        .send_command(ControlCommand::SaveConfig)
+        .await?;
+    Ok(Json(StatusMessage { status: "saved" }))
 }
 
-async fn restart(State(state): State<AppState>) -> Json<StatusMessage> {
-    state.shared.request_restart.store(true, Ordering::SeqCst);
-    Json(StatusMessage {
+async fn restart(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
+    state.shared.send_command(ControlCommand::Restart).await?;
+    Ok(Json(StatusMessage {
         status: "restarting",
-    })
+    }))
 }
 
-async fn sync_bridge(State(state): State<AppState>) -> (StatusCode, Json<StatusMessage>) {
+async fn sync_bridge(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<StatusMessage>), ApiError> {
     state
         .shared
-        .request_sync_bridge
-        .store(true, Ordering::SeqCst);
-    (
+        .send_command(ControlCommand::SyncBridge)
+        .await?;
+    Ok((
         StatusCode::ACCEPTED,
         Json(StatusMessage { status: "queued" }),
-    )
+    ))
 }
 
 async fn hue_areas(State(state): State<AppState>) -> Result<Json<HueAreasResponse>, ApiError> {
@@ -483,8 +498,8 @@ async fn select_hue_area(
     result.map_err(ApiError::SetupFailed)?;
     state
         .shared
-        .request_reconfigure
-        .store(true, Ordering::SeqCst);
+        .send_command(ControlCommand::Reconfigure)
+        .await?;
     Ok(Json(StatusMessage { status: "selected" }))
 }
 
@@ -530,8 +545,8 @@ async fn pair_hue(
     result.map_err(ApiError::SetupFailed)?;
     state
         .shared
-        .request_reconfigure
-        .store(true, Ordering::SeqCst);
+        .send_command(ControlCommand::Reconfigure)
+        .await?;
     Ok(Json(StatusMessage { status: "paired" }))
 }
 
@@ -569,8 +584,8 @@ async fn pair_nanoleaf(
     *state.shared.nanoleaf_ip.write().unwrap() = ip;
     state
         .shared
-        .request_reconfigure
-        .store(true, Ordering::SeqCst);
+        .send_command(ControlCommand::Reconfigure)
+        .await?;
     Ok(Json(StatusMessage { status: "paired" }))
 }
 

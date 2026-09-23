@@ -3,6 +3,7 @@ mod color;
 mod config;
 mod hue;
 mod nanoleaf;
+mod runtime;
 mod tv_power;
 mod web;
 
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -21,6 +23,7 @@ use color::{RgbColor, ZoneSampler};
 use config::{Config, ConfigError, NanoleafAlignment};
 use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
+use runtime::{PendingCommands, PipelineState, RetryState};
 use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
 
 #[derive(Parser)]
@@ -492,6 +495,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         max_color_step: config.max_color_step,
     };
 
+    let (command_tx, mut command_rx) = mpsc::channel(32);
     let shared_state = Arc::new(SharedState::new(
         initial_settings,
         config.bridge_ip.clone(),
@@ -502,6 +506,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             .unwrap_or_default(),
         format!("{}x{}", config.capture_width, config.capture_height),
         config.zones.clone(),
+        command_tx,
     ));
     shared_state
         .is_syncing
@@ -551,11 +556,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut last_hw_probe = tokio::time::Instant::now();
     let mut last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
     let mut last_tv_power_warning = tokio::time::Instant::now() - Duration::from_secs(30);
-    let mut last_nanoleaf_refresh = tokio::time::Instant::now() - Duration::from_secs(5);
+    let mut hue_retry = RetryState::new();
+    let mut nanoleaf_retry = RetryState::new();
     let mut nanoleaf_only_frame_count = 0u64;
     let mut nanoleaf_only_global = RgbColor::new(0, 0, 0);
+    let mut pending_commands = PendingCommands {
+        desired_running: (!pipeline_should_run).then_some(false),
+        ..PendingCommands::default()
+    };
+    let mut pipeline_state = if pipeline_should_run {
+        PipelineState::Running
+    } else {
+        PipelineState::Paused
+    };
 
     while running.load(Ordering::SeqCst) {
+        pending_commands.receive(&mut command_rx);
         let loop_start = tokio::time::Instant::now();
         let mut emitted_light_update = false;
 
@@ -573,17 +589,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     let active = state.unwrap();
                     let changed = observed_tv_power
                         .map(|previous| previous != active)
-                        .unwrap_or(!active && shared_state.is_syncing.load(Ordering::Relaxed));
+                        .unwrap_or(!active && pipeline_state == PipelineState::Running);
                     if changed {
                         info!(
                             "TV power changed: {}",
                             if active { "active" } else { "standby" }
                         );
-                        if active {
-                            shared_state.request_start.store(true, Ordering::SeqCst);
-                        } else {
-                            shared_state.request_stop.store(true, Ordering::SeqCst);
-                        }
+                        pending_commands.desired_running = Some(active);
                     }
                     observed_tv_power = Some(active);
                 }
@@ -599,7 +611,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         // 1. Check for web UI or external stop requests
-        let web_stop_requested = shared_state.request_stop.swap(false, Ordering::SeqCst);
+        let web_stop_requested = pending_commands.desired_running.take() == Some(false);
         let mut external_stop = false;
 
         // Periodically verify if the user stopped sync from the official Hue mobile app (every 5s)
@@ -633,6 +645,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 web_stop_requested, external_stop
             );
             shared_state.is_syncing.store(false, Ordering::SeqCst);
+            pipeline_state = PipelineState::Paused;
 
             // Deactivate Hue stream on bridge if web requested stop
             if (web_stop_requested || (auto_tv_power && observed_tv_power == Some(false)))
@@ -651,6 +664,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
             while running.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(250)).await;
+                pending_commands.receive(&mut command_rx);
                 let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
 
                 let configured_auto_tv_power =
@@ -662,7 +676,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
                 }
 
-                let mut start_requested = shared_state.request_start.swap(false, Ordering::SeqCst);
+                let mut start_requested = pending_commands.desired_running.take() == Some(true);
                 if auto_tv_power && last_tv_power_poll.elapsed() >= Duration::from_secs(2) {
                     last_tv_power_poll = tokio::time::Instant::now();
                     match tv_power::is_active().await {
@@ -729,6 +743,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     }
 
                     shared_state.is_syncing.store(true, Ordering::SeqCst);
+                    pipeline_state = PipelineState::Running;
 
                     if nanoleaf_active {
                         if let Some(ref n_cfg) = config.nanoleaf {
@@ -775,8 +790,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         // 2. Check for live settings update from Web UI
-        if shared_state.settings_updated.swap(false, Ordering::SeqCst) {
-            let live_st = shared_state.current_settings.read().unwrap().clone();
+        if let Some(live_st) = pending_commands.apply_settings.take() {
             if auto_tv_power != live_st.auto_tv_power {
                 auto_tv_power = live_st.auto_tv_power;
                 observed_tv_power = None;
@@ -787,7 +801,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             *shared_state.hue_zones.write().unwrap() = config.zones.clone();
             if hue_sync_enabled != live_st.hue_sync_enabled {
                 hue_sync_enabled = live_st.hue_sync_enabled;
-                if hue_sync_enabled && shared_state.is_syncing.load(Ordering::SeqCst) {
+                if hue_sync_enabled && pipeline_state == PipelineState::Running {
                     match reconnect_hue(&config) {
                         Ok(client) => {
                             hue_dtls = Some(client);
@@ -807,7 +821,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             if nanoleaf_sync_enabled != live_st.nanoleaf_sync_enabled {
                 nanoleaf_sync_enabled = live_st.nanoleaf_sync_enabled;
-                if nanoleaf_sync_enabled && shared_state.is_syncing.load(Ordering::SeqCst) {
+                if nanoleaf_sync_enabled && pipeline_state == PipelineState::Running {
                     if let (Some(n_cfg), Some(sampler)) =
                         (config.nanoleaf.as_ref(), nanoleaf_sampler.as_ref())
                     {
@@ -879,10 +893,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         // 3. Check for save config request from Web UI
-        if shared_state
-            .request_save_config
-            .swap(false, Ordering::SeqCst)
-        {
+        if std::mem::take(&mut pending_commands.save_config) {
             let live_st = shared_state.current_settings.read().unwrap().clone();
             let mut save_cfg = config.clone();
             save_cfg.brightness_multiplier = live_st.brightness_multiplier;
@@ -913,11 +924,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
         }
 
-        if shared_state
-            .request_sync_bridge
-            .swap(false, Ordering::SeqCst)
-            && hue_active
-        {
+        if std::mem::take(&mut pending_commands.sync_bridge) && hue_active {
             match sync_entertainment_areas(
                 &config.bridge_ip,
                 &config.username,
@@ -990,15 +997,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         // 4. Check for pipeline restart request from Web UI
-        if shared_state
-            .request_reconfigure
-            .swap(false, Ordering::SeqCst)
-        {
+        if std::mem::take(&mut pending_commands.reconfigure) {
             info!("Device credentials saved; restarting daemon to load the new configuration.");
             break;
         }
 
-        if shared_state.request_restart.swap(false, Ordering::SeqCst) {
+        if std::mem::take(&mut pending_commands.restart) {
             info!("Pipeline restart requested via Web UI. Re-initializing capture...");
             drop(capture);
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1094,17 +1098,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                 let scaled = if calibration.is_some() {
                                     *color
                                 } else {
-                                    RgbColor::new(
-                                        ((color.r as f32) * current_hue_brightness)
-                                            .clamp(0.0, 255.0)
-                                            as u8,
-                                        ((color.g as f32) * current_hue_brightness)
-                                            .clamp(0.0, 255.0)
-                                            as u8,
-                                        ((color.b as f32) * current_hue_brightness)
-                                            .clamp(0.0, 255.0)
-                                            as u8,
-                                    )
+                                    color.scale(current_hue_brightness)
                                 };
                                 if calibration.is_none() && current_use_xy {
                                     (*channel_id, scaled.to_xy_u16(color::HueGamut::GamutC))
@@ -1157,19 +1151,30 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             };
 
                             if let Err(e) = dtls.send(&packet) {
-                                error!("Failed to send DTLS HueStream packet: {}. Reconnecting DTLS...", e);
-                                match reconnect_hue(&config) {
-                                    Ok(new_dtls) => {
-                                        *dtls = new_dtls;
-                                        shared_state.hue_connected.store(true, Ordering::Relaxed);
-                                        info!("[+] Successfully reconnected Hue DTLS session.");
-                                    }
-                                    Err(conn_err) => {
-                                        shared_state.hue_connected.store(false, Ordering::Relaxed);
-                                        warn!("DTLS reconnect attempt failed: {}", conn_err);
+                                shared_state.hue_connected.store(false, Ordering::Relaxed);
+                                error!("Failed to send DTLS HueStream packet: {}", e);
+                                if hue_retry.ready() {
+                                    match reconnect_hue(&config) {
+                                        Ok(new_dtls) => {
+                                            *dtls = new_dtls;
+                                            hue_retry.success();
+                                            shared_state
+                                                .hue_connected
+                                                .store(true, Ordering::Relaxed);
+                                            info!("[+] Successfully reconnected Hue DTLS session.");
+                                        }
+                                        Err(conn_err) => {
+                                            let delay = hue_retry.failure();
+                                            warn!(
+                                                "DTLS reconnect failed: {}. Retrying in {:.1}s.",
+                                                conn_err,
+                                                delay.as_secs_f32()
+                                            );
+                                        }
                                     }
                                 }
                             } else {
+                                hue_retry.success();
                                 shared_state.hue_connected.store(true, Ordering::Relaxed);
                                 emitted_light_update = true;
                             }
@@ -1214,8 +1219,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                 "Nanoleaf UDP frame send error ({}). Triggering external control refresh...",
                                 e
                             );
-                                if last_nanoleaf_refresh.elapsed() >= Duration::from_secs(3) {
-                                    last_nanoleaf_refresh = tokio::time::Instant::now();
+                                if nanoleaf_retry.ready() {
                                     if let Some(ref n_cfg) = config.nanoleaf {
                                         match nanoleaf::enable_external_control(
                                             &n_cfg.ip,
@@ -1233,25 +1237,31 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                                 ) {
                                                     Ok(new_streamer) => {
                                                         *nl_streamer = new_streamer;
+                                                        nanoleaf_retry.success();
                                                     }
                                                     Err(recreate_err) => {
+                                                        let delay = nanoleaf_retry.failure();
                                                         error!(
-                                                        "Failed to recreate Nanoleaf streamer: {}",
-                                                        recreate_err
+                                                        "Failed to recreate Nanoleaf streamer: {}. Retrying in {:.1}s.",
+                                                        recreate_err,
+                                                        delay.as_secs_f32()
                                                     );
                                                     }
                                                 }
                                             }
                                             Err(ext_err) => {
+                                                let delay = nanoleaf_retry.failure();
                                                 error!(
-                                                "Failed to refresh Nanoleaf external control: {}",
-                                                ext_err
+                                                "Failed to refresh Nanoleaf external control: {}. Retrying in {:.1}s.",
+                                                ext_err,
+                                                delay.as_secs_f32()
                                             );
                                             }
                                         }
                                     }
                                 }
                             } else {
+                                nanoleaf_retry.success();
                                 last_nanoleaf_colors = nl_colors;
                                 emitted_light_update = true;
                             }

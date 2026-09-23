@@ -64,6 +64,14 @@ impl RgbColor {
         Self { r, g, b }
     }
 
+    pub fn scale(self, multiplier: f32) -> Self {
+        Self::new(
+            (self.r as f32 * multiplier).clamp(0.0, 255.0) as u8,
+            (self.g as f32 * multiplier).clamp(0.0, 255.0) as u8,
+            (self.b as f32 * multiplier).clamp(0.0, 255.0) as u8,
+        )
+    }
+
     /// Applies Reinhard tone mapping to prevent clipped highlights on HDR10/Dolby Vision video
     pub fn tone_map_hdr(self) -> Self {
         let r_f = self.r as f32 / 255.0;
@@ -189,6 +197,120 @@ impl RgbColor {
     }
 }
 
+pub struct ColorProcessor {
+    rise: f32,
+    fall: f32,
+    hdr_tone_mapping: bool,
+    saturation_boost: f32,
+    noise_gate_threshold: f32,
+    peak_weight: f32,
+    gamma: f32,
+    max_color_step: u8,
+    strict_blackout: bool,
+}
+
+impl ColorProcessor {
+    pub fn new(
+        smoothing: f32,
+        hdr_tone_mapping: bool,
+        saturation_boost: f32,
+        noise_gate_threshold: f32,
+    ) -> Self {
+        Self {
+            rise: smoothing,
+            fall: smoothing,
+            hdr_tone_mapping,
+            saturation_boost,
+            noise_gate_threshold,
+            peak_weight: 0.35,
+            gamma: 1.0,
+            max_color_step: 12,
+            strict_blackout: false,
+        }
+    }
+
+    pub fn sample_weight(&self, saturation: f32) -> f32 {
+        1.0 + self.saturation_boost * saturation * saturation
+    }
+
+    pub fn set_smoothing(&mut self, factor: f32) {
+        let factor = factor.clamp(0.05, 1.0);
+        self.rise = factor;
+        self.fall = factor;
+    }
+
+    pub fn set_temporal_response(&mut self, rise: f32, fall: f32) {
+        self.rise = rise.clamp(0.05, 1.0);
+        self.fall = fall.clamp(0.05, 1.0);
+    }
+
+    pub fn set_strict_blackout(&mut self, enabled: bool) {
+        self.strict_blackout = enabled;
+    }
+
+    pub fn set_hdr_tone_mapping(&mut self, enabled: bool) {
+        self.hdr_tone_mapping = enabled;
+    }
+
+    pub fn set_saturation_boost(&mut self, boost: f32) {
+        self.saturation_boost = boost.clamp(1.0, 3.0);
+    }
+
+    pub fn set_peak_weight(&mut self, weight: f32) {
+        self.peak_weight = weight.clamp(0.0, 1.0);
+    }
+
+    pub fn set_gamma(&mut self, gamma: f32) {
+        self.gamma = gamma.clamp(0.5, 3.0);
+    }
+
+    pub fn set_noise_gate_threshold(&mut self, threshold: f32) {
+        self.noise_gate_threshold = threshold.clamp(0.0, 0.1);
+    }
+
+    pub fn set_max_color_step(&mut self, step: u8) {
+        self.max_color_step = step.max(1);
+    }
+
+    pub fn process(
+        &self,
+        mean: RgbColor,
+        peak: RgbColor,
+        max_luma: f32,
+        current: RgbColor,
+        is_scene_cut: bool,
+    ) -> RgbColor {
+        let mut target = if self.peak_weight > 0.0 && max_luma > 0.0 {
+            mean.lerp(peak, self.peak_weight)
+        } else {
+            mean
+        };
+        if self.noise_gate_threshold > 0.0 {
+            target = target.apply_noise_gate(self.noise_gate_threshold);
+        }
+        if self.saturation_boost > 1.0 {
+            target = target.boost_saturation(self.saturation_boost);
+        }
+        if (self.gamma - 1.0).abs() >= 0.01 {
+            target = target.apply_gamma(self.gamma);
+        }
+        if self.hdr_tone_mapping {
+            target = target.tone_map_hdr();
+        }
+        if self.strict_blackout && target == RgbColor::new(0, 0, 0) {
+            return target;
+        }
+        let alpha = if is_scene_cut {
+            1.0
+        } else if target.luminance() < current.luminance() {
+            self.fall
+        } else {
+            self.rise
+        };
+        limit_color_step(current, current.lerp(target, alpha), self.max_color_step)
+    }
+}
+
 /// Active viewport bounds after detecting letterbox/pillarbox bars (normalized 0.0 to 1.0)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ActiveRect {
@@ -212,16 +334,8 @@ impl Default for ActiveRect {
 pub struct ZoneSampler {
     zones: Vec<LightZone>,
     smoothed_colors: Vec<RgbColor>,
-    rise_smoothing_factor: f32,
-    fall_smoothing_factor: f32,
-    hdr_tone_mapping: bool,
+    processor: ColorProcessor,
     letterbox_detection: bool,
-    saturation_boost: f32,
-    noise_gate_threshold: f32,
-    peak_weight: f32,
-    gamma: f32,
-    max_color_step: u8,
-    strict_blackout: bool,
     active_rect: ActiveRect,
     frame_count: u64,
     last_global_color: RgbColor,
@@ -240,16 +354,13 @@ impl ZoneSampler {
         Self {
             zones,
             smoothed_colors: vec![RgbColor::new(0, 0, 0); len],
-            rise_smoothing_factor: smoothing_factor,
-            fall_smoothing_factor: smoothing_factor,
-            hdr_tone_mapping,
+            processor: ColorProcessor::new(
+                smoothing_factor,
+                hdr_tone_mapping,
+                saturation_boost,
+                noise_gate_threshold,
+            ),
             letterbox_detection,
-            saturation_boost,
-            noise_gate_threshold,
-            peak_weight: 0.35,
-            gamma: 1.0,
-            max_color_step: 12,
-            strict_blackout: false,
             active_rect: ActiveRect::default(),
             frame_count: 0,
             last_global_color: RgbColor::new(0, 0, 0),
@@ -258,22 +369,19 @@ impl ZoneSampler {
 
     /// Dynamically update smoothing factor based on Hue mobile app sync intensity
     pub fn set_smoothing_factor(&mut self, factor: f32) {
-        let factor = factor.clamp(0.05, 1.0);
-        self.rise_smoothing_factor = factor;
-        self.fall_smoothing_factor = factor;
+        self.processor.set_smoothing(factor);
     }
 
     pub fn set_temporal_response(&mut self, rise: f32, fall: f32) {
-        self.rise_smoothing_factor = rise.clamp(0.05, 1.0);
-        self.fall_smoothing_factor = fall.clamp(0.05, 1.0);
+        self.processor.set_temporal_response(rise, fall);
     }
 
     pub fn set_strict_blackout(&mut self, enabled: bool) {
-        self.strict_blackout = enabled;
+        self.processor.set_strict_blackout(enabled);
     }
 
     pub fn set_hdr_tone_mapping(&mut self, enabled: bool) {
-        self.hdr_tone_mapping = enabled;
+        self.processor.set_hdr_tone_mapping(enabled);
     }
 
     pub fn set_letterbox_detection(&mut self, enabled: bool) {
@@ -281,23 +389,23 @@ impl ZoneSampler {
     }
 
     pub fn set_saturation_boost(&mut self, boost: f32) {
-        self.saturation_boost = boost.clamp(1.0, 3.0);
+        self.processor.set_saturation_boost(boost);
     }
 
     pub fn set_peak_weight(&mut self, weight: f32) {
-        self.peak_weight = weight.clamp(0.0, 1.0);
+        self.processor.set_peak_weight(weight);
     }
 
     pub fn set_gamma(&mut self, gamma: f32) {
-        self.gamma = gamma.clamp(0.5, 3.0);
+        self.processor.set_gamma(gamma);
     }
 
     pub fn set_noise_gate_threshold(&mut self, threshold: f32) {
-        self.noise_gate_threshold = threshold.clamp(0.0, 0.1);
+        self.processor.set_noise_gate_threshold(threshold);
     }
 
     pub fn set_max_color_step(&mut self, step: u8) {
-        self.max_color_step = step.max(1);
+        self.processor.set_max_color_step(step);
     }
 
     /// Fast letterbox / pillarbox detector. Evaluates top/bottom row luminance to find black bars.
@@ -525,7 +633,7 @@ impl ZoneSampler {
 
                         // Saturation weighting: vivid accents get higher weight so they aren't diluted by grey
                         let sat = pix.saturation();
-                        let weight = 1.0 + self.saturation_boost * (sat * sat);
+                        let weight = self.processor.sample_weight(sat);
 
                         weighted_r += (r as f32) * weight;
                         weighted_g += (g as f32) * weight;
@@ -545,51 +653,10 @@ impl ZoneSampler {
                 RgbColor::new(0, 0, 0)
             };
 
-            // Blend mean with peak highlight luminance
-            let mut processed_color = if self.peak_weight > 0.0 && max_luma > 0.0 {
-                mean_color.lerp(peak_pixel, self.peak_weight)
-            } else {
-                mean_color
-            };
-
-            // Apply OLED near-black noise gate
-            if self.noise_gate_threshold > 0.0 {
-                processed_color = processed_color.apply_noise_gate(self.noise_gate_threshold);
-            }
-
-            // True HSV saturation amplification
-            if self.saturation_boost > 1.0 {
-                processed_color = processed_color.boost_saturation(self.saturation_boost);
-            }
-
-            // Dynamic gamma contrast curve
-            if (self.gamma - 1.0).abs() >= 0.01 {
-                processed_color = processed_color.apply_gamma(self.gamma);
-            }
-
-            // Apply Reinhard HDR tone mapping
-            if self.hdr_tone_mapping {
-                processed_color = processed_color.tone_map_hdr();
-            }
-
-            // Apply Adaptive EMA smoothing
             let current = self.smoothed_colors[i];
-            let smoothed = if self.strict_blackout && processed_color == RgbColor::new(0, 0, 0) {
-                processed_color
-            } else {
-                let alpha = if is_scene_cut {
-                    1.0
-                } else if processed_color.luminance() < current.luminance() {
-                    self.fall_smoothing_factor
-                } else {
-                    self.rise_smoothing_factor
-                };
-                limit_color_step(
-                    current,
-                    current.lerp(processed_color, alpha),
-                    self.max_color_step,
-                )
-            };
+            let smoothed =
+                self.processor
+                    .process(mean_color, peak_pixel, max_luma, current, is_scene_cut);
             self.smoothed_colors[i] = smoothed;
 
             results.push((zone.channel_id, smoothed));

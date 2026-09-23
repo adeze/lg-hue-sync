@@ -124,6 +124,9 @@ fn default_nanoleaf_segments() -> u16 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Automatically pause/resume outputs with the TV's active/standby state.
+    #[serde(default = "default_true")]
+    pub auto_tv_power: bool,
     #[serde(default = "default_true")]
     pub hue_enabled: bool,
     /// Runtime preference: keep Hue configured but release its entertainment area when off.
@@ -300,6 +303,7 @@ fn default_zones() -> Vec<LightZone> {
 impl Config {
     pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
         Self {
+            auto_tv_power: true,
             hue_enabled: true,
             hue_sync_enabled: true,
             bridge_ip: bridge_ip.to_string(),

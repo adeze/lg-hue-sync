@@ -3,6 +3,7 @@ mod color;
 mod config;
 mod hue;
 mod nanoleaf;
+mod tv_power;
 mod web;
 
 use anyhow::{anyhow, Result};
@@ -299,6 +300,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         .map(|n| n.enabled && !n.ip.is_empty() && !n.auth_token.is_empty())
         .unwrap_or(false);
 
+    let mut observed_tv_power = if config.auto_tv_power {
+        match tv_power::is_active().await {
+            Ok(state) => state,
+            Err(error) => {
+                warn!("Could not read TV power state; starting normally and retrying: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let pipeline_should_run = observed_tv_power != Some(false);
+    if !pipeline_should_run && hue_active {
+        let _ = set_hue_stream_active(&config, false);
+    }
+
     if hue_active && hue_configuration_id(&config).is_none() {
         match sync_entertainment_areas(
             &config.bridge_ip,
@@ -381,7 +398,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     // 1. Initialize Philips Hue DTLS client if active
     let mut hue_sync_enabled = config.hue_sync_enabled;
     let mut nanoleaf_sync_enabled = config.nanoleaf_sync_enabled;
-    let mut hue_dtls = if hue_active && hue_sync_enabled {
+    let mut hue_dtls = if hue_active && hue_sync_enabled && pipeline_should_run {
         let client = reconnect_hue(&config)?;
         Some(client)
     } else {
@@ -425,7 +442,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             config.noise_gate_threshold,
             config.brightness_multiplier * config.nanoleaf_output_brightness,
         );
-        let streamer = if nanoleaf_sync_enabled {
+        let streamer = if nanoleaf_sync_enabled && pipeline_should_run {
             let port = nanoleaf::enable_external_control(&n_cfg.ip, &n_cfg.auth_token)?;
             let streamer = NanoleafUdpStreamer::new(&n_cfg.ip, port, sampler.panel_ids())?;
             info!(
@@ -512,6 +529,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         hdr_tone_mapping: config.hdr_tone_mapping,
         hue_sync_enabled,
         nanoleaf_sync_enabled,
+        auto_tv_power: config.auto_tv_power,
         max_color_step: config.max_color_step,
     };
 
@@ -521,6 +539,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         format!("{}x{}", config.capture_width, config.capture_height),
         config.zones.clone(),
     ));
+    shared_state
+        .is_syncing
+        .store(pipeline_should_run, Ordering::Relaxed);
+    shared_state.set_tv_power_state(observed_tv_power);
     shared_state.set_fps(target_fps as f32);
 
     shared_state
@@ -551,6 +573,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     let mut current_hue_brightness = config.brightness_multiplier * config.hue_output_brightness;
     let mut current_use_xy = config.use_xy_gamut;
+    let mut auto_tv_power = config.auto_tv_power;
 
     let mut last_channels: Vec<(u8, (u16, u16, u16))> = Vec::new();
     let mut last_nanoleaf_colors: Vec<RgbColor> = Vec::new();
@@ -562,6 +585,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut last_watchdog = tokio::time::Instant::now();
     let mut last_status_check = tokio::time::Instant::now();
     let mut last_hw_probe = tokio::time::Instant::now();
+    let mut last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
+    let mut last_tv_power_warning = tokio::time::Instant::now() - Duration::from_secs(30);
     let mut last_nanoleaf_refresh = tokio::time::Instant::now() - Duration::from_secs(5);
     let mut nanoleaf_only_frame_count = 0u64;
     let mut nanoleaf_only_global = RgbColor::new(0, 0, 0);
@@ -574,6 +599,36 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         if last_watchdog.elapsed() >= Duration::from_secs(2) {
             let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
             last_watchdog = tokio::time::Instant::now();
+        }
+
+        if auto_tv_power && last_tv_power_poll.elapsed() >= Duration::from_secs(2) {
+            last_tv_power_poll = tokio::time::Instant::now();
+            match tv_power::is_active().await {
+                Ok(state @ Some(_)) => {
+                    shared_state.set_tv_power_state(state);
+                    let active = state.unwrap();
+                    let changed = observed_tv_power
+                        .map(|previous| previous != active)
+                        .unwrap_or(!active && shared_state.is_syncing.load(Ordering::Relaxed));
+                    if changed {
+                        info!("TV power changed: {}", if active { "active" } else { "standby" });
+                        if active {
+                            shared_state.request_start.store(true, Ordering::SeqCst);
+                        } else {
+                            shared_state.request_stop.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    observed_tv_power = Some(active);
+                }
+                Ok(None) => shared_state.set_tv_power_state(None),
+                Err(error) => {
+                    shared_state.set_tv_power_state(None);
+                    if last_tv_power_warning.elapsed() >= Duration::from_secs(30) {
+                        warn!("TV power state unavailable; leaving sync unchanged: {error}");
+                        last_tv_power_warning = tokio::time::Instant::now();
+                    }
+                }
+            }
         }
 
         // 1. Check for web UI or external stop requests
@@ -613,7 +668,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             shared_state.is_syncing.store(false, Ordering::SeqCst);
 
             // Deactivate Hue stream on bridge if web requested stop
-            if web_stop_requested && hue_active {
+            if (web_stop_requested || (auto_tv_power && observed_tv_power == Some(false)))
+                && hue_active
+            {
                 let _ = set_hue_stream_active(&config, false);
             }
             hue_dtls = None;
@@ -629,9 +686,45 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
 
-                let start_requested = shared_state.request_start.swap(false, Ordering::SeqCst);
+                let configured_auto_tv_power = shared_state
+                    .current_settings
+                    .read()
+                    .unwrap()
+                    .auto_tv_power;
+                if auto_tv_power != configured_auto_tv_power {
+                    auto_tv_power = configured_auto_tv_power;
+                    observed_tv_power = None;
+                    shared_state.set_tv_power_state(None);
+                    last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
+                }
+
+                let mut start_requested = shared_state.request_start.swap(false, Ordering::SeqCst);
+                if auto_tv_power && last_tv_power_poll.elapsed() >= Duration::from_secs(2) {
+                    last_tv_power_poll = tokio::time::Instant::now();
+                    match tv_power::is_active().await {
+                        Ok(state @ Some(_)) => {
+                            shared_state.set_tv_power_state(state);
+                            let active = state.unwrap();
+                            if observed_tv_power == Some(false) && active {
+                                start_requested = true;
+                            }
+                            observed_tv_power = Some(active);
+                        }
+                        Ok(None) => shared_state.set_tv_power_state(None),
+                        Err(error) => {
+                            shared_state.set_tv_power_state(None);
+                            if last_tv_power_warning.elapsed() >= Duration::from_secs(30) {
+                                warn!("TV power state unavailable; leaving sync paused: {error}");
+                                last_tv_power_warning = tokio::time::Instant::now();
+                            }
+                        }
+                    }
+                }
                 let mut app_reactivated = false;
-                if !start_requested && hue_active {
+                if !start_requested
+                    && hue_active
+                    && !(auto_tv_power && observed_tv_power == Some(false))
+                {
                     if let Some(configuration_id) = hue_configuration_id(&config) {
                         if let Ok(st) = hue::get_stream_state(
                             &config.bridge_ip,
@@ -681,22 +774,20 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                                         "[+] Re-enabled Nanoleaf external control on UDP port {}",
                                         port
                                     );
-                                    if let Some(ref mut ns) = nanoleaf_streamer {
+                                    if let Some(sampler) = nanoleaf_sampler.as_ref() {
                                         match NanoleafUdpStreamer::new(
                                             &n_cfg.ip,
                                             port,
-                                            ns.panel_ids().to_vec(),
+                                            sampler.panel_ids(),
                                         ) {
                                             Ok(new_streamer) => {
-                                                *ns = new_streamer;
-                                                shared_state
-                                                    .nanoleaf_connected
-                                                    .store(true, Ordering::Relaxed);
+                                                nanoleaf_streamer = Some(new_streamer);
+                                                shared_state.nanoleaf_connected.store(true, Ordering::Relaxed);
                                             }
-                                            Err(e) => error!(
-                                                "Failed to recreate Nanoleaf streamer: {}",
-                                                e
-                                            ),
+                                            Err(e) => {
+                                                shared_state.nanoleaf_connected.store(false, Ordering::Relaxed);
+                                                error!("Failed to recreate Nanoleaf streamer: {}", e);
+                                            }
                                         }
                                     }
                                 }
@@ -715,6 +806,11 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         // 2. Check for live settings update from Web UI
         if shared_state.settings_updated.swap(false, Ordering::SeqCst) {
             let live_st = shared_state.current_settings.read().unwrap().clone();
+            if auto_tv_power != live_st.auto_tv_power {
+                auto_tv_power = live_st.auto_tv_power;
+                observed_tv_power = None;
+                last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
+            }
             current_hue_brightness = live_st.brightness_multiplier * live_st.hue_output_brightness;
             current_use_xy = live_st.use_xy_gamut;
             apply_hue_light_trims(&mut config.zones, &live_st.hue_light_trims);
@@ -834,6 +930,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             save_cfg.hdr_tone_mapping = live_st.hdr_tone_mapping;
             save_cfg.hue_sync_enabled = hue_sync_enabled;
             save_cfg.nanoleaf_sync_enabled = nanoleaf_sync_enabled;
+            save_cfg.auto_tv_power = live_st.auto_tv_power;
             save_cfg.max_color_step = live_st.max_color_step;
             if let Err(e) = save_cfg.save(&config_path) {
                 error!("Failed to save updated config to {:?}: {}", config_path, e);

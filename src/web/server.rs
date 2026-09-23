@@ -47,11 +47,17 @@ pub struct LiveSettings {
     pub hdr_tone_mapping: bool,
     pub hue_sync_enabled: bool,
     pub nanoleaf_sync_enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_tv_power: bool,
     pub max_color_step: u8,
 }
 
 fn default_output_trim() -> f32 {
     1.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_smoothing_factor() -> f32 {
@@ -118,6 +124,8 @@ pub struct SharedState {
     pub hue_connected: AtomicBool,
     pub nanoleaf_connected: AtomicBool,
     pub capture_hardware: AtomicBool,
+    /// 0 = unknown, 1 = active, 2 = standby/off.
+    pub tv_power_state: AtomicU32,
     pub capture_resolution: RwLock<String>,
     pub current_settings: RwLock<LiveSettings>,
     pub live_hue_colors: RwLock<Vec<(u8, RgbColor)>>,
@@ -148,6 +156,7 @@ impl SharedState {
             hue_connected: AtomicBool::new(false),
             nanoleaf_connected: AtomicBool::new(false),
             capture_hardware: AtomicBool::new(false),
+            tv_power_state: AtomicU32::new(0),
             capture_resolution: RwLock::new(capture_res),
             current_settings: RwLock::new(initial_settings),
             live_hue_colors: RwLock::new(Vec::new()),
@@ -173,6 +182,17 @@ impl SharedState {
     pub fn light_update_fps(&self) -> f32 {
         self.light_updates_x100.load(Ordering::Relaxed) as f32 / 100.0
     }
+
+    pub fn set_tv_power_state(&self, active: Option<bool>) {
+        self.tv_power_state.store(
+            match active {
+                Some(true) => 1,
+                Some(false) => 2,
+                None => 0,
+            },
+            Ordering::Relaxed,
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -184,6 +204,7 @@ struct AppState {
 #[derive(Debug, Clone, Serialize)]
 struct StatusResponse {
     is_syncing: bool,
+    tv_power_state: &'static str,
     fps: f32,
     light_update_fps: f32,
     hue_connected: bool,
@@ -286,6 +307,11 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let shared = &state.shared;
     Json(StatusResponse {
         is_syncing: shared.is_syncing.load(Ordering::Relaxed),
+        tv_power_state: match shared.tv_power_state.load(Ordering::Relaxed) {
+            1 => "active",
+            2 => "standby",
+            _ => "unknown",
+        },
         fps: shared.get_fps(),
         light_update_fps: shared.light_update_fps(),
         hue_connected: shared.hue_connected.load(Ordering::Relaxed),

@@ -2,10 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LG C1 Ambient Lighting Sync</title>
   <style>
     :root {
+      color-scheme: dark;
       --bg: #090a0f;
       --card-bg: #12141d;
       --card-border: #1e2230;
@@ -17,31 +18,131 @@
       --danger-glow: rgba(239, 68, 68, 0.4);
       --text: #f3f4f6;
       --text-muted: #9ca3af;
+      --button-bg: #1a1e2b;
+      --button-hover: #222738;
+      --surface-inset: #161924;
+      --field-bg: #111522;
+      --track-bg: #222738;
+      --range-border: #eaf3ff;
+      --range-halo: rgba(68, 160, 255, 0.16);
+      --focus-ring: #a5b4fc;
+      --selection-bg: rgba(99, 102, 241, 0.16);
+      --selection-text: #d9ecff;
+      --help-text: #cbd1df;
+      --tip-bg: #242837;
+      --tip-border: #42475a;
+      --tip-text: #e7eaf2;
+      --toggle-row-border: #1a1e2b;
+      --switch-track-bg: #282d3c;
+      --switch-track-border: #535a6b;
+      --switch-thumb: #d1d5df;
+      --sync-bg: #10251f;
+      --sync-text: #ffffff;
+      --sync-track-bg: #087e5b;
+      --card-shadow: rgba(0, 0, 0, 0.5);
+    }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]):not([data-theme="light"]) {
+        color-scheme: light;
+        --bg: #f2f4f8;
+        --card-bg: #ffffff;
+        --card-border: #d5dbe6;
+        --accent: #4f46e5;
+        --accent-glow: rgba(79, 70, 229, 0.24);
+        --success: #047857;
+        --success-glow: rgba(4, 120, 87, 0.2);
+        --danger: #b91c1c;
+        --danger-glow: rgba(185, 28, 28, 0.2);
+        --text: #171b26;
+        --text-muted: #535d6e;
+        --button-bg: #f2f4f8;
+        --button-hover: #e7ebf3;
+        --surface-inset: #f5f7fb;
+        --field-bg: #ffffff;
+        --track-bg: #d5dbe6;
+        --range-border: #ffffff;
+        --range-halo: rgba(79, 70, 229, 0.18);
+        --focus-ring: #4338ca;
+        --selection-bg: rgba(79, 70, 229, 0.12);
+        --selection-text: #312e81;
+        --help-text: #465166;
+        --tip-bg: #ffffff;
+        --tip-border: #c3cada;
+        --tip-text: #202635;
+        --toggle-row-border: #e5e8ef;
+        --switch-track-bg: #dfe3eb;
+        --switch-track-border: #8b95a7;
+        --switch-thumb: #ffffff;
+        --sync-bg: #e8f5ef;
+        --sync-text: #064e3b;
+        --sync-track-bg: #047857;
+        --card-shadow: rgba(22, 31, 51, 0.12);
+      }
+    }
+    :root[data-theme="dark"] { color-scheme: dark; }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f2f4f8;
+      --card-bg: #ffffff;
+      --card-border: #d5dbe6;
+      --accent: #4f46e5;
+      --accent-glow: rgba(79, 70, 229, 0.24);
+      --success: #047857;
+      --success-glow: rgba(4, 120, 87, 0.2);
+      --danger: #b91c1c;
+      --danger-glow: rgba(185, 28, 28, 0.2);
+      --text: #171b26;
+      --text-muted: #535d6e;
+      --button-bg: #f2f4f8;
+      --button-hover: #e7ebf3;
+      --surface-inset: #f5f7fb;
+      --field-bg: #ffffff;
+      --track-bg: #d5dbe6;
+      --range-border: #ffffff;
+      --range-halo: rgba(79, 70, 229, 0.18);
+      --focus-ring: #4338ca;
+      --selection-bg: rgba(79, 70, 229, 0.12);
+      --selection-text: #312e81;
+      --help-text: #465166;
+      --tip-bg: #ffffff;
+      --tip-border: #c3cada;
+      --tip-text: #202635;
+      --toggle-row-border: #e5e8ef;
+      --switch-track-bg: #dfe3eb;
+      --switch-track-border: #8b95a7;
+      --switch-thumb: #ffffff;
+      --sync-bg: #e8f5ef;
+      --sync-text: #064e3b;
+      --sync-track-bg: #047857;
+      --card-shadow: rgba(22, 31, 51, 0.12);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 20px; max-width: 680px; margin: 0 auto; -webkit-tap-highlight-color: transparent; }
-    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--card-border); }
+    header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--card-border); }
     .brand { display: flex; align-items: center; gap: 12px; }
+    .header-actions { display:flex; align-items:center; gap:12px; margin-left:auto; }
+    .theme-control { display:flex; align-items:center; gap:6px; color:var(--text-muted); font-size:.75rem; }
+    .theme-select { min-height:38px; padding:6px 28px 6px 9px; border:1px solid var(--card-border); border-radius:9px; background:var(--field-bg); color:var(--text); font:inherit; }
     .status-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 10px var(--danger-glow); transition: all 0.3s; }
     .status-dot.active { background: var(--success); box-shadow: 0 0 14px var(--success-glow); }
     h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
     .subtitle { font-size: 0.8rem; color: var(--text-muted); }
     
-    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px var(--card-shadow); }
     
     .power-btn {
-      width: 100%; padding: 18px; border: none; border-radius: 14px; font-size: 1.1rem; font-weight: 700; cursor: pointer;
-      display: flex; align-items: center; justify-content: center; gap: 10px; transition: all 0.2s;
-      background: #1f2434; color: var(--text); border: 1px solid var(--card-border);
+      width: 100%; min-height: 76px; padding: 14px 18px; border-radius: 14px; font-size: 1rem; font-weight: 750; cursor: pointer;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px; transition: all 0.2s;
+      background: var(--button-bg); color: var(--text); border: 1px solid var(--card-border); text-align: left;
     }
     .power-btn.active {
-      background: linear-gradient(135deg, #10b981, #059669); color: white;
-      box-shadow: 0 0 25px var(--success-glow); border-color: transparent;
+      background: var(--sync-bg); color: var(--sync-text); box-shadow: 0 0 20px var(--success-glow); border-color: var(--success);
     }
-    .power-btn.stopping {
-      background: linear-gradient(135deg, #ef4444, #dc2626); color: white;
-      box-shadow: 0 0 25px var(--danger-glow); border-color: transparent;
-    }
+    .main-switch-track { position: relative; flex: 0 0 76px; height: 42px; border: 2px solid var(--switch-track-border); border-radius: 99px; background: var(--switch-track-bg); transition: background .2s,border-color .2s; }
+    .main-switch-track::after { content:""; position:absolute; top:4px; left:4px; width:30px; height:30px; border-radius:50%; background:var(--switch-thumb); box-shadow:0 2px 7px #0008; transition:transform .2s,background .2s; }
+    .power-btn.active .main-switch-track { border-color:var(--success); background:var(--sync-track-bg); }
+    .power-btn.active .main-switch-track::after { transform:translateX(34px); background:white; }
+    .power-btn:focus-visible { outline:3px solid var(--focus-ring); outline-offset:3px; }
 
     /* Live Preview Screen */
     .tv-preview-container {
@@ -82,44 +183,69 @@
     .control-val { color: var(--accent); font-variant-numeric: tabular-nums; }
     input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
     input[type="range"] {
-      width: 100%; height: 12px; border-radius: 999px; background: #222738; outline: none;
+      width: 100%; height: 50px; border-radius: 999px; background: transparent; outline: none;
       -webkit-appearance: none; appearance: none; touch-action: pan-y;
     }
-    input[type="range"]::-webkit-slider-runnable-track { height: 12px; border-radius: 999px; background: #222738; }
+    input[type="range"]::-webkit-slider-runnable-track { height: 14px; border-radius: 999px; background: var(--track-bg); }
     input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none; width: 32px; height: 32px; margin-top: -10px; border: 3px solid #eaf3ff;
-      border-radius: 50%; background: var(--accent); cursor: pointer; box-shadow: 0 0 0 5px rgba(68, 160, 255, 0.16), 0 0 14px var(--accent-glow);
+      -webkit-appearance: none; width: 36px; height: 36px; margin-top: -11px; border: 3px solid var(--range-border);
+      border-radius: 50%; background: var(--accent); cursor: pointer; box-shadow: 0 0 0 5px var(--range-halo), 0 0 14px var(--accent-glow);
     }
+    input[type="range"]::-moz-range-track { height:14px; border-radius:999px; background:var(--track-bg); }
+    input[type="range"]::-moz-range-thumb { width:30px; height:30px; border:3px solid var(--range-border); border-radius:50%; background:var(--accent); box-shadow:0 0 0 5px var(--range-halo),0 0 14px var(--accent-glow); }
+    .tuning-grid { display:grid; grid-template-columns:1fr; gap:0 18px; }
+    .accordion { padding:0; overflow:visible; }
+    .accordion > summary { display:flex; align-items:center; justify-content:space-between; min-height:64px; padding:16px 20px; border-radius:16px; cursor:pointer; list-style:none; font-weight:750; }
+    .accordion > summary::-webkit-details-marker { display:none; }
+    .accordion > summary::after { content:"＋"; color:var(--text-muted); font-size:1.1rem; }
+    .accordion[open] > summary { border-bottom:1px solid var(--card-border); border-radius:16px 16px 0 0; }
+    .accordion[open] > summary::after { content:"−"; }
+    .accordion-content { padding:20px; }
+    .device-subsection + .device-subsection { border-top:1px solid var(--card-border); margin-top:22px; padding-top:20px; }
+    .device-heading { margin-bottom:8px; font-size:.9rem; }
+    .device-status { margin-top:10px; padding:10px 12px; border-radius:10px; background:var(--surface-inset); font-size:.8rem; }
+    .device-status strong { color:var(--text-muted); font-size:.7rem; text-transform:uppercase; letter-spacing:.05em; }
+    .preset-option { display:flex; gap:5px; min-width:0; }
+    .preset-btn { flex:1; min-width:0; }
+    .preset-info { position:relative; flex:none; }
+    .preset-info summary,.restart-info summary { display:grid; place-items:center; width:34px; min-height:42px; border-radius:9px; color:var(--help-text); cursor:pointer; list-style:none; }
+    .preset-info summary::-webkit-details-marker,.restart-info summary::-webkit-details-marker { display:none; }
+    .info-tip { display:none; position:absolute; z-index:10; top:calc(100% + 6px); right:0; width:min(260px,78vw); padding:12px; border:1px solid var(--tip-border); border-radius:11px; background:var(--tip-bg); color:var(--tip-text); box-shadow:0 8px 25px #0009; font-size:.76rem; line-height:1.4; font-weight:400; }
+    .preset-info:hover .info-tip,.preset-info[open] .info-tip,.preset-info:focus-within .info-tip,.restart-info:hover .info-tip,.restart-info[open] .info-tip,.restart-info:focus-within .info-tip { display:block; }
+    .restart-info { position:relative; }
     .preset-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 10px 0 16px; }
-    .preset-btn { min-height: 42px; border: 1px solid var(--card-border); border-radius: 10px; background: #1a1e2b; color: var(--text); font-weight: 700; cursor: pointer; }
-    .preset-btn.active { border-color: var(--accent); background: rgba(68, 160, 255, 0.16); color: #d9ecff; }
+    .preset-btn { min-height: 42px; border: 1px solid var(--card-border); border-radius: 10px; background: var(--button-bg); color: var(--text); font-weight: 700; cursor: pointer; }
+    .preset-btn.active { border-color: var(--accent); background: var(--selection-bg); color: var(--selection-text); }
 
     /* Toggles */
-    .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #1a1e2b; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--toggle-row-border); }
     .toggle-row:last-child { border-bottom: none; }
     .toggle-label { font-size: 0.85rem; font-weight: 500; }
     .toggle-desc { font-size: 0.75rem; color: var(--text-muted); }
     .switch { position: relative; width: 44px; height: 24px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #222738; border-radius: 24px; transition: .2s; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: var(--track-bg); border-radius: 24px; transition: .2s; }
     .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .2s; }
     input:checked + .slider { background: var(--accent); }
     input:checked + .slider:before { transform: translateX(20px); }
 
     /* Stats Grid */
     .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-    .stat-box { background: #161924; border-radius: 10px; padding: 12px; border: 1px solid var(--card-border); }
+    .stat-box { background: var(--surface-inset); border-radius: 10px; padding: 12px; border: 1px solid var(--card-border); }
     .stat-title { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
     .stat-value { font-size: 0.95rem; font-weight: 700; margin-top: 4px; }
 
     /* Footer Buttons */
     .btn-row { display: flex; gap: 10px; margin-top: 20px; }
     .secondary-btn {
-      flex: 1; padding: 12px; background: #1a1e2b; border: 1px solid var(--card-border); border-radius: 10px;
+      flex: 1; padding: 12px; background: var(--button-bg); border: 1px solid var(--card-border); border-radius: 10px;
       color: var(--text); font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: background 0.2s;
     }
-    .secondary-btn:hover { background: #222738; }
-    .text-input { width: 100%; box-sizing: border-box; padding: 11px; border: 1px solid var(--card-border); border-radius: 10px; background: #111522; color: var(--text); margin: 8px 0; }
+    .secondary-btn:hover { background: var(--button-hover); }
+    .text-input { width: 100%; box-sizing: border-box; padding: 11px; border: 1px solid var(--card-border); border-radius: 10px; background: var(--field-bg); color: var(--text); margin: 8px 0; }
+    .theme-select:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
+    @media (min-width: 860px) { .tuning-grid { grid-template-columns:1fr 1fr; } }
+    @media (prefers-reduced-motion: reduce) { *,*::before,*::after { transition:none!important; scroll-behavior:auto!important; } }
   </style>
 </head>
 <body>
@@ -132,19 +258,30 @@
         <div class="subtitle" id="statusSubtitle">Connecting to daemon...</div>
       </div>
     </div>
-    <div style="font-size: 0.85rem; font-weight: 700; color: var(--accent);" id="fpsDisplay">0 FPS</div>
+    <div class="header-actions">
+      <label class="theme-control" for="themeSelect">Theme
+        <select class="theme-select" id="themeSelect" aria-label="Dashboard colour scheme" onchange="setTheme(this.value)">
+          <option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option>
+        </select>
+      </label>
+      <div style="font-size: 0.85rem; font-weight: 700; color: var(--accent);" id="fpsDisplay">0 updates/s</div>
+    </div>
   </header>
 
   <!-- Main Power Button -->
   <div class="card" style="padding: 14px;">
-    <button id="toggleBtn" class="power-btn" onclick="toggleSync()">
-      <span id="toggleText">START SYNC</span>
+    <button id="toggleBtn" class="power-btn" type="button" role="switch" aria-checked="false" aria-label="Screen synchronization" onclick="toggleSync()">
+      <span id="toggleText">SCREEN SYNC OFF</span><span class="main-switch-track" aria-hidden="true"></span>
     </button>
+    <div class="toggle-row" style="margin-top:14px">
+      <div><div class="toggle-label">Follow TV power</div><div class="toggle-desc">Pause Hue and Nanoleaf in standby; resume when the TV turns on. Turn off for manual control.</div></div>
+      <label class="switch"><input type="checkbox" id="toggleAutoTvPower" checked onchange="updateSettings()"><span class="slider"></span></label>
+    </div>
   </div>
 
   <!-- Live Ambient Visualization -->
   <div class="card">
-    <div style="font-size: 0.85rem; font-weight: 700; margin-bottom: 8px;">LIVE SCREEN & LIGHTS PREVIEW</div>
+    <div style="font-size: 0.85rem; font-weight: 700; margin-bottom: 8px;">LIVE SCREEN &amp; LIGHTS PREVIEW</div>
     <div class="tv-preview-container">
       <div class="tv-inner">
         <div class="hue-zone-overlay" id="hueZoneOverlay" aria-label="Hue screen sampling zones"></div>
@@ -162,8 +299,25 @@
     <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-top: 12px;">SELECTED HUE AREA — LIVE MAPPING PREVIEW</div>
   </div>
 
-  <div class="card">
-    <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 8px;">PHILIPS HUE</div>
+  <section class="card" id="presetSection">
+    <div style="font-size:0.9rem;font-weight:700;margin-bottom:8px">AMBIENT STYLE</div>
+    <div class="toggle-desc">Choose a video-derived response profile. Adjustments below remain available for fine tuning.</div>
+    <div class="preset-grid" id="presetGrid">
+      <div class="preset-option"><button class="preset-btn" data-preset="neutral" onclick="applyPreset('neutral')">Neutral Reference</button><details class="preset-info"><summary aria-label="About Neutral Reference">ⓘ</summary><div class="info-tip">Faithful, restrained average colour and gentle transitions; a good baseline for most content.</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="highChroma" onclick="applyPreset('highChroma')">High Chroma</button><details class="preset-info"><summary aria-label="About High Chroma">ⓘ</summary><div class="info-tip">Increases saturation and colour intensity while staying derived from the video signal.</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="neonContrast" onclick="applyPreset('neonContrast')">Neon Contrast</button><details class="preset-info"><summary aria-label="About Neon Contrast">ⓘ</summary><div class="info-tip">Emphasizes bright, saturated accents and lets near-black regions fall dark.</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="darkSceneDetail" onclick="applyPreset('darkSceneDetail')">Dark-Scene Detail</button><details class="preset-info"><summary aria-label="About Dark-Scene Detail">ⓘ</summary><div class="info-tip">Preserves OLED blacks while retaining local highlights in darker scenes.</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="fastResponse" onclick="applyPreset('fastResponse')">Fast Response</button><details class="preset-info"><summary aria-label="About Fast Response">ⓘ</summary><div class="info-tip">Tracks scene changes more quickly, with less smoothing and bounded colour steps.</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="lowStimulation" onclick="applyPreset('lowStimulation')">Low Stimulation</button><details class="preset-info"><summary aria-label="About Low Stimulation">ⓘ</summary><div class="info-tip">Reduces intensity and slows transitions for a calmer ambient effect.</div></details></div>
+    </div>
+    <div class="toggle-desc" id="presetStatus">Choose a starting point; it does not overwrite Hue or Nanoleaf output trims.</div>
+  </section>
+
+  <details class="card accordion" id="devicesSection" open>
+    <summary>Devices · Hue &amp; Nanoleaf</summary>
+    <div class="accordion-content">
+    <section class="device-subsection">
+    <h2 class="device-heading">Philips Hue</h2>
     <div class="toggle-desc">Pair once, then select the Entertainment Area this TV should control.</div>
     <input class="text-input" id="hueBridgeIp" inputmode="decimal" placeholder="Hue Bridge IP — blank to discover">
     <button class="secondary-btn" style="width:100%" onclick="pairHue()">Pair Hue Bridge</button>
@@ -179,10 +333,11 @@
     <div class="control-group" style="margin-top:14px"><div class="control-header"><span>Hue Output Trim</span><span class="control-val" id="valHueOutput">1.00x</span></div><input type="range" id="sliderHueOutput" aria-label="Hue Output Trim" min="0.25" max="2.0" step="0.05" value="1.0" oninput="updateSettings()"></div>
     <div id="hueLightTrimControls"></div>
     <div class="toggle-desc" id="hueSetupStatus" style="margin-top:12px"></div>
-  </div>
+    <div class="device-status"><strong>Bridge status</strong><div id="statHue">Connecting…</div></div>
+    </section>
 
-  <div class="card">
-    <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 8px;">NANOLEAF 4D</div>
+    <section class="device-subsection">
+    <h2 class="device-heading">Nanoleaf 4D</h2>
     <div class="toggle-desc">Credentials remain on the TV. Pairing needs physical access to the controller.</div>
     <input class="text-input" id="nanoleafIp" inputmode="decimal" placeholder="Nanoleaf 4D controller IP">
     <button class="secondary-btn" style="width:100%" onclick="pairNanoleaf()">Pair Nanoleaf 4D</button>
@@ -194,23 +349,16 @@
     <div class="control-group" style="margin-top:14px"><div class="control-header"><span>Nanoleaf Output Trim</span><span class="control-val" id="valNanoleafOutput">1.00x</span></div><input type="range" id="sliderNanoleafOutput" aria-label="Nanoleaf Output Trim" min="0.25" max="2.0" step="0.05" value="1.0" oninput="updateSettings()"></div>
     <div class="toggle-desc">Balances the 4D perimeter without changing the screen sample.</div>
     <div class="toggle-desc" id="nanoleafSetupStatus" style="margin-top:12px"></div>
-  </div>
-
-  <!-- Tuning Controls -->
-  <div class="card">
-    <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 16px;">AMBIENT TUNING</div>
-
-    <div class="toggle-desc">RESPONSE PROFILES — content-derived starting points; output trims balance physical lights.</div>
-    <div class="preset-grid" id="presetGrid">
-      <button class="preset-btn" data-preset="neutral" onclick="applyPreset('neutral')">Neutral Reference</button>
-      <button class="preset-btn" data-preset="highChroma" onclick="applyPreset('highChroma')">High Chroma</button>
-      <button class="preset-btn" data-preset="neonContrast" onclick="applyPreset('neonContrast')">Neon Contrast</button>
-      <button class="preset-btn" data-preset="darkSceneDetail" onclick="applyPreset('darkSceneDetail')">Dark-Scene Detail</button>
-      <button class="preset-btn" data-preset="fastResponse" onclick="applyPreset('fastResponse')">Fast Response</button>
-      <button class="preset-btn" data-preset="lowStimulation" onclick="applyPreset('lowStimulation')">Low Stimulation</button>
+    <div class="device-status"><strong>Nanoleaf status</strong><div id="statNanoleaf">Connecting…</div></div>
+    </section>
     </div>
-    <div class="toggle-desc" id="presetStatus">Choose a starting point; it does not overwrite Hue or Nanoleaf output trims.</div>
+  </details>
 
+  <!-- Advanced tuning controls -->
+  <details class="card accordion" id="advancedSection" open>
+    <summary>Advanced tuning · response controls</summary>
+    <div class="accordion-content">
+    <div class="tuning-grid">
     <div class="control-group">
       <div class="control-header">
         <span>Brightness Multiplier</span>
@@ -273,7 +421,7 @@
     <div class="toggle-row">
       <div>
         <div class="toggle-label">Direct RGB Mode (Recommended)</div>
-        <div class="toggle-desc">Maximum Hue bulb brightness & punch (off = CIE 1931 xy)</div>
+        <div class="toggle-desc">Maximum Hue bulb brightness &amp; punch (off = CIE 1931 xy)</div>
       </div>
       <label class="switch">
         <input type="checkbox" id="toggleRgbMode" checked onchange="updateSettings()">
@@ -302,49 +450,47 @@
         <span class="slider"></span>
       </label>
     </div>
-  </div>
+    </div>
+    </div>
+  </details>
 
-  <div class="card">
-    <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 12px;">CALIBRATION</div>
+  <details class="card accordion" id="calibrationSection">
+    <summary>Calibration</summary>
+    <div class="accordion-content">
     <div class="toggle-desc" style="margin-bottom:10px">Visual matching only: these patterns do not measure emitted light or change the TV picture settings.</div>
     <div class="btn-row"><button class="secondary-btn" onclick="testPattern('red')">Red</button><button class="secondary-btn" onclick="testPattern('green')">Green</button><button class="secondary-btn" onclick="testPattern('blue')">Blue</button></div>
     <div class="btn-row"><button class="secondary-btn" onclick="testPattern('white')">White</button><button class="secondary-btn" onclick="testPattern('warm-white')">Warm 3000K</button><button class="secondary-btn" onclick="testPattern('daylight-white')">Daylight D65</button></div>
     <div class="btn-row"><button class="secondary-btn" onclick="testPattern('quadrants')">Quadrants</button></div>
     <div class="btn-row"><button class="secondary-btn" onclick="testPattern('perimeter')">4D Tracer</button><button class="secondary-btn" onclick="testPattern('off')">Return to Sync</button></div>
     <div class="toggle-desc" id="calibrationStatus" style="margin-top:12px">Expected RGB shown by selected pattern; 4D tracer advances one white segment at a time.</div>
-  </div>
-
-  <!-- Performance & Hardware Stats -->
-  <div class="card">
-    <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 12px;">SYSTEM STATUS</div>
-    <div class="stats-grid">
-      <div class="stat-box">
-        <div class="stat-title">Philips Hue Bridge</div>
-        <div class="stat-value" id="statHue">Connecting...</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-title">Nanoleaf 4D (NL69)</div>
-        <div class="stat-value" id="statNanoleaf">40 Panels UDP</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-title">Video Capture Driver</div>
-        <div class="stat-value" id="statCapture">libvtcapture (HW)</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-title">Measured Light Updates</div>
-        <div class="stat-value" id="statCadence">0.00 updates/s</div>
-      </div>
     </div>
-  </div>
+  </details>
 
   <div class="btn-row">
     <button class="secondary-btn" onclick="saveSettingsToDisk()">Save to Disk</button>
     <button class="secondary-btn" onclick="restartPipeline()">Restart Pipeline</button>
+    <details class="restart-info"><summary aria-label="About Restart Pipeline">ⓘ</summary><div class="info-tip">Restarts the capture and lighting pipelines. Output pauses briefly; saved configuration remains. Confirm is required before restart.</div></details>
   </div>
 
   <script>
+    document.getElementById('advancedSection').after(document.getElementById('devicesSection'));
     let isSyncing = false;
     let pollTimer = null;
+
+    function setTheme(theme) {
+      if (!['system', 'dark', 'light'].includes(theme)) theme = 'system';
+      if (theme === 'system') delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = theme;
+      document.getElementById('themeSelect').value = theme;
+      try {
+        if (theme === 'system') localStorage.removeItem('lg-hue-sync-theme');
+        else localStorage.setItem('lg-hue-sync-theme', theme);
+      } catch (_) {}
+    }
+
+    let initialTheme = 'system';
+    try { initialTheme = localStorage.getItem('lg-hue-sync-theme') || 'system'; } catch (_) {}
+    setTheme(initialTheme);
 
     // Build LED segment elements in TV preview
     const topLeds = document.getElementById('topLeds');
@@ -482,24 +628,24 @@
       const sub = document.getElementById('statusSubtitle');
       const btn = document.getElementById('toggleBtn');
       const btnText = document.getElementById('toggleText');
+      const tvPower = data.tv_power_state || 'unknown';
 
       if (isSyncing) {
         dot.className = 'status-dot active';
-        sub.innerText = 'Processing ceiling ' + data.fps.toFixed(1) + ' Hz; lights ' + data.light_update_fps.toFixed(1) + ' updates/s';
+        sub.innerText = 'TV ' + tvPower + ' · Processing ' + data.fps.toFixed(1) + ' Hz; lights ' + data.light_update_fps.toFixed(1) + ' updates/s';
         btn.className = 'power-btn active';
-        btnText.innerText = 'PAUSE / STOP SYNC';
+        btnText.innerText = 'SCREEN SYNC ON';
       } else {
         dot.className = 'status-dot';
-        sub.innerText = 'Sync paused. Ready to start.';
+        sub.innerText = 'TV ' + tvPower + ' · Sync paused. Ready to start.';
         btn.className = 'power-btn';
-        btnText.innerText = 'START SYNC';
+        btnText.innerText = 'SCREEN SYNC OFF';
       }
+      btn.setAttribute('aria-checked', String(isSyncing));
 
       document.getElementById('fpsDisplay').innerText = data.light_update_fps.toFixed(1) + ' upd/s';
-      document.getElementById('statCadence').innerText = data.light_update_fps.toFixed(2) + ' updates/s';
       document.getElementById('statHue').innerText = data.hue_connected ? 'Connected @ ' + data.hue_bridge_ip : 'Disconnected';
       document.getElementById('statNanoleaf').innerText = data.nanoleaf_connected ? 'Connected (40 Panels)' : 'Disconnected';
-      document.getElementById('statCapture').innerText = data.capture_hardware ? 'libvtcapture (HW ' + data.capture_resolution + ')' : 'Mock (Fallback)';
       document.getElementById('captureResolution').innerText = data.capture_resolution;
       const settings = data.settings;
       updateHueLightTrims(data.hue_zones, settings.hue_light_trims);
@@ -523,6 +669,7 @@
         document.getElementById('toggleHdr').checked = settings.hdr_tone_mapping;
         document.getElementById('toggleHueSync').checked = settings.hue_sync_enabled;
         document.getElementById('toggleNanoleafSync').checked = settings.nanoleaf_sync_enabled;
+        document.getElementById('toggleAutoTvPower').checked = settings.auto_tv_power;
         document.getElementById('valBrightness').innerText = settings.brightness_multiplier.toFixed(1) + 'x';
         document.getElementById('valHueOutput').innerText = settings.hue_output_brightness.toFixed(2) + 'x';
         document.getElementById('valNanoleafOutput').innerText = settings.nanoleaf_output_brightness.toFixed(2) + 'x';
@@ -599,6 +746,7 @@
       const hdr = document.getElementById('toggleHdr').checked;
       const hueSync = document.getElementById('toggleHueSync').checked;
       const nanoleafSync = document.getElementById('toggleNanoleafSync').checked;
+      const autoTvPower = document.getElementById('toggleAutoTvPower').checked;
 
       document.getElementById('valBrightness').innerText = brightness.toFixed(1) + 'x';
       document.getElementById('valHueOutput').innerText = hueOutputBrightness.toFixed(2) + 'x';
@@ -628,6 +776,7 @@
         hdr_tone_mapping: hdr,
         hue_sync_enabled: hueSync,
         nanoleaf_sync_enabled: nanoleafSync,
+        auto_tv_power: autoTvPower,
         max_color_step: maxColorStep
       };
 
@@ -648,7 +797,7 @@
       updateSettings();
     }
 
-    function applyPreset(name) {
+    async function applyPreset(name) {
       const presets = {
         neutral: { label: 'Neutral Reference', description: 'balanced rise and fade', brightness: 1.0, saturation: 1.0, peak: 0.15, gamma: 1.0, blackGate: 0.02, smoothing: 0.35, rise: 0.35, fall: 0.35, strictBlackout: false, step: 12 },
         highChroma: { label: 'High Chroma', description: 'stronger colour without a fixed palette', brightness: 1.05, saturation: 1.65, peak: 0.25, gamma: 1.0, blackGate: 0.015, smoothing: 0.4, rise: 0.35, fall: 0.4, strictBlackout: false, step: 12 },
@@ -669,7 +818,7 @@
       document.getElementById('toggleStrictBlack').checked = preset.strictBlackout;
       document.querySelectorAll('.preset-btn').forEach(button => button.classList.toggle('active', button.dataset.preset === name));
       document.getElementById('presetStatus').innerText = preset.label + ' applied: ' + preset.description + '. Output trims unchanged.';
-      updateSettings();
+      await updateSettings();
     }
 
     async function saveSettingsToDisk() {
@@ -771,7 +920,92 @@
       if (!res.ok) alert('Unknown calibration pattern.');
     }
 
+    async function registerAgentTools() {
+      const modelContext = document.modelContext;
+      if (!modelContext || typeof modelContext.registerTool !== 'function') return;
+
+      const profiles = ['neutral', 'highChroma', 'neonContrast', 'darkSceneDetail', 'fastResponse', 'lowStimulation'];
+      const outputs = ['screen', 'hue', 'nanoleaf'];
+      const tools = [
+        {
+          name: 'get_ambient_sync_status',
+          title: 'Get ambient sync status',
+          description: 'Read current capture and Hue/Nanoleaf connection status without changing the lights.',
+          inputSchema: { type: 'object', properties: {} },
+          annotations: { readOnlyHint: true },
+          execute: async () => {
+            const response = await fetch('/api/status');
+            if (!response.ok) throw new Error('Could not read sync status.');
+            const status = await response.json();
+            return {
+              syncing: Boolean(status.is_syncing),
+              captureFps: status.fps,
+              lightUpdateFps: status.light_update_fps,
+              hueConnected: Boolean(status.hue_connected),
+              nanoleafConnected: Boolean(status.nanoleaf_connected)
+            };
+          }
+        },
+        {
+          name: 'set_ambient_style',
+          title: 'Set ambient response style',
+          description: 'Changes live video-derived lighting response on enabled outputs. Ask the user before applying.',
+          inputSchema: {
+            type: 'object',
+            properties: { profile: { type: 'string', enum: profiles, description: 'Named response profile to apply.' } },
+            required: ['profile']
+          },
+          annotations: { readOnlyHint: false, consequentialHint: true },
+          execute: async ({ profile }) => {
+            if (!profiles.includes(profile)) throw new Error('Unknown ambient response profile.');
+            const button = Array.from(document.querySelectorAll('.preset-btn')).find(item => item.dataset.preset === profile);
+            if (!button) throw new Error('Ambient response profile is unavailable.');
+            if (!window.confirm(`Apply ${button.textContent.trim()} to enabled lights now?`)) return { applied: false, cancelled: true };
+            await applyPreset(profile);
+            return { applied: true, profile };
+          }
+        },
+        {
+          name: 'set_sync_output',
+          title: 'Enable or disable a sync output',
+          description: 'Changes screen capture, Hue Entertainment, or Nanoleaf 4D sync. Ask the user before changing live output.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              output: { type: 'string', enum: outputs, description: 'Which independent output to change.' },
+              enabled: { type: 'boolean', description: 'Whether this output should run.' }
+            },
+            required: ['output', 'enabled']
+          },
+          annotations: { readOnlyHint: false, consequentialHint: true },
+          execute: async ({ output, enabled }) => {
+            if (!outputs.includes(output) || typeof enabled !== 'boolean') throw new Error('Invalid sync output request.');
+            const labels = { screen: 'screen sync', hue: 'Hue Entertainment', nanoleaf: 'Nanoleaf 4D' };
+            const checkbox = output === 'hue' ? document.getElementById('toggleHueSync') : output === 'nanoleaf' ? document.getElementById('toggleNanoleafSync') : null;
+            const current = output === 'screen' ? isSyncing : checkbox.checked;
+            if (current === enabled) return { changed: false, output, enabled };
+            if (!window.confirm(`${enabled ? 'Enable' : 'disable'} ${labels[output]} now?`)) return { changed: false, cancelled: true };
+            if (output === 'screen') {
+              const response = await fetch(enabled ? '/api/start' : '/api/stop', { method: 'POST' });
+              if (!response.ok) throw new Error('Could not change screen sync.');
+              await pollStatus();
+            } else {
+              checkbox.checked = enabled;
+              await updateSettings();
+            }
+            return { changed: true, output, enabled };
+          }
+        }
+      ];
+
+      for (const tool of tools) {
+        try { await modelContext.registerTool(tool); }
+        catch (error) { console.warn('WebMCP tool registration unavailable; dashboard controls remain usable.', error); }
+      }
+    }
+
     // Initialize polling
+    registerAgentTools();
     pollStatus();
     loadHueAreas();
     setInterval(pollStatus, 400); // 2.5 Hz refresh rate for smooth web visualizer

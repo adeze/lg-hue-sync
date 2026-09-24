@@ -5,12 +5,29 @@ Use `<tv-ip>` explicitly. Never add a private address or populated configuration
 ## Local gate
 
 ```bash
-cargo fmt --all -- --check
-cargo test
-cargo clippy --bin lg-hue-sync -- -D warnings
-perl -0777 -ne 'print $1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -
-git diff --check
+make check
 ```
+
+## Codex project setup
+
+Use the Codex project's **Set up this project** dialog with these values:
+
+- Setup script:
+
+  ```bash
+  cd "$CODEX_WORKTREE_PATH"
+  make setup
+  ```
+
+- Cleanup script: leave blank. Automatic cleanup must not discard Docker's reusable cross-build image and named Cargo/target caches.
+- Variables: `TV_IP=<tv-ip>` and, only when non-default, `SSH_PORT=<port>`. Keep device addresses in project variables, never Git.
+- Actions:
+  - **Update dependencies** — `make deps-update check`
+  - **Build and verify webOS binary** — `make check build`
+  - **Build and transfer to TV** — `make build deploy-bin`
+  - **Clean Docker build caches** — `make cross-clean`
+
+Docker Desktop must be running for build, transfer, and cache-clean actions. The build action recreates the cross-toolchain image and named caches when absent. Transfer preserves the TV's paired `config.json`, verifies the uploaded binary checksum, and restarts the daemon.
 
 ## Target build
 

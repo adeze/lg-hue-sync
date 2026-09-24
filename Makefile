@@ -29,7 +29,7 @@ YELLOW := \033[33m
 RED    := \033[31m
 RESET  := \033[0m
 
-.PHONY: help require-tv cross-image build build-local test test-pattern deps-check deps-update release-check \
+.PHONY: help setup check require-tv cross-image build build-local test test-pattern deps-check deps-update release-check \
         deploy deploy-bin deploy-config deploy-app provision-luna status logs start stop restart \
         test-capture ssh root pair clean cross-clean
 
@@ -43,6 +43,8 @@ help:
 	@printf "  $(GREEN)make clean$(RESET)         Clean host build artifacts\n"
 	@printf "  $(GREEN)make cross-clean$(RESET)   Remove cross-build image and Docker caches\n\n"
 	@printf "$(CYAN)Testing & Validation:$(RESET)\n"
+	@printf "  $(GREEN)make setup$(RESET)         Install host Rust components and fetch locked dependencies\n"
+	@printf "  $(GREEN)make check$(RESET)         Run the complete host validation gate used by CI\n"
 	@printf "  $(GREEN)make test$(RESET)          Run local Rust unit and integration tests\n"
 	@printf "  $(GREEN)make deps-check$(RESET)    Report available compatible dependency updates\n"
 	@printf "  $(GREEN)make deps-update$(RESET)   Update Cargo.lock within Cargo.toml constraints\n"
@@ -68,6 +70,19 @@ help:
 ## build the reusable ARMv7/glibc 2.28 cross-toolchain image
 cross-image:
 	docker build --build-arg RUST_VERSION=$(RUST_VERSION) -t $(CROSS_IMAGE) -f docker/Dockerfile.cross docker
+
+## prepare a local/Codex worktree without building the Docker target image
+setup:
+	rustup component add rustfmt clippy
+	cargo fetch --locked
+
+## run the host validation gate used by CI
+check: release-check
+	cargo fmt --all -- --check
+	cargo test
+	cargo clippy --bin lg-hue-sync -- -D warnings
+	perl -0777 -ne 'print $$1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -
+	git diff --check
 
 ## cross-compile ARMv7 binary matching webOS 6.x glibc 2.28
 build: cross-image

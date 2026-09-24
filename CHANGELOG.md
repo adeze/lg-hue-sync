@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Added Codex project setup and toolbar-action recipes for dependency updates, validation, webOS builds, safe TV transfer, and scoped Docker cache cleanup.
+
 ## [0.4.2] - 2026-09-24
 
 ### Changed

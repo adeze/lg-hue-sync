@@ -1,0 +1,37 @@
+version = 1
+name = "lg-hue-sync"
+
+[setup]
+script = "make setup"
+
+[[actions]]
+name = "update-dependencies"
+icon = "tool"
+command = "make deps-update check"
+
+[[actions]]
+name = "update-rust-toolchain"
+icon = "tool"
+command = "make toolchain-update"
+
+[[actions]]
+name = "build-and-verify"
+icon = "tool"
+command = "make check build"
+
+[[actions]]
+name = "build-and-transfer-to-tv"
+icon = "tool"
+command = '''
+set -euo pipefail
+if [ -f "$HOME/.config/lg-hue-sync/device.env" ]; then
+  . "$HOME/.config/lg-hue-sync/device.env"
+fi
+: "${TV_IP:?Set TV_IP in ~/.config/lg-hue-sync/device.env or the terminal environment}"
+make check build deploy-bin TV_IP="$TV_IP" SSH_PORT="${SSH_PORT:-22}"
+'''
+
+[[actions]]
+name = "clean-docker-builds"
+icon = "tool"
+command = "make cross-clean"

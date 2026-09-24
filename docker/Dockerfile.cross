@@ -1,6 +1,6 @@
 FROM debian:buster
 
-ARG RUST_VERSION=1.98.1
+ARG RUST_VERSION=stable
 ENV RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/cargo-cache \
     PATH=/opt/rust/cargo/bin:${PATH} \

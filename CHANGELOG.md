@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- Added Codex project setup and toolbar-action recipes for dependency updates, validation, webOS builds, safe TV transfer, and scoped Docker cache cleanup.
+- Added a tracked Codex project environment with worktree setup and actions for dependencies, validation, webOS builds, TV transfer, and scoped Docker cache cleanup.
+- Switched the Docker cross-toolchain to Rust stable and added an explicit refresh action that rebuilds its image and validates the ARM binary.
 
 ## [0.4.2] - 2026-09-24
 

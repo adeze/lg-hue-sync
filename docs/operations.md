@@ -10,24 +10,11 @@ make check
 
 ## Codex project setup
 
-Use the Codex project's **Set up this project** dialog with these values:
+Codex loads [`.codex/environments/environment.toml`](../.codex/environments/environment.toml) from this repository. It sets up new worktrees with `make setup` and adds actions to update dependencies, refresh Rust stable, validate/build, transfer to the TV, and clean Docker builds. Leave automatic worktree cleanup empty so reusable Docker caches survive.
 
-- Setup script:
+The transfer action reads `TV_IP=<tv-ip>` from `~/.config/lg-hue-sync/device.env` on the local host, or from its terminal environment. Add `SSH_PORT=<port>` there only if it differs from 22. This file stays outside Git and is not copied into a worktree.
 
-  ```bash
-  cd "$CODEX_WORKTREE_PATH"
-  make setup
-  ```
-
-- Cleanup script: leave blank. Automatic cleanup must not discard Docker's reusable cross-build image and named Cargo/target caches.
-- Variables: `TV_IP=<tv-ip>` and, only when non-default, `SSH_PORT=<port>`. Keep device addresses in project variables, never Git.
-- Actions:
-  - **Update dependencies** — `make deps-update check`
-  - **Build and verify webOS binary** — `make check build`
-  - **Build and transfer to TV** — `make build deploy-bin`
-  - **Clean Docker build caches** — `make cross-clean`
-
-Docker Desktop must be running for build, transfer, and cache-clean actions. The build action recreates the cross-toolchain image and named caches when absent. Transfer preserves the TV's paired `config.json`, verifies the uploaded binary checksum, and restarts the daemon.
+Docker Desktop must be running for toolchain update, build, transfer, and cache-clean actions. Ordinary builds reuse the most recently built stable Rust image; **Update Rust toolchain** refreshes stable Rust on the host, rebuilds the image without Docker's layer cache, then runs host checks and the ARM build. Transfer preserves the TV's paired `config.json`, verifies the uploaded binary checksum, and restarts the daemon.
 
 ## Target build
 
@@ -40,7 +27,7 @@ llvm-readelf --version-info target/armv7-unknown-linux-gnueabi/release/lg-hue-sy
 
 Required result: 32-bit ARM Linux ELF with no required symbol newer than `GLIBC_2.28`. On Linux, GNU `readelf` is equivalent.
 
-`make build` uses `docker/Dockerfile.cross`, which bakes the archived Debian Buster packages, pinned Rust toolchain, ARMv7 target, and linker into `lg-hue-sync-cross`. Cargo registry and target artifacts live in named Docker volumes, so subsequent builds are incremental. `make cross-clean` removes the image and both caches when disk space matters.
+`make build` uses `docker/Dockerfile.cross`, which bakes the archived Debian Buster packages, the stable Rust toolchain, ARMv7 target, and linker into `lg-hue-sync-cross`. The cached image remains at its installed Rust release until `make toolchain-update` refreshes it. Cargo registry and target artifacts live in named Docker volumes, so subsequent builds are incremental. `make cross-clean` removes this project's cross-toolchain images and both caches when disk space matters.
 
 Codex and developers use this same target rather than maintaining separate toolchains. GitHub Actions also runs it on every push to `main`; the ordinary CI job separately checks formatting, host tests, Clippy, and embedded dashboard JavaScript.
 

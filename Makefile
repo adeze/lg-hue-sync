@@ -13,7 +13,7 @@ SSH_PORT       ?= 22
 TARGET         := armv7-unknown-linux-gnueabi
 BINARY         := target/$(TARGET)/release/lg-hue-sync
 REMOTE_DIR     := /var/home/root/lg-hue-sync
-RUST_VERSION   ?= 1.98.1
+RUST_VERSION   ?= stable
 CROSS_IMAGE    ?= lg-hue-sync-cross:rust-$(RUST_VERSION)
 CARGO_CACHE    ?= lg-hue-sync-cargo
 TARGET_CACHE   ?= lg-hue-sync-target
@@ -29,7 +29,7 @@ YELLOW := \033[33m
 RED    := \033[31m
 RESET  := \033[0m
 
-.PHONY: help setup check require-tv cross-image build build-local test test-pattern deps-check deps-update release-check \
+.PHONY: help setup check toolchain-update require-tv cross-image build build-local test test-pattern deps-check deps-update release-check \
         deploy deploy-bin deploy-config deploy-app provision-luna status logs start stop restart \
         test-capture ssh root pair clean cross-clean
 
@@ -38,6 +38,7 @@ help:
 	@printf "$(BOLD)LG Hue Sync — Automation Commands$(RESET)\n\n"
 	@printf "$(CYAN)Build Targets:$(RESET)\n"
 	@printf "  $(GREEN)make cross-image$(RESET)   Build the cached Debian Buster/Rust cross-toolchain image\n"
+	@printf "  $(GREEN)make toolchain-update$(RESET) Refresh stable Rust, rebuild the Docker toolchain, check and build\n"
 	@printf "  $(GREEN)make build$(RESET)         Cross-compile release binary for LG webOS (ARMv7, Debian Buster container)\n"
 	@printf "  $(GREEN)make build-local$(RESET)   Build binary for host OS (macOS) via local cargo\n"
 	@printf "  $(GREEN)make clean$(RESET)         Clean host build artifacts\n"
@@ -70,6 +71,13 @@ help:
 ## build the reusable ARMv7/glibc 2.28 cross-toolchain image
 cross-image:
 	docker build --build-arg RUST_VERSION=$(RUST_VERSION) -t $(CROSS_IMAGE) -f docker/Dockerfile.cross docker
+
+## refresh the stable host and Docker toolchains, then verify the project
+toolchain-update:
+	rustup update stable
+	docker build --pull --no-cache --build-arg RUST_VERSION=$(RUST_VERSION) -t $(CROSS_IMAGE) -f docker/Dockerfile.cross docker
+	docker run --rm $(CROSS_IMAGE) rustc --version
+	$(MAKE) check build
 
 ## prepare a local/Codex worktree without building the Docker target image
 setup:
@@ -215,5 +223,5 @@ clean:
 	cargo clean
 
 cross-clean:
-	-docker image rm $(CROSS_IMAGE)
+	@docker image ls --format '{{.Repository}}:{{.Tag}}' --filter 'reference=lg-hue-sync-cross:rust-*' | while IFS= read -r image; do docker image rm "$$image"; done
 	-docker volume rm $(CARGO_CACHE) $(TARGET_CACHE)

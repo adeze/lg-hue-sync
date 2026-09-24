@@ -4,17 +4,18 @@ set -euo pipefail
 TV_IP="${1:?Usage: ./scripts/install_remote_shortcut.sh <tv-ip> [ssh-port]}"
 SSH_PORT="${2:-22}"
 SSH_OPTS="-p $SSH_PORT -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5"
+VERSION="$(python3 -c 'import json; print(json.load(open("webos-app/appinfo.json"))["version"])')"
 
 echo "[*] Creating webOS quick-toggle app on TV at $TV_IP..."
 
-ssh $SSH_OPTS root@"$TV_IP" 'bash -s' << 'REMOTEEOC'
+ssh $SSH_OPTS root@"$TV_IP" "VERSION='$VERSION' bash -s" << 'REMOTEEOC'
 APP_DIR="/media/developer/apps/usr/palm/applications/com.adeze.lghuesync"
 mkdir -p "$APP_DIR"
 
-cat << 'EOF' > "$APP_DIR/appinfo.json"
+cat << EOF > "$APP_DIR/appinfo.json"
 {
   "id": "com.adeze.lghuesync",
-  "version": "0.4.0",
+  "version": "$VERSION",
   "vendor": "adeze",
   "type": "native",
   "main": "toggle.sh",

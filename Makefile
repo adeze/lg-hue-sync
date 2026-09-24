@@ -29,7 +29,7 @@ YELLOW := \033[33m
 RED    := \033[31m
 RESET  := \033[0m
 
-.PHONY: help require-tv cross-image build build-local test test-pattern deps-check deps-update \
+.PHONY: help require-tv cross-image build build-local test test-pattern deps-check deps-update release-check \
         deploy deploy-bin deploy-config deploy-app provision-luna status logs start stop restart \
         test-capture ssh root pair clean cross-clean
 
@@ -46,6 +46,7 @@ help:
 	@printf "  $(GREEN)make test$(RESET)          Run local Rust unit and integration tests\n"
 	@printf "  $(GREEN)make deps-check$(RESET)    Report available compatible dependency updates\n"
 	@printf "  $(GREEN)make deps-update$(RESET)   Update Cargo.lock within Cargo.toml constraints\n"
+	@printf "  $(GREEN)make release-check$(RESET) Validate version metadata before tagging\n"
 	@printf "  $(GREEN)make test-pattern$(RESET)  Run local rainbow test pattern across Hue and Nanoleaf (Mac -> Lights)\n"
 	@printf "  $(GREEN)make test-capture$(RESET)  Run vtcapture HDMI screen capture probe directly on TV over SSH\n\n"
 	@printf "$(CYAN)Deployment (TV IP: $(TV_IP)):$(RESET)\n"
@@ -95,6 +96,9 @@ deps-check:
 
 deps-update:
 	cargo update
+
+release-check:
+	python3 scripts/check_release.py
 
 ## run live test pattern locally from Mac against Hue and Nanoleaf
 test-pattern:

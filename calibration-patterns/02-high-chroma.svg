@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 3840 2160">
+  <!-- Six full-strength sRGB primaries/secondaries expose hue, gamut, and saturation differences. -->
+  <rect width="1280" height="1080" fill="#ff0000"/>
+  <rect x="1280" width="1280" height="1080" fill="#00ff00"/>
+  <rect x="2560" width="1280" height="1080" fill="#0000ff"/>
+  <rect y="1080" width="1280" height="1080" fill="#00ffff"/>
+  <rect x="1280" y="1080" width="1280" height="1080" fill="#ff00ff"/>
+  <rect x="2560" y="1080" width="1280" height="1080" fill="#ffff00"/>
+</svg>

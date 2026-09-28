@@ -461,13 +461,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             .map(|s| s.panel_count())
             .unwrap_or(0)
     );
-    let _ = sd_notify::notify(
-        true,
-        &[
-            sd_notify::NotifyState::Ready,
-            sd_notify::NotifyState::Status(&status_desc),
-        ],
-    );
+    let _ = sd_notify::notify(&[
+        sd_notify::NotifyState::Ready,
+        sd_notify::NotifyState::Status(&status_desc),
+    ]);
 
     let initial_settings = LiveSettings {
         brightness_multiplier: config.brightness_multiplier,
@@ -577,7 +574,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
         // Feed systemd watchdog every 2 seconds
         if last_watchdog.elapsed() >= Duration::from_secs(2) {
-            let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
+            let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
             last_watchdog = tokio::time::Instant::now();
         }
 
@@ -665,7 +662,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             while running.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 pending_commands.receive(&mut command_rx);
-                let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
+                let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
 
                 let configured_auto_tv_power =
                     shared_state.current_settings.read().unwrap().auto_tv_power;
@@ -1285,7 +1282,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
                 // Sleep 750ms for webOS Display Engine and HDMI PLL/scaler to settle
                 tokio::time::sleep(Duration::from_millis(750)).await;
-                let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Watchdog]);
+                let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
 
                 // Auto-adapt to new source refresh rate if enabled
                 if config.fps == 0 {

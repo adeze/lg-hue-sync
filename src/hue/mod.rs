@@ -7,7 +7,9 @@ use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 use tracing::info;
 
@@ -32,11 +34,14 @@ pub struct EntertainmentAreaSummary {
 pub fn discover_bridge() -> Result<String> {
     info!("Searching for Hue Bridge via discovery.meethue.com...");
     let resp = ureq::get("https://discovery.meethue.com/")
-        .set("User-Agent", "lg-hue-sync/0.1.0")
+        .header("User-Agent", "lg-hue-sync/0.1.0")
         .call()
         .context("Failed to query Hue discovery API")?;
 
-    let json: Value = resp.into_json().context("Failed to parse discovery JSON")?;
+    let json: Value = resp
+        .into_body()
+        .read_json()
+        .context("Failed to parse discovery JSON")?;
     if let Some(arr) = json.as_array() {
         if let Some(first) = arr.first() {
             if let Some(ip) = first.get("internalipaddress").and_then(|v| v.as_str()) {
@@ -72,11 +77,11 @@ pub fn pair_bridge(
 
     while start.elapsed() < Duration::from_secs(timeout_secs) {
         let resp = ureq::post(&url)
-            .set("Content-Type", "application/json")
+            .header("Content-Type", "application/json")
             .send_json(payload.clone());
 
         if let Ok(r) = resp {
-            if let Ok(Value::Array(items)) = r.into_json::<Value>() {
+            if let Ok(Value::Array(items)) = r.into_body().read_json::<Value>() {
                 if let Some(first) = items.first() {
                     if let Some(success) = first.get("success") {
                         username = success
@@ -240,6 +245,10 @@ fn v2_request(
         .ok_or_else(|| anyhow!("Hue Bridge address did not resolve"))?;
     let tcp = TcpStream::connect_timeout(&address, Duration::from_secs(5))
         .context("Failed to connect to Hue Bridge HTTPS endpoint")?;
+    tcp.set_read_timeout(Some(Duration::from_secs(5)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let _deadline_guard = SocketDeadline::new(&tcp, deadline)?;
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     // The local bridge presents a self-signed certificate. Verification below pins its SHA-256 DER fingerprint.
     builder.set_verify(SslVerifyMode::NONE);
@@ -280,8 +289,13 @@ fn v2_request(
     if let Some(body) = body {
         stream.write_all(&body)?;
     }
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
+    let response = read_bounded_response(
+        |buffer, remaining| {
+            stream.get_ref().set_read_timeout(Some(remaining))?;
+            stream.read(buffer)
+        },
+        deadline,
+    )?;
     let header_end = response
         .windows(4)
         .position(|bytes| bytes == b"\r\n\r\n")
@@ -301,6 +315,62 @@ fn v2_request(
     }
     let body = decode_http_body(headers, &response[header_end + 4..])?;
     Ok((serde_json::from_slice(&body)?, certificate_sha256))
+}
+
+struct SocketDeadline {
+    cancel: mpsc::Sender<()>,
+    watchdog: Option<thread::JoinHandle<()>>,
+}
+
+impl SocketDeadline {
+    fn new(stream: &TcpStream, deadline: Instant) -> std::io::Result<Self> {
+        let stream = stream.try_clone()?;
+        let (cancel, receiver) = mpsc::channel();
+        // ponytail: one watchdog thread per request; use nonblocking I/O if request rate grows.
+        let watchdog = thread::spawn(move || {
+            if receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                == Err(RecvTimeoutError::Timeout)
+            {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        });
+        Ok(Self {
+            cancel,
+            watchdog: Some(watchdog),
+        })
+    }
+}
+
+impl Drop for SocketDeadline {
+    fn drop(&mut self) {
+        let _ = self.cancel.send(());
+        if let Some(watchdog) = self.watchdog.take() {
+            let _ = watchdog.join();
+        }
+    }
+}
+
+fn read_bounded_response(
+    mut read: impl FnMut(&mut [u8], Duration) -> std::io::Result<usize>,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+    let mut response = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!("Hue Bridge HTTPS response timed out"));
+        }
+        let count = read(&mut buffer, remaining)?;
+        if count == 0 {
+            return Ok(response);
+        }
+        if response.len() + count > MAX_RESPONSE_BYTES {
+            return Err(anyhow!("Hue Bridge HTTPS response exceeded 4 MiB"));
+        }
+        response.extend_from_slice(&buffer[..count]);
+    }
 }
 
 fn decode_http_body(headers: &str, body: &[u8]) -> Result<Vec<u8>> {
@@ -518,6 +588,45 @@ fn zones_from_v2_configuration(
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    #[test]
+    fn v2_deadline_closes_stalled_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let _guard =
+            SocketDeadline::new(&client, Instant::now() + Duration::from_millis(50)).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(server.read(&mut [0; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn bounded_v2_response_preserves_small_replies_and_rejects_stalls_and_oversize() {
+        let mut valid = std::io::Cursor::new(b"HTTP/1.1 200 OK\r\n\r\n{}".as_slice());
+        let response = read_bounded_response(
+            |buffer, _| valid.read(buffer),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(response, b"HTTP/1.1 200 OK\r\n\r\n{}");
+
+        let mut oversized = std::io::Cursor::new(vec![b'x'; 4 * 1024 * 1024 + 1]);
+        let error = read_bounded_response(
+            |buffer, _| oversized.read(buffer),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeded 4 MiB"));
+
+        let error = read_bounded_response(
+            |_, _| panic!("expired response must not be read"),
+            Instant::now() - Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+    }
 
     #[test]
     fn decodes_chunked_v2_response_body() {

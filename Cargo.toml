@@ -22,10 +22,10 @@ anyhow = "1.0"
 thiserror = "2.0"
 axum = { version = "0.8", features = ["json"] }
 byteorder = "1.5"
-ureq = { version = "2.9", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 openssl = { version = "0.10", features = ["vendored"] }
-libloading = "0.8"
-sd-notify = "0.4"
+libloading = "0.9"
+sd-notify = "0.5"
 libc = "0.2"
 
 [profile.release]

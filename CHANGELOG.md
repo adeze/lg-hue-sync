@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Updated `ureq` to 3, `sd-notify` to 0.5, and `libloading` to 0.9, migrating their HTTP, notification, and library-loading call sites.
 - Added a tracked Codex project environment with worktree setup and actions for dependencies, validation, webOS builds, TV transfer, and scoped Docker cache cleanup.
 - Switched the Docker cross-toolchain to Rust stable and added an explicit refresh action that rebuilds its image and validates the ARM binary.
 

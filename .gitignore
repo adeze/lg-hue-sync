@@ -25,3 +25,6 @@ dejavuln_payload/
 .vscode/
 .idea/
 *.log
+
+# Generated from the current user's private Hue Entertainment Area layout
+/calibration-patterns/local/

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 3840 2160">
+  <!-- Nominal sRGB stimulus. Each tile is 960 x 720; no UI chrome contaminates edge samples. -->
+  <rect width="960" height="720" fill="#ff0000"/>
+  <rect x="960" width="960" height="720" fill="#ff8000"/>
+  <rect x="1920" width="960" height="720" fill="#ffff00"/>
+  <rect x="2880" width="960" height="720" fill="#80ff00"/>
+  <rect y="720" width="960" height="720" fill="#ff00ff"/>
+  <rect x="960" y="720" width="960" height="720" fill="#ffffff"/>
+  <rect x="1920" y="720" width="960" height="720" fill="#00ffff"/>
+  <rect x="2880" y="720" width="960" height="720" fill="#00ff00"/>
+  <rect y="1440" width="960" height="720" fill="#0000ff"/>
+  <rect x="960" y="1440" width="960" height="720" fill="#8000ff"/>
+  <rect x="1920" y="1440" width="960" height="720" fill="#008080"/>
+  <rect x="2880" y="1440" width="960" height="720" fill="#808080"/>
+</svg>

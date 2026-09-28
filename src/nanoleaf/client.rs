@@ -43,12 +43,12 @@ pub fn pair_nanoleaf(ip: &str, timeout_secs: u64) -> Result<(String, u16, Vec<u1
 
     while start.elapsed() < Duration::from_secs(timeout_secs) {
         let resp = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .call();
+            .header("Content-Type", "application/json")
+            .send_empty();
 
         match resp {
             Ok(r) => {
-                if let Ok(json) = r.into_json::<Value>() {
+                if let Ok(json) = r.into_body().read_json::<Value>() {
                     if let Some(token) = json.get("auth_token").and_then(|v| v.as_str()) {
                         auth_token = token.to_string();
                         println!("\n[+] Successfully paired with Nanoleaf controller!");
@@ -56,7 +56,7 @@ pub fn pair_nanoleaf(ip: &str, timeout_secs: u64) -> Result<(String, u16, Vec<u1
                     }
                 }
             }
-            Err(ureq::Error::Status(403, _)) => {
+            Err(ureq::Error::StatusCode(403)) => {
                 // Not in pairing mode yet
                 print!(".");
                 use std::io::Write;
@@ -99,12 +99,13 @@ pub fn get_panel_layout(ip: &str, auth_token: &str) -> Result<PanelLayout> {
         ip, auth_token
     );
     let resp = ureq::get(&url)
-        .set("Content-Type", "application/json")
+        .header("Content-Type", "application/json")
         .call()
         .with_context(|| format!("Failed to fetch panel layout from {}", url))?;
 
     let layout: PanelLayout = resp
-        .into_json()
+        .into_body()
+        .read_json()
         .with_context(|| "Failed to parse Nanoleaf panel layout JSON")?;
 
     Ok(layout)
@@ -126,15 +127,19 @@ pub fn enable_external_control(ip: &str, auth_token: &str) -> Result<u16> {
         "Enabling Nanoleaf external control (UDP v2) mode on {}...",
         ip
     );
-    let resp = ureq::put(&url)
-        .timeout(Duration::from_secs(3))
-        .set("Content-Type", "application/json")
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .build()
+        .into();
+    let resp = agent
+        .put(&url)
+        .header("Content-Type", "application/json")
         .send_json(payload)
         .with_context(|| format!("Failed to enable extControl on {}", url))?;
 
     let default_port = 60222u16;
     // Some firmwares return UDP details in the response body or headers
-    if let Ok(val) = resp.into_json::<Value>() {
+    if let Ok(val) = resp.into_body().read_json::<Value>() {
         if let Some(port) = val.get("streamControlPort").and_then(|v| v.as_u64()) {
             info!("Nanoleaf specified streamControlPort: {}", port);
             return Ok(port as u16);

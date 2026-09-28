@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 3840 2160">
+  <!-- Equal-channel sRGB patches reveal visible color casts, not measured Kelvin accuracy. -->
+  <rect width="960" height="2160" fill="#ffffff"/>
+  <rect x="960" width="960" height="2160" fill="#e0e0e0"/>
+  <rect x="1920" width="960" height="2160" fill="#808080"/>
+  <rect x="2880" width="960" height="2160" fill="#202020"/>
+</svg>

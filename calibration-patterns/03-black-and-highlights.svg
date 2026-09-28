@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 3840 2160">
+  <!-- Left half stays black; isolated highlights reveal spill into black-mapped lights. -->
+  <rect width="3840" height="2160" fill="#000000"/>
+  <rect x="1920" width="960" height="1080" fill="#080808"/>
+  <rect x="2880" width="960" height="1080" fill="#202020"/>
+  <rect x="2112" y="1350" width="576" height="270" fill="#00ffff"/>
+  <rect x="3072" y="1350" width="576" height="270" fill="#ffb000"/>
+  <rect x="3180" y="1760" width="360" height="180" fill="#e0e0e0"/>
+</svg>

@@ -76,6 +76,8 @@ cargo run -- run --config config.json
 
 Pairing and patterns affect physical devices. Use them only when the owner expects light output.
 
+For screen-to-light mapping checks, display the [4K calibration images](calibration-patterns/README.md) through the viewing HDMI source. Unlike the dashboard's direct light tests, these exercise capture and video-derived sampling.
+
 ## Configuration
 
 Start from [config.example.json](config.example.json), or pair through the dashboard. Runtime configuration contains secrets and stays untracked. On the TV:

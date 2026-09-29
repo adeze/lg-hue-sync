@@ -13,7 +13,7 @@ Native ambient-light synchronization for rooted LG webOS TVs. A Rust daemon capt
 - Hue Entertainment API v2 over DTLS 1.2 PSK, including gradient member identity.
 - Nanoleaf 4D UDP streaming with 40-panel corner, direction, and offset alignment.
 - Independent Hue/Nanoleaf controls; TV sleep/wake following can be automatic or manual.
-- Letterbox-aware sampling, HDR compression, OLED black gating, smoothing, and bounded scene changes.
+- Letterbox-aware sampling, an optional legacy midtone lift, OLED black gating, smoothing, and bounded scene changes.
 - Responsive dashboard at `http://<tv-ip>:8088/` with system, dark, and light themes.
 
 ## Limits and safety
@@ -44,6 +44,8 @@ file target/armv7-unknown-linux-gnueabi/release/lg-hue-sync
 The canonical target build uses Debian Buster to stay within the LG C1/webOS 6 glibc ceiling. A macOS host build is useful for tests, but cannot run on the TV.
 
 The official community [webosbrew/native-toolchain](https://github.com/webosbrew/native-toolchain) remains the reference webOS SDK. It currently cannot link this Rust dependency graph because its libc lacks `getauxval`, required by Rust's supported ARM standard library and `ring`; see [docs/operations.md](docs/operations.md) for the re-evaluation gate.
+
+Apple Shortcuts can apply a dashboard preset over the trusted LAN with a `POST` request to `http://<tv-ip>:8088/api/presets/<name>`; see [docs/operations.md](docs/operations.md#apple-shortcuts-and-presets). Preset changes are live until saved.
 
 ## Install and update
 
@@ -76,7 +78,7 @@ cargo run -- run --config config.json
 
 Pairing and patterns affect physical devices. Use them only when the owner expects light output.
 
-For screen-to-light mapping checks, display the [4K calibration images](calibration-patterns/README.md) through the viewing HDMI source. Unlike the dashboard's direct light tests, these exercise capture and video-derived sampling.
+For screen-to-light mapping checks, display the [4K calibration images or selectable browser patches](calibration-patterns/README.md) through the viewing HDMI source. Unlike the dashboard's direct light tests, these exercise capture and video-derived sampling.
 
 ## Configuration
 
@@ -101,8 +103,11 @@ docs/                architecture, operations, release runbooks
 Useful implementation references:
 
 - [webosbrew/native-toolchain](https://github.com/webosbrew/native-toolchain) — webOS sysroot/toolchain reference.
+- [openlgtv/buildroot-nc4](https://github.com/openlgtv/buildroot-nc4) — Buildroot source behind the community SDK, not a drop-in Rust linker fix.
+- [webosbrew/webos-userland](https://github.com/webosbrew/webos-userland/tree/main) and its [API reference](https://www.webosbrew.org/webos-userland/index.html) — community stub headers and libraries for native LG userland APIs; validate symbols and behavior on the target firmware.
 - [webosbrew/hyperhdr-webos-loader](https://github.com/webosbrew/hyperhdr-webos-loader) — app/service packaging and lifecycle reference.
 - [webosbrew/ares-cli-rs](https://github.com/webosbrew/ares-cli-rs) — packaging, install, shell, and transfer tooling.
+- [HyperHDR](https://github.com/awawa-dev/HyperHDR) — reference for colour precision, temporal smoothing, source calibration, and stage metrics; adapt only after measuring this TV's pipeline.
 - [webosbrew/apps-repo](https://github.com/webosbrew/apps-repo) — Homebrew Channel submission format.
 
 ## Contributing

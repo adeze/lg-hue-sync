@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use byteorder::{BigEndian, ByteOrder};
 use std::net::{SocketAddr, UdpSocket};
+use std::time::Instant;
 use tracing::error;
 
 use crate::{
-    color::{ActiveRect, ColorProcessor, RgbColor},
+    color::{zones::REFERENCE_FRAME, ActiveRect, ColorProcessor, RgbColor},
     config::{NanoleafAlignment, NanoleafStartCorner},
 };
 
@@ -116,6 +117,7 @@ pub struct NanoleafPerimeterSampler {
     active_rect: Option<ActiveRect>,
     processor: ColorProcessor,
     brightness_multiplier: f32,
+    last_sample: Option<Instant>,
 }
 
 impl NanoleafPerimeterSampler {
@@ -171,6 +173,7 @@ impl NanoleafPerimeterSampler {
                 noise_gate_threshold,
             ),
             brightness_multiplier,
+            last_sample: None,
         };
         sampler.set_alignment(alignment);
         sampler
@@ -205,6 +208,7 @@ impl NanoleafPerimeterSampler {
             })
             .collect();
         self.smoothed_colors = vec![RgbColor::new(0, 0, 0); len];
+        self.last_sample = None;
     }
 
     /// Builds 40 dedicated perimeter sampling zones calibrated to the exact physical
@@ -505,6 +509,12 @@ impl NanoleafPerimeterSampler {
         is_bgra: bool,
         is_scene_cut: bool,
     ) -> Vec<RgbColor> {
+        let now = Instant::now();
+        let elapsed = self
+            .last_sample
+            .replace(now)
+            .map(|last| now.duration_since(last))
+            .unwrap_or(REFERENCE_FRAME);
         let (act_x_min, act_x_max, act_y_min, act_y_max) = match self.active_rect {
             Some(rect) => (rect.x_min, rect.x_max, rect.y_min, rect.y_max),
             None => (0.0, 1.0, 0.0, 1.0),
@@ -580,9 +590,14 @@ impl NanoleafPerimeterSampler {
             };
 
             let current = self.smoothed_colors[i];
-            let smoothed =
-                self.processor
-                    .process(mean_color, peak_pixel, max_luma, current, is_scene_cut);
+            let smoothed = self.processor.process(
+                mean_color,
+                peak_pixel,
+                max_luma,
+                current,
+                is_scene_cut,
+                elapsed,
+            );
             self.smoothed_colors[i] = smoothed;
 
             result.push(smoothed.scale(self.brightness_multiplier));

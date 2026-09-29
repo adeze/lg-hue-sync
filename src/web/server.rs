@@ -1,6 +1,6 @@
 use crate::{
     color::RgbColor,
-    config::{Config, ConfigError, LightZone, NanoleafAlignment, NanoleafConfig},
+    config::{Config, LightZone, NanoleafAlignment, NanoleafConfig},
     hue, nanoleaf,
 };
 use axum::{
@@ -16,20 +16,21 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info};
 
 pub const EMBEDDED_UI_HTML: &str = include_str!("ui.html");
+const CAPTURE_PATTERNS_HTML: &str = include_str!("../../calibration-patterns/capture.html");
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ControlCommand {
     Start,
     Stop,
     Restart,
     Reconfigure,
     SyncBridge,
-    SaveConfig,
+    SaveConfig(oneshot::Sender<Result<(), String>>),
     ApplySettings(LiveSettings),
 }
 
@@ -74,6 +75,118 @@ fn default_true() -> bool {
 
 fn default_smoothing_factor() -> f32 {
     0.35
+}
+
+impl LiveSettings {
+    fn validate(&self) -> Result<(), ApiError> {
+        let ranges = [
+            (
+                "brightness_multiplier",
+                self.brightness_multiplier,
+                0.5,
+                2.5,
+            ),
+            (
+                "hue_output_brightness",
+                self.hue_output_brightness,
+                0.25,
+                2.0,
+            ),
+            (
+                "nanoleaf_output_brightness",
+                self.nanoleaf_output_brightness,
+                0.25,
+                2.0,
+            ),
+            ("saturation_boost", self.saturation_boost, 1.0, 2.5),
+            ("peak_weight", self.peak_weight, 0.0, 0.8),
+            ("gamma", self.gamma, 0.8, 2.0),
+            ("noise_gate_threshold", self.noise_gate_threshold, 0.0, 0.06),
+            ("smoothing_factor", self.smoothing_factor, 0.05, 0.8),
+            (
+                "rise_smoothing_factor",
+                self.rise_smoothing_factor,
+                0.05,
+                0.8,
+            ),
+            (
+                "fall_smoothing_factor",
+                self.fall_smoothing_factor,
+                0.05,
+                0.8,
+            ),
+        ];
+        for (name, value, min, max) in ranges {
+            if !value.is_finite() || !(min..=max).contains(&value) {
+                return Err(ApiError::BadRequest(format!(
+                    "{name} must be between {min} and {max}"
+                )));
+            }
+        }
+        if !(4..=64).contains(&self.max_color_step) {
+            return Err(ApiError::BadRequest(
+                "max_color_step must be between 4 and 64".to_string(),
+            ));
+        }
+        if self.nanoleaf_alignment.perimeter_offset >= 40 {
+            return Err(ApiError::BadRequest(
+                "Nanoleaf perimeter offset must be between 0 and 39".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct Preset {
+    brightness: f32,
+    saturation: f32,
+    peak: f32,
+    gamma: f32,
+    black_gate: f32,
+    smoothing: f32,
+    rise: f32,
+    fall: f32,
+    strict_blackout: bool,
+    max_color_step: u8,
+}
+
+impl Preset {
+    fn named(name: &str) -> Result<Self, ApiError> {
+        let values = match name {
+            "neutral" => (1.0, 1.0, 0.15, 1.0, 0.02, 0.35, 0.35, 0.35, false, 12),
+            "highChroma" => (1.05, 1.65, 0.25, 1.0, 0.015, 0.4, 0.35, 0.4, false, 12),
+            "neonContrast" => (1.0, 2.0, 0.45, 1.15, 0.035, 0.55, 0.45, 0.7, true, 10),
+            "darkSceneDetail" => (0.8, 1.2, 0.3, 1.18, 0.04, 0.5, 0.3, 0.7, true, 8),
+            "fastResponse" => (1.1, 1.35, 0.35, 1.0, 0.015, 0.65, 0.65, 0.7, false, 14),
+            "lowStimulation" => (0.55, 1.0, 0.1, 1.05, 0.025, 0.2, 0.18, 0.22, false, 6),
+            _ => return Err(ApiError::BadRequest(format!("Unknown preset: {name}"))),
+        };
+        Ok(Self {
+            brightness: values.0,
+            saturation: values.1,
+            peak: values.2,
+            gamma: values.3,
+            black_gate: values.4,
+            smoothing: values.5,
+            rise: values.6,
+            fall: values.7,
+            strict_blackout: values.8,
+            max_color_step: values.9,
+        })
+    }
+
+    fn apply(self, settings: &mut LiveSettings) {
+        settings.brightness_multiplier = self.brightness;
+        settings.saturation_boost = self.saturation;
+        settings.peak_weight = self.peak;
+        settings.gamma = self.gamma;
+        settings.noise_gate_threshold = self.black_gate;
+        settings.smoothing_factor = self.smoothing;
+        settings.rise_smoothing_factor = self.rise;
+        settings.fall_smoothing_factor = self.fall;
+        settings.strict_blackout = self.strict_blackout;
+        settings.max_color_step = self.max_color_step;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -135,6 +248,7 @@ pub struct SharedState {
     pub tv_power_state: AtomicU32,
     pub capture_resolution: RwLock<String>,
     pub current_settings: RwLock<LiveSettings>,
+    settings_update_lock: Mutex<()>,
     pub live_hue_colors: RwLock<Vec<(u8, RgbColor)>>,
     pub live_nanoleaf_colors: RwLock<Vec<RgbColor>>,
     pub hue_zones: RwLock<Vec<LightZone>>,
@@ -163,6 +277,7 @@ impl SharedState {
             tv_power_state: AtomicU32::new(0),
             capture_resolution: RwLock::new(capture_res),
             current_settings: RwLock::new(initial_settings),
+            settings_update_lock: Mutex::new(()),
             live_hue_colors: RwLock::new(Vec::new()),
             live_nanoleaf_colors: RwLock::new(Vec::new()),
             hue_zones: RwLock::new(hue_zones),
@@ -203,6 +318,28 @@ impl SharedState {
             .send(command)
             .await
             .map_err(|_| ApiError::SetupFailed("sync controller is unavailable".to_string()))
+    }
+
+    async fn apply_settings(&self, settings: LiveSettings) -> Result<(), ApiError> {
+        self.update_settings(|current| *current = settings).await
+    }
+
+    async fn update_settings(
+        &self,
+        update: impl FnOnce(&mut LiveSettings) + Send,
+    ) -> Result<(), ApiError> {
+        let _guard = self.settings_update_lock.lock().await;
+        let mut settings = self.current_settings.read().unwrap().clone();
+        update(&mut settings);
+        settings.validate()?;
+        let permit = self
+            .command_tx
+            .reserve()
+            .await
+            .map_err(|_| ApiError::SetupFailed("sync controller is unavailable".to_string()))?;
+        *self.current_settings.write().unwrap() = settings.clone();
+        permit.send(ControlCommand::ApplySettings(settings));
+        Ok(())
     }
 }
 
@@ -283,11 +420,13 @@ pub async fn start_web_server(
     let app = Router::new()
         .route("/", get(root))
         .route("/index.html", get(root))
+        .route("/capture-patterns", get(capture_patterns))
         .route("/api/status", get(status))
         .route("/api/start", post(start))
         .route("/api/stop", post(stop))
         .route("/api/toggle", post(toggle))
         .route("/api/settings", post(settings))
+        .route("/api/presets/{name}", post(apply_preset))
         .route("/api/nanoleaf/alignment", post(update_nanoleaf_alignment))
         .route("/api/hue/areas", get(hue_areas))
         .route("/api/hue/area", post(select_hue_area))
@@ -314,6 +453,10 @@ pub async fn start_web_server(
 
 async fn root() -> Html<&'static str> {
     Html(EMBEDDED_UI_HTML)
+}
+
+async fn capture_patterns() -> Html<&'static str> {
+    Html(CAPTURE_PATTERNS_HTML)
 }
 
 async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
@@ -369,10 +512,19 @@ async fn settings(
     State(state): State<AppState>,
     Json(settings): Json<LiveSettings>,
 ) -> Result<Json<StatusMessage>, ApiError> {
-    *state.shared.current_settings.write().unwrap() = settings.clone();
+    settings.validate()?;
+    state.shared.apply_settings(settings).await?;
+    Ok(Json(StatusMessage { status: "ok" }))
+}
+
+async fn apply_preset(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<StatusMessage>, ApiError> {
+    let preset = Preset::named(&name)?;
     state
         .shared
-        .send_command(ControlCommand::ApplySettings(settings))
+        .update_settings(|settings| preset.apply(settings))
         .await?;
     Ok(Json(StatusMessage { status: "ok" }))
 }
@@ -388,34 +540,39 @@ async fn update_nanoleaf_alignment(
     }
     let config_path = state.config_path.clone();
     tokio::task::spawn_blocking(move || {
-        let mut config = load_setup_config(&config_path)?;
-        let nanoleaf = config
-            .nanoleaf
-            .as_mut()
-            .ok_or_else(|| "Pair a Nanoleaf 4D before applying its alignment".to_string())?;
-        nanoleaf.alignment = alignment;
-        config.save(&config_path).map_err(|error| error.to_string())
+        Config::update(&config_path, None, |config| {
+            let nanoleaf = config.nanoleaf.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("Pair a Nanoleaf 4D before applying its alignment")
+            })?;
+            nanoleaf.alignment = alignment;
+            Ok(())
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| ApiError::SetupFailed(format!("Nanoleaf alignment task failed: {error}")))?
     .map_err(ApiError::SetupFailed)?;
-    let settings = {
-        let mut settings = state.shared.current_settings.write().unwrap();
-        settings.nanoleaf_alignment = alignment;
-        settings.clone()
-    };
     state
         .shared
-        .send_command(ControlCommand::ApplySettings(settings))
+        .update_settings(|settings| settings.nanoleaf_alignment = alignment)
         .await?;
     Ok(Json(StatusMessage { status: "saved" }))
 }
 
 async fn save_config(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
+    let (ack_tx, ack_rx) = oneshot::channel();
     state
         .shared
-        .send_command(ControlCommand::SaveConfig)
+        .send_command(ControlCommand::SaveConfig(ack_tx))
         .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx)
+        .await
+        .map_err(|_| ApiError::SetupFailed("config save timed out".to_string()))?
+        .map_err(|_| {
+            ApiError::SetupFailed("sync controller stopped before saving config".to_string())
+        })?
+        .map_err(ApiError::SetupFailed)?;
     Ok(Json(StatusMessage { status: "saved" }))
 }
 
@@ -476,7 +633,7 @@ async fn select_hue_area(
     }
     let config_path = state.config_path.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let mut config = Config::load(&config_path).map_err(|error| error.to_string())?;
+        let config = Config::load(&config_path).map_err(|error| error.to_string())?;
         if config.bridge_ip.is_empty() || config.username.is_empty() {
             return Err("Pair a Hue Bridge before selecting an Entertainment Area".to_string());
         }
@@ -487,11 +644,21 @@ async fn select_hue_area(
             config.hue_bridge_certificate_sha256.as_deref(),
         )
         .map_err(|error| error.to_string())?;
-        config.entertainment_area_id = area.configuration_id.clone();
-        config.entertainment_configuration_id = Some(area.configuration_id);
-        config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
-        config.zones = area.zones;
-        config.save(&config_path).map_err(|error| error.to_string())
+        Config::update(&config_path, None, |current| {
+            if current.bridge_ip != config.bridge_ip
+                || current.username != config.username
+                || current.hue_bridge_certificate_sha256 != config.hue_bridge_certificate_sha256
+            {
+                anyhow::bail!("Hue Bridge configuration changed during area selection; retry");
+            }
+            current.entertainment_area_id = area.configuration_id.clone();
+            current.entertainment_configuration_id = Some(area.configuration_id);
+            current.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
+            current.zones = area.zones;
+            Ok(())
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| ApiError::SetupFailed(format!("Hue area selection failed: {error}")))?;
@@ -528,17 +695,24 @@ async fn pair_hue(
         };
         let (username, clientkey, area) =
             hue::pair_bridge(&bridge_ip, 45).map_err(|error| error.to_string())?;
-        let mut config = load_setup_config(&config_path)?;
-        config.bridge_ip = bridge_ip;
-        config.username = username;
-        config.clientkey = clientkey;
-        config.hue_enabled = true;
-        config.hue_sync_enabled = true;
-        config.entertainment_area_id = area.configuration_id.clone();
-        config.entertainment_configuration_id = Some(area.configuration_id);
-        config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
-        config.zones = area.zones;
-        config.save(&config_path).map_err(|error| error.to_string())
+        Config::update(
+            &config_path,
+            Some(Config::new_default("", "", "", "")),
+            |config| {
+                config.bridge_ip = bridge_ip;
+                config.username = username;
+                config.clientkey = clientkey;
+                config.hue_enabled = true;
+                config.hue_sync_enabled = true;
+                config.entertainment_area_id = area.configuration_id.clone();
+                config.entertainment_configuration_id = Some(area.configuration_id);
+                config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
+                config.zones = area.zones;
+                Ok(())
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| ApiError::SetupFailed(format!("Hue pairing task failed: {error}")))?;
@@ -562,20 +736,24 @@ async fn pair_nanoleaf(
         let ip = validate_device_ip(&ip)?;
         let (auth_token, segments, panel_ids) =
             nanoleaf::pair_nanoleaf(&ip, 45).map_err(|error| error.to_string())?;
-        let mut config = load_setup_config(&config_path)?;
-        config.nanoleaf = Some(NanoleafConfig {
-            enabled: true,
-            ip: ip.clone(),
-            auth_token,
-            udp_port: 60222,
-            segments: segments.max(30),
-            panel_ids,
-            alignment: NanoleafAlignment::default(),
-        });
-        config.nanoleaf_sync_enabled = true;
-        config
-            .save(&config_path)
-            .map_err(|error| error.to_string())?;
+        Config::update(
+            &config_path,
+            Some(Config::new_default("", "", "", "")),
+            |config| {
+                config.nanoleaf = Some(NanoleafConfig {
+                    enabled: true,
+                    ip: ip.clone(),
+                    auth_token,
+                    udp_port: 60222,
+                    segments: segments.max(30),
+                    panel_ids,
+                    alignment: NanoleafAlignment::default(),
+                });
+                config.nanoleaf_sync_enabled = true;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
         Ok::<_, String>(ip)
     })
     .await
@@ -600,12 +778,126 @@ fn validate_device_ip(value: &str) -> Result<String, String> {
     Ok(ip.to_string())
 }
 
-fn load_setup_config(path: &PathBuf) -> Result<Config, String> {
-    match Config::load(path) {
-        Ok(config) => Ok(config),
-        Err(ConfigError::Open { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-            Ok(Config::new_default("", "", "", ""))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings() -> LiveSettings {
+        LiveSettings {
+            brightness_multiplier: 1.0,
+            hue_output_brightness: 1.0,
+            nanoleaf_output_brightness: 1.0,
+            saturation_boost: 1.5,
+            peak_weight: 0.35,
+            gamma: 1.0,
+            noise_gate_threshold: 0.02,
+            smoothing_factor: 0.35,
+            rise_smoothing_factor: 0.35,
+            fall_smoothing_factor: 0.35,
+            strict_blackout: false,
+            use_xy_gamut: false,
+            letterbox_detection: true,
+            hdr_tone_mapping: false,
+            hue_sync_enabled: true,
+            nanoleaf_sync_enabled: true,
+            auto_tv_power: true,
+            nanoleaf_alignment: NanoleafAlignment::default(),
+            max_color_step: 12,
         }
-        Err(error) => Err(error.to_string()),
+    }
+
+    #[test]
+    fn rejects_out_of_range_dashboard_settings() {
+        let mut input = settings();
+        assert!(input.validate().is_ok());
+        input.gamma = -1.0;
+        assert!(matches!(input.validate(), Err(ApiError::BadRequest(_))));
+        input.gamma = 1.0;
+        input.nanoleaf_alignment.perimeter_offset = 40;
+        assert!(matches!(input.validate(), Err(ApiError::BadRequest(_))));
+    }
+
+    #[test]
+    fn preset_changes_only_shared_color_controls() {
+        for name in [
+            "neutral",
+            "highChroma",
+            "neonContrast",
+            "darkSceneDetail",
+            "fastResponse",
+            "lowStimulation",
+        ] {
+            let mut candidate = settings();
+            Preset::named(name).unwrap().apply(&mut candidate);
+            assert!(candidate.validate().is_ok(), "{name}");
+        }
+        let mut input = settings();
+        input.hue_output_brightness = 0.7;
+        input.nanoleaf_output_brightness = 0.8;
+        input.hue_sync_enabled = false;
+        input.nanoleaf_alignment.perimeter_offset = 7;
+        Preset::named("neonContrast").unwrap().apply(&mut input);
+        assert_eq!(input.saturation_boost, 2.0);
+        assert_eq!(input.rise_smoothing_factor, 0.45);
+        assert!(input.strict_blackout);
+        assert_eq!(input.hue_output_brightness, 0.7);
+        assert_eq!(input.nanoleaf_output_brightness, 0.8);
+        assert!(!input.hue_sync_enabled);
+        assert_eq!(input.nanoleaf_alignment.perimeter_offset, 7);
+        assert!(input.validate().is_ok());
+        assert!(Preset::named("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn preset_request_queues_live_settings() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let shared = Arc::new(SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        ));
+        let state = AppState {
+            shared: Arc::clone(&shared),
+            config_path: PathBuf::new(),
+        };
+        assert!(
+            apply_preset(State(state), Path("lowStimulation".to_string()))
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            shared
+                .current_settings
+                .read()
+                .unwrap()
+                .brightness_multiplier,
+            0.55
+        );
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ControlCommand::ApplySettings(value)) if value.brightness_multiplier == 0.55
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_command_send_does_not_change_live_settings() {
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let original = settings();
+        let shared = SharedState::new(
+            original.clone(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        );
+        let mut update = original;
+        update.gamma = 1.5;
+        assert!(shared.apply_settings(update).await.is_err());
+        assert_eq!(shared.current_settings.read().unwrap().gamma, 1.0);
     }
 }

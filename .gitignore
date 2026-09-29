@@ -10,6 +10,10 @@ __pycache__/
 
 # Local credentials & config
 config.json
+# Atomic config temp files can contain credentials.
+*.new
+*.new-*
+*.json.lock
 .env
 *.pem
 *.key

@@ -77,6 +77,8 @@ pub struct VtCapture {
     consecutive_errors: u32,
     last_addr0: usize,
     stale_count: u32,
+    raw_stats_enabled: bool,
+    last_raw_stats: Option<RawNv12Stats>,
     fn_current_buff_info: FnVtCaptureCurrentCaptureBuffInfo,
     fn_stop: FnVtCaptureStop,
     fn_postprocess: FnVtCapturePostprocess,
@@ -85,12 +87,84 @@ pub struct VtCapture {
     _lib: Library,
 }
 
-// Raw pointers in VtCapture are actor/thread safe when owned by ScreenCapture
-unsafe impl Send for VtCapture {}
+/// Aggregate of a central, at-most-16x16 NV12 patch; no frame pixels are retained.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawNv12Stats {
+    pub y_min: u8,
+    pub y_mean: f32,
+    pub y_max: u8,
+    pub u_mean: f32,
+    pub v_mean: f32,
+    pub luma_samples: u16,
+}
+
+fn central_nv12_stats(
+    width: u32,
+    height: u32,
+    stride: u32,
+    y_plane: &[u8],
+    uv_plane: &[u8],
+) -> Result<RawNv12Stats> {
+    let (y_len, uv_len, _) = nv12_lengths(width, height, stride)?;
+    if y_plane.len() < y_len || uv_plane.len() < uv_len {
+        return Err(anyhow!("NV12 plane is too short for raw statistics"));
+    }
+    let (w, h, s) = (width as usize, height as usize, stride as usize);
+    let x0 = (w.saturating_sub(16) / 2) & !1;
+    let y0 = (h.saturating_sub(16) / 2) & !1;
+    let x1 = (x0 + 16).min(w);
+    let y1 = (y0 + 16).min(h);
+    let mut y_min = u8::MAX;
+    let mut y_max = u8::MIN;
+    let mut y_sum = 0u32;
+    for row in y0..y1 {
+        for &value in &y_plane[row * s + x0..row * s + x1] {
+            y_min = y_min.min(value);
+            y_max = y_max.max(value);
+            y_sum += u32::from(value);
+        }
+    }
+    let mut u_sum = 0u32;
+    let mut v_sum = 0u32;
+    let mut chroma_samples = 0u32;
+    for row in (y0..y1).step_by(2) {
+        for col in (x0..x1).step_by(2) {
+            let offset = row / 2 * s + col;
+            u_sum += u32::from(uv_plane[offset]);
+            v_sum += u32::from(uv_plane[offset + 1]);
+            chroma_samples += 1;
+        }
+    }
+    let luma_samples = ((x1 - x0) * (y1 - y0)) as u16;
+    Ok(RawNv12Stats {
+        y_min,
+        y_mean: y_sum as f32 / f32::from(luma_samples),
+        y_max,
+        u_mean: u_sum as f32 / chroma_samples as f32,
+        v_mean: v_sum as f32 / chroma_samples as f32,
+        luma_samples,
+    })
+}
 
 impl VtCapture {
+    pub fn enable_raw_stats(&mut self) {
+        self.raw_stats_enabled = true;
+    }
+
+    pub fn take_raw_stats(&mut self) -> Option<RawNv12Stats> {
+        self.last_raw_stats.take()
+    }
+
     /// Attempts to dynamically load `/usr/lib/libvtcapture.so.1` and initialize the capture pipeline.
     pub fn try_new(target_width: u32, target_height: u32) -> Result<Self> {
+        if target_width == 0
+            || target_height == 0
+            || target_width > i16::MAX as u32
+            || target_height > i16::MAX as u32
+        {
+            return Err(anyhow!("capture dimensions exceed libvtcapture limits"));
+        }
+        nv12_lengths(target_width, target_height, target_width + target_width % 2)?;
         if !Path::new(LIBVTCAPTURE_PATH).exists() {
             return Err(anyhow!(
                 "libvtcapture driver library not found at {}",
@@ -170,7 +244,13 @@ impl VtCapture {
                 ));
             }
 
-            let client_str = CStr::from_ptr(client_id.as_ptr() as *const c_char).to_string_lossy();
+            let client_str = match CStr::from_bytes_until_nul(&client_id) {
+                Ok(value) => value.to_string_lossy(),
+                Err(_) => {
+                    fn_release(driver);
+                    return Err(anyhow!("vtCapture_init returned an unterminated client ID"));
+                }
+            };
             info!(
                 "[+] vtCapture_init successful (caller: {}, client_id: '{}')",
                 caller_id.to_string_lossy(),
@@ -242,6 +322,15 @@ impl VtCapture {
                 width
             };
 
+            let rgb_size = match nv12_lengths(width, height, stride) {
+                Ok((_, _, size)) => size,
+                Err(error) => {
+                    fn_finalize(driver, client_ptr);
+                    fn_release(driver);
+                    return Err(error);
+                }
+            };
+
             info!(
                 "[+] vtCapture plane layout: stride={}, plane={}x{} (target: {}x{}), active={}x{}",
                 stride,
@@ -265,8 +354,6 @@ impl VtCapture {
 
             info!("[+] vtCapture_process stream started successfully");
 
-            let rgb_size = (width * height * 4) as usize;
-
             Ok(Self {
                 driver,
                 client_id,
@@ -278,6 +365,8 @@ impl VtCapture {
                 consecutive_errors: 0,
                 last_addr0: 0,
                 stale_count: 0,
+                raw_stats_enabled: false,
+                last_raw_stats: None,
                 fn_current_buff_info: *fn_current_buff_info,
                 fn_stop: *fn_stop,
                 fn_postprocess: *fn_postprocess,
@@ -302,19 +391,6 @@ impl VtCapture {
         }
         info!("[-] Released vtCapture hardware scaler channel.");
     }
-
-    /// Converts NV12 (Y plane + interleaved UV plane) to standard 32-bit RGBA using fixed-point BT.601 limited-to-full range.
-    #[inline(always)]
-    unsafe fn convert_nv12_to_rgb(&mut self, y_plane: *const u8, uv_plane: *const u8) {
-        convert_nv12_to_rgba(
-            self.width,
-            self.height,
-            self.stride,
-            y_plane,
-            uv_plane,
-            &mut self.rgb_buffer,
-        );
-    }
 }
 
 /// Converts NV12 (Y plane + interleaved UV plane) to standard 32-bit RGBA using fixed-point BT.601 limited-to-full range.
@@ -324,10 +400,14 @@ pub fn convert_nv12_to_rgba(
     width: u32,
     height: u32,
     stride: u32,
-    y_plane: *const u8,
-    uv_plane: *const u8,
+    y_plane: &[u8],
+    uv_plane: &[u8],
     rgb_buffer: &mut [u8],
-) {
+) -> Result<()> {
+    let (y_len, uv_len, rgb_len) = nv12_lengths(width, height, stride)?;
+    if y_plane.len() < y_len || uv_plane.len() < uv_len || rgb_buffer.len() < rgb_len {
+        return Err(anyhow!("NV12 plane or output buffer is too short"));
+    }
     let w = width as usize;
     let h = height as usize;
     let s = stride as usize;
@@ -339,8 +419,8 @@ pub fn convert_nv12_to_rgba(
 
         for x in (0..w).step_by(2) {
             let uv_offset = uv_row + x;
-            let u_val = unsafe { *uv_plane.add(uv_offset) as i32 - 128 };
-            let v_val = unsafe { *uv_plane.add(uv_offset + 1) as i32 - 128 };
+            let u_val = uv_plane[uv_offset] as i32 - 128;
+            let v_val = uv_plane[uv_offset + 1] as i32 - 128;
 
             // Shared chroma components for both horizontal pixels
             let rv = 409 * v_val + 128;
@@ -348,7 +428,7 @@ pub fn convert_nv12_to_rgba(
             let bv = 516 * u_val + 128;
 
             // First pixel (x)
-            let y0 = unsafe { (*y_plane.add(y_row + x) as i32 - 16).max(0) };
+            let y0 = (y_plane[y_row + x] as i32 - 16).max(0);
             let c0 = 298 * y0;
             let r0 = ((c0 + rv) >> 8).clamp(0, 255) as u8;
             let g0 = ((c0 + gv) >> 8).clamp(0, 255) as u8;
@@ -362,7 +442,7 @@ pub fn convert_nv12_to_rgba(
 
             // Second pixel (x + 1) if within bounds
             if x + 1 < w {
-                let y1 = unsafe { (*y_plane.add(y_row + x + 1) as i32 - 16).max(0) };
+                let y1 = (y_plane[y_row + x + 1] as i32 - 16).max(0);
                 let c1 = 298 * y1;
                 let r1 = ((c1 + rv) >> 8).clamp(0, 255) as u8;
                 let g1 = ((c1 + gv) >> 8).clamp(0, 255) as u8;
@@ -376,10 +456,39 @@ pub fn convert_nv12_to_rgba(
             }
         }
     }
+    Ok(())
+}
+
+pub(super) fn nv12_lengths(width: u32, height: u32, stride: u32) -> Result<(usize, usize, usize)> {
+    let (w, h, s) = (width as usize, height as usize, stride as usize);
+    let chroma_width = w
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("NV12 width overflow"))?
+        / 2
+        * 2;
+    if w == 0 || h == 0 || s < chroma_width {
+        return Err(anyhow!("invalid NV12 dimensions or stride"));
+    }
+    let y_len = (h - 1).checked_mul(s).and_then(|n| n.checked_add(w));
+    let uv_len = (h / 2 + h % 2 - 1)
+        .checked_mul(s)
+        .and_then(|n| n.checked_add(chroma_width));
+    let rgb_len = w.checked_mul(h).and_then(|n| n.checked_mul(4));
+    match (y_len, uv_len, rgb_len) {
+        (Some(y), Some(uv), Some(rgb))
+            if y <= isize::MAX as usize
+                && uv <= isize::MAX as usize
+                && rgb <= isize::MAX as usize =>
+        {
+            Ok((y, uv, rgb))
+        }
+        _ => Err(anyhow!("NV12 frame size overflow")),
+    }
 }
 
 impl ScreenCapture for VtCapture {
     fn acquire_frame(&mut self) -> Result<CapturedFrame<'_>> {
+        self.last_raw_stats = None;
         if self.is_stopped {
             return Err(anyhow!("VIDEO_FORMAT_SWITCH"));
         }
@@ -427,23 +536,47 @@ impl ScreenCapture for VtCapture {
             self.stale_count = 0;
         }
 
-        unsafe {
-            if !buf_info.start_addr1.is_null() {
-                self.convert_nv12_to_rgb(buf_info.start_addr0, buf_info.start_addr1);
-            } else {
-                // Grayscale fallback if only Y plane is provided
-                let width = self.width as usize;
-                let height = self.height as usize;
-                let stride = self.stride as usize;
-                for y in 0..height {
-                    for x in 0..width {
-                        let y_val = *buf_info.start_addr0.add(y * stride + x);
-                        let out_idx = (y * width + x) * 4;
-                        self.rgb_buffer[out_idx] = y_val;
-                        self.rgb_buffer[out_idx + 1] = y_val;
-                        self.rgb_buffer[out_idx + 2] = y_val;
-                        self.rgb_buffer[out_idx + 3] = 255;
-                    }
+        let (y_len, uv_len, _) = nv12_lengths(self.width, self.height, self.stride)?;
+        if buf_info.size0 < 0
+            || (buf_info.size0 as usize) < y_len
+            || (!buf_info.start_addr1.is_null()
+                && (buf_info.size1 < 0 || (buf_info.size1 as usize) < uv_len))
+        {
+            self.stop_stream();
+            return Err(anyhow!("capture driver returned undersized frame planes"));
+        }
+        // SAFETY: the driver reports non-null plane pointers and sizes covering these slices.
+        // The capture handle remains active for the duration of this conversion.
+        let y_plane = unsafe { std::slice::from_raw_parts(buf_info.start_addr0, y_len) };
+        if !buf_info.start_addr1.is_null() {
+            let uv_plane = unsafe { std::slice::from_raw_parts(buf_info.start_addr1, uv_len) };
+            if self.raw_stats_enabled {
+                self.last_raw_stats = Some(central_nv12_stats(
+                    self.width,
+                    self.height,
+                    self.stride,
+                    y_plane,
+                    uv_plane,
+                )?);
+            }
+            convert_nv12_to_rgba(
+                self.width,
+                self.height,
+                self.stride,
+                y_plane,
+                uv_plane,
+                &mut self.rgb_buffer,
+            )?;
+        } else {
+            if self.raw_stats_enabled {
+                return Err(anyhow!("capture frame has no NV12 chroma plane"));
+            }
+            let width = self.width as usize;
+            let stride = self.stride as usize;
+            for (row, pixels) in self.rgb_buffer.chunks_exact_mut(width * 4).enumerate() {
+                for (x, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let y_val = y_plane[row * stride + x];
+                    pixel.copy_from_slice(&[y_val, y_val, y_val, 255]);
                 }
             }
         }
@@ -501,6 +634,44 @@ mod tests {
     }
 
     #[test]
+    fn central_nv12_probe_uses_only_the_centre_and_checks_plane_lengths() {
+        let (width, height, stride) = (20, 20, 22);
+        let mut y = vec![10u8; stride * height];
+        let mut uv = vec![128u8; stride * (height / 2)];
+        for row in 2..18 {
+            for col in 2..18 {
+                y[row * stride + col] = 100;
+            }
+        }
+        for row in 1..9 {
+            for col in (2..18).step_by(2) {
+                uv[row * stride + col] = 64;
+                uv[row * stride + col + 1] = 192;
+            }
+        }
+        let stats =
+            central_nv12_stats(width as u32, height as u32, stride as u32, &y, &uv).unwrap();
+        assert_eq!(stats.y_min, 100);
+        assert_eq!(stats.y_mean, 100.0);
+        assert_eq!(stats.y_max, 100);
+        assert_eq!(stats.u_mean, 64.0);
+        assert_eq!(stats.v_mean, 192.0);
+        assert_eq!(stats.luma_samples, 256);
+        assert!(
+            central_nv12_stats(width as u32, height as u32, stride as u32, &y, &uv[..20]).is_err()
+        );
+    }
+
+    #[test]
+    fn colored_nv12_fixture_locks_current_bt601_conversion() {
+        let mut rgba = [0u8; 16];
+        convert_nv12_to_rgba(2, 2, 2, &[100; 4], &[64, 192], &mut rgba).unwrap();
+        for pixel in rgba.chunks_exact(4) {
+            assert_eq!(pixel, &[200, 71, 0, 255]);
+        }
+    }
+
+    #[test]
     fn test_nv12_conversion_black_and_white_reference() {
         // 2x2 test image
         let width = 2u32;
@@ -512,14 +683,7 @@ mod tests {
         let uv_neutral = [128u8; 2]; // 1 pair for 2x2 NV12
         let mut rgb_out = [0u8; 16];
 
-        convert_nv12_to_rgba(
-            width,
-            height,
-            stride,
-            y_black.as_ptr(),
-            uv_neutral.as_ptr(),
-            &mut rgb_out,
-        );
+        convert_nv12_to_rgba(width, height, stride, &y_black, &uv_neutral, &mut rgb_out).unwrap();
 
         // Every pixel should decode to black (0, 0, 0, 255)
         for pixel in rgb_out.chunks(4) {
@@ -528,14 +692,7 @@ mod tests {
 
         // Test 2: Standard video white (Y=235, U=128, V=128)
         let y_white = [235u8; 4];
-        convert_nv12_to_rgba(
-            width,
-            height,
-            stride,
-            y_white.as_ptr(),
-            uv_neutral.as_ptr(),
-            &mut rgb_out,
-        );
+        convert_nv12_to_rgba(width, height, stride, &y_white, &uv_neutral, &mut rgb_out).unwrap();
 
         // Every pixel should decode to full white (255, 255, 255, 255)
         for pixel in rgb_out.chunks(4) {
@@ -558,14 +715,7 @@ mod tests {
         let uv_data = [128u8, 128u8, 0, 0];
         let mut rgb_out = [0u8; 16];
 
-        convert_nv12_to_rgba(
-            width,
-            height,
-            stride,
-            y_data.as_ptr(),
-            uv_data.as_ptr(),
-            &mut rgb_out,
-        );
+        convert_nv12_to_rgba(width, height, stride, &y_data, &uv_data, &mut rgb_out).unwrap();
 
         // Row 0 pixels must be white
         assert_eq!(&rgb_out[0..4], &[255, 255, 255, 255]);
@@ -587,14 +737,7 @@ mod tests {
         let uv_data = [128u8, 128u8, 128u8, 128u8];
         let mut rgb_out = [0u8; 24]; // 3 * 2 * 4
 
-        convert_nv12_to_rgba(
-            width,
-            height,
-            stride,
-            y_data.as_ptr(),
-            uv_data.as_ptr(),
-            &mut rgb_out,
-        );
+        convert_nv12_to_rgba(width, height, stride, &y_data, &uv_data, &mut rgb_out).unwrap();
 
         // Row 0: 3 white pixels
         assert_eq!(&rgb_out[0..4], &[255, 255, 255, 255]);
@@ -605,5 +748,14 @@ mod tests {
         assert_eq!(&rgb_out[12..16], &[0, 0, 0, 255]);
         assert_eq!(&rgb_out[16..20], &[0, 0, 0, 255]);
         assert_eq!(&rgb_out[20..24], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn nv12_rejects_short_planes_and_invalid_stride() {
+        let mut output = [0u8; 16];
+        assert!(convert_nv12_to_rgba(2, 2, 2, &[16; 3], &[128; 2], &mut output).is_err());
+        assert!(convert_nv12_to_rgba(2, 2, 2, &[16; 4], &[128; 1], &mut output).is_err());
+        assert!(convert_nv12_to_rgba(3, 2, 3, &[16; 6], &[128; 4], &mut [0; 24]).is_err());
+        assert!(convert_nv12_to_rgba(2, 2, 2, &[16; 4], &[128; 2], &mut [0; 15]).is_err());
     }
 }

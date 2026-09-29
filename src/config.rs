@@ -1,8 +1,15 @@
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use thiserror::Error;
+
+static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+static CONFIG_WRITE_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -24,8 +31,19 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to lock config at {path}")]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to serialize config")]
     Serialize(#[from] serde_json::Error),
+    #[error("invalid config at {path}: {reason}")]
+    Invalid {
+        path: std::path::PathBuf,
+        reason: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,7 +213,7 @@ pub struct Config {
     /// When a sampled region passes the black gate, turn that output fully off without afterglow.
     #[serde(default)]
     pub strict_blackout: bool,
-    /// Maximum per-component RGB change in one sampled video frame.
+    /// Maximum per-component RGB change per reference frame at 30 FPS.
     #[serde(default = "default_max_color_step")]
     pub max_color_step: u8,
     #[serde(default = "default_true")]
@@ -310,6 +328,22 @@ fn default_zones() -> Vec<LightZone> {
 }
 
 impl Config {
+    fn validate_capture_dimensions(&self, path: &Path) -> Result<(), ConfigError> {
+        // Bounds both native capture requests and MockCapture's u32 RGBA allocation math.
+        if self.capture_width == 0
+            || self.capture_height == 0
+            || self.capture_width > 4096
+            || self.capture_height > 4096
+            || self.capture_width as u64 * self.capture_height as u64 > 3840 * 2160
+        {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                reason: "capture dimensions must fit within 4096 per side and 4K pixels",
+            });
+        }
+        Ok(())
+    }
+
     pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
         Self {
             auto_tv_power: true,
@@ -328,7 +362,7 @@ impl Config {
             hue_output_brightness: default_output_trim(),
             nanoleaf_output_brightness: default_output_trim(),
             use_xy_gamut: false,
-            hdr_tone_mapping: true,
+            hdr_tone_mapping: false,
             letterbox_detection: true,
             saturation_boost: default_saturation_boost(),
             peak_weight: default_peak_weight(),
@@ -357,15 +391,47 @@ impl Config {
                 path: path.to_path_buf(),
                 source,
             })?;
+        config.validate_capture_dimensions(path)?;
         Ok(config)
     }
 
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
+    /// Read, mutate, and atomically save under a lock shared by cooperating writers.
+    /// `on_missing` is used only when the config file does not exist.
+    pub fn update<P: AsRef<Path>>(
+        path: P,
+        on_missing: Option<Self>,
+        mutate: impl FnOnce(&mut Self) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
         let path = path.as_ref();
-        let temp_path = path.with_extension("new");
+        let _process_lock = CONFIG_WRITE_MUTEX.lock().map_err(|_| ConfigError::Lock {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("config write mutex poisoned"),
+        })?;
+        let _file_lock = lock_config(path)?;
+        let mut config = match (Self::load(path), on_missing) {
+            (Ok(config), _) => config,
+            (Err(ConfigError::Open { source, .. }), Some(default))
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                default
+            }
+            (Err(error), _) => return Err(error.into()),
+        };
+        mutate(&mut config)?;
+        config.save_unlocked(path)?;
+        Ok(config)
+    }
+
+    fn save_unlocked(&self, path: &Path) -> Result<(), ConfigError> {
+        self.validate_capture_dimensions(path)?;
+        let temp_path = path.with_extension(format!(
+            "new-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
         let json = serde_json::to_string_pretty(self)?;
         let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
+        options.create_new(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -377,26 +443,181 @@ impl Config {
                 path: temp_path.clone(),
                 source,
             })?;
-        file.write_all(json.as_bytes())
-            .map_err(|source| ConfigError::Write {
+        let result = (|| {
+            file.write_all(json.as_bytes())
+                .map_err(|source| ConfigError::Write {
+                    path: temp_path.clone(),
+                    source,
+                })?;
+            file.sync_all().map_err(|source| ConfigError::Write {
                 path: temp_path.clone(),
                 source,
             })?;
-        file.sync_all().map_err(|source| ConfigError::Write {
-            path: temp_path.clone(),
-            source,
-        })?;
-        fs::rename(&temp_path, path).map_err(|source| ConfigError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+            fs::rename(&temp_path, path).map_err(|source| ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            })
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
+    }
+}
+
+fn lock_config(path: &Path) -> Result<File, ConfigError> {
+    let mut name: OsString = path.as_os_str().to_os_string();
+    name.push(".lock");
+    let lock_path = PathBuf::from(name);
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+        let file = options
+            .open(&lock_path)
+            .map_err(|source| ConfigError::Lock {
+                path: lock_path.clone(),
+                source,
+            })?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|source| ConfigError::Lock {
+                path: lock_path.clone(),
+                source,
+            })?;
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(file);
+            }
+            let source = std::io::Error::last_os_error();
+            if source.kind() != std::io::ErrorKind::Interrupted {
+                return Err(ConfigError::Lock {
+                    path: lock_path,
+                    source,
+                });
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        options
+            .open(&lock_path)
+            .map_err(|source| ConfigError::Lock {
+                path: lock_path,
+                source,
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_configs_disable_unverified_hdr_curve_without_changing_legacy_missing_field() {
+        let config = Config::new_default("", "", "", "");
+        assert!(!config.hdr_tone_mapping);
+
+        let mut legacy = serde_json::to_value(config).unwrap();
+        legacy.as_object_mut().unwrap().remove("hdr_tone_mapping");
+        let loaded: Config = serde_json::from_value(legacy).unwrap();
+        assert!(loaded.hdr_tone_mapping);
+    }
+
+    #[test]
+    fn rejects_capture_dimensions_that_cannot_safely_allocate_rgba() {
+        let path = std::env::temp_dir().join(format!(
+            "lg-hue-sync-config-validation-{}-{}.json",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut config = Config::new_default("", "", "", "");
+        for (width, height) in [(0, 180), (320, 0), (u32::MAX, 180), (4096, 4096)] {
+            config.capture_width = width;
+            config.capture_height = height;
+            fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+            assert!(matches!(
+                Config::load(&path),
+                Err(ConfigError::Invalid { .. })
+            ));
+            fs::remove_file(&path).unwrap();
+            assert!(Config::update(&path, Some(config.clone()), |_| Ok(())).is_err());
+        }
+        fs::remove_file(format!("{}.lock", path.display())).unwrap();
+    }
+
+    #[test]
+    fn concurrent_updates_produce_valid_config() {
+        let path = std::env::temp_dir().join(format!(
+            "lg-hue-sync-concurrent-save-{}-{}.json",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let threads: Vec<_> = (0..4)
+            .map(|index| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Config::update(&path, Some(Config::new_default("", "", "", "")), |config| {
+                        config.gamma = 1.0 + index as f32 * 0.1;
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        Config::load(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(format!("{}.lock", path.display())).unwrap();
+    }
+
+    #[test]
+    fn concurrent_updates_preserve_disjoint_fields() {
+        let path = std::env::temp_dir().join(format!(
+            "lg-hue-sync-concurrent-update-{}-{}.json",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut initial = Config::new_default("", "", "", "");
+        initial.capture_width = 320;
+        initial.capture_height = 180;
+        Config::update(&path, Some(initial), |_| Ok(())).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|field| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..50 {
+                        Config::update(&path, None, |config| {
+                            if field == 0 {
+                                config.capture_width += 1;
+                            } else {
+                                config.capture_height += 1;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        let saved = Config::load(&path).unwrap();
+        assert_eq!((saved.capture_width, saved.capture_height), (370, 230));
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(format!("{}.lock", path.display())).unwrap();
+    }
 
     #[test]
     fn legacy_per_light_trim_fields_are_ignored() {

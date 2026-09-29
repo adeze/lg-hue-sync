@@ -1,18 +1,8 @@
-use crate::config::{Config, ConfigError, NanoleafAlignment, NanoleafConfig};
+use crate::config::{Config, NanoleafAlignment, NanoleafConfig};
 use crate::{hue, nanoleaf};
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::info;
-
-fn load_or_create_config(path: &Path, default: impl FnOnce() -> Config) -> Result<Config> {
-    match Config::load(path) {
-        Ok(config) => Ok(config),
-        Err(ConfigError::Open { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-            Ok(default())
-        }
-        Err(error) => Err(error.into()),
-    }
-}
 
 pub(crate) async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
     let bridge_ip = match bridge_opt {
@@ -35,21 +25,27 @@ pub(crate) async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Res
     };
 
     let (username, clientkey, area) = hue::pair_bridge(&bridge_ip, 45)?;
-    let mut config = load_or_create_config(&output, || {
-        Config::new_default(&bridge_ip, &username, &clientkey, &area.configuration_id)
-    })?;
-
-    config.bridge_ip = bridge_ip;
-    config.username = username;
-    config.clientkey = clientkey;
-    config.entertainment_area_id = area.configuration_id.clone();
-    config.entertainment_configuration_id = Some(area.configuration_id);
-    config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
-    if !area.zones.is_empty() {
-        config.zones = area.zones;
-    }
-
-    config.save(&output)?;
+    Config::update(
+        &output,
+        Some(Config::new_default(
+            &bridge_ip,
+            &username,
+            &clientkey,
+            &area.configuration_id,
+        )),
+        |config| {
+            config.bridge_ip = bridge_ip;
+            config.username = username;
+            config.clientkey = clientkey;
+            config.entertainment_area_id = area.configuration_id.clone();
+            config.entertainment_configuration_id = Some(area.configuration_id);
+            config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
+            if !area.zones.is_empty() {
+                config.zones = area.zones;
+            }
+            Ok(())
+        },
+    )?;
     println!(
         "\n[+] Configuration and Hue credentials successfully saved to {:?}",
         output
@@ -60,6 +56,11 @@ pub(crate) async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Res
 
 pub(crate) async fn run_sync_hue(config_path: PathBuf, target_area: Option<String>) -> Result<()> {
     let mut config = Config::load(&config_path)?;
+    let bridge_identity = (
+        config.bridge_ip.clone(),
+        config.username.clone(),
+        config.hue_bridge_certificate_sha256.clone(),
+    );
     info!(
         "Querying Hue Bridge at {} for Entertainment Areas...",
         config.bridge_ip
@@ -72,13 +73,26 @@ pub(crate) async fn run_sync_hue(config_path: PathBuf, target_area: Option<Strin
         config.hue_bridge_certificate_sha256.as_deref(),
     )?;
 
-    config.entertainment_area_id = area.configuration_id.clone();
-    config.entertainment_configuration_id = Some(area.configuration_id);
-    config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
-    if !area.zones.is_empty() {
-        config.zones = area.zones;
-    }
-    config.save(&config_path)?;
+    config = Config::update(&config_path, None, |config| {
+        if (
+            config.bridge_ip.as_str(),
+            config.username.as_str(),
+            config.hue_bridge_certificate_sha256.as_ref(),
+        ) != (
+            bridge_identity.0.as_str(),
+            bridge_identity.1.as_str(),
+            bridge_identity.2.as_ref(),
+        ) {
+            anyhow::bail!("Hue Bridge configuration changed during sync; retry");
+        }
+        config.entertainment_area_id = area.configuration_id.clone();
+        config.entertainment_configuration_id = Some(area.configuration_id);
+        config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
+        if !area.zones.is_empty() {
+            config.zones = area.zones;
+        }
+        Ok(())
+    })?;
 
     println!(
         "\n[+] Entertainment area '{}' (ID: {}) synced successfully!",
@@ -107,19 +121,22 @@ pub(crate) async fn run_pair_nanoleaf(ip_opt: Option<String>, config_path: PathB
     };
 
     let (auth_token, num_panels, panel_ids) = nanoleaf::pair_nanoleaf(&ip, 45)?;
-    let mut config = load_or_create_config(&config_path, || Config::new_default("", "", "", ""))?;
-
-    config.nanoleaf = Some(NanoleafConfig {
-        enabled: true,
-        ip: ip.clone(),
-        auth_token,
-        udp_port: 60222,
-        segments: num_panels.max(30),
-        panel_ids,
-        alignment: NanoleafAlignment::default(),
-    });
-
-    config.save(&config_path)?;
+    Config::update(
+        &config_path,
+        Some(Config::new_default("", "", "", "")),
+        |config| {
+            config.nanoleaf = Some(NanoleafConfig {
+                enabled: true,
+                ip: ip.clone(),
+                auth_token,
+                udp_port: 60222,
+                segments: num_panels.max(30),
+                panel_ids,
+                alignment: NanoleafAlignment::default(),
+            });
+            Ok(())
+        },
+    )?;
     println!(
         "\n[+] Nanoleaf 4D controller at {} successfully paired and saved to {:?}",
         ip, config_path
@@ -151,12 +168,14 @@ mod tests {
         ));
         std::fs::write(&path, b"{invalid").unwrap();
 
-        let result = load_or_create_config(&path, || panic!("must not replace an existing config"));
+        let result = Config::update(&path, Some(Config::new_default("", "", "", "")), |_| Ok(()));
         assert!(result.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"{invalid");
 
         std::fs::remove_file(&path).unwrap();
-        let config = load_or_create_config(&path, || Config::new_default("", "", "", ""));
+        let config = Config::update(&path, Some(Config::new_default("", "", "", "")), |_| Ok(()));
         assert!(config.is_ok());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(format!("{}.lock", path.display())).unwrap();
     }
 }

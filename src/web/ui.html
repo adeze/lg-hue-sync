@@ -419,7 +419,7 @@
         <span class="control-val" id="valColorStep">12 RGB steps</span>
       </div>
       <input type="range" id="sliderColorStep" aria-label="Scene-Change Limiter" min="4" max="64" step="2" value="12" oninput="updateSettings()">
-      <div class="toggle-desc">Caps each RGB component per captured frame, including hard cuts. Lower = gentler.</div>
+      <div class="toggle-desc">Caps each RGB component per 1/30 second, including hard cuts. Lower = gentler.</div>
     </div>
 
     <div class="control-group">
@@ -462,11 +462,11 @@
 
     <div class="toggle-row">
       <div>
-        <div class="toggle-label">HDR Tone Mapping</div>
-        <div class="toggle-desc">Reinhard highlight compression for HDR10/Dolby Vision</div>
+        <div class="toggle-label">Legacy Midtone Lift</div>
+        <div class="toggle-desc">Brightens midtones; does not detect or tone-map HDR</div>
       </div>
       <label class="switch">
-        <input type="checkbox" id="toggleHdr" checked onchange="updateSettings()">
+        <input type="checkbox" id="toggleHdr" onchange="updateSettings()">
         <span class="slider"></span>
       </label>
     </div>
@@ -477,6 +477,7 @@
   <details class="card accordion" id="calibrationSection">
     <summary>Calibration</summary>
     <div class="accordion-content">
+    <p><a href="/capture-patterns" target="_blank" rel="noopener">Open screen capture patches</a> — select nominal SDR colours in a separate tab; keep it open while the capture probe runs.</p>
     <div class="toggle-desc" style="margin-bottom:10px">Visual matching only: these patterns do not measure emitted light or change the TV picture settings.</div>
     <div class="btn-row"><button class="secondary-btn" onclick="testPattern('red')">Red</button><button class="secondary-btn" onclick="testPattern('green')">Green</button><button class="secondary-btn" onclick="testPattern('blue')">Blue</button></div>
     <div class="btn-row"><button class="secondary-btn" onclick="testPattern('white')">White</button><button class="secondary-btn" onclick="testPattern('warm-white')">Warm 3000K</button><button class="secondary-btn" onclick="testPattern('daylight-white')">Daylight D65</button></div>
@@ -789,33 +790,22 @@
     }
 
     async function applyPreset(name) {
-      const presets = {
-        neutral: { label: 'Neutral Reference', description: 'balanced rise and fade', brightness: 1.0, saturation: 1.0, peak: 0.15, gamma: 1.0, blackGate: 0.02, smoothing: 0.35, rise: 0.35, fall: 0.35, strictBlackout: false, step: 12 },
-        highChroma: { label: 'High Chroma', description: 'stronger colour without a fixed palette', brightness: 1.05, saturation: 1.65, peak: 0.25, gamma: 1.0, blackGate: 0.015, smoothing: 0.4, rise: 0.35, fall: 0.4, strictBlackout: false, step: 12 },
-        neonContrast: { label: 'Neon Contrast', description: 'bright colour accents with fast true-black fade', brightness: 1.0, saturation: 2.0, peak: 0.45, gamma: 1.15, blackGate: 0.035, smoothing: 0.55, rise: 0.45, fall: 0.7, strictBlackout: true, step: 10 },
-        darkSceneDetail: { label: 'Dark-Scene Detail', description: 'protects OLED blacks while retaining local highlights', brightness: 0.8, saturation: 1.2, peak: 0.3, gamma: 1.18, blackGate: 0.04, smoothing: 0.5, rise: 0.3, fall: 0.7, strictBlackout: true, step: 8 },
-        fastResponse: { label: 'Fast Response', description: 'quick motion tracking with bounded colour changes', brightness: 1.1, saturation: 1.35, peak: 0.35, gamma: 1.0, blackGate: 0.015, smoothing: 0.65, rise: 0.65, fall: 0.7, strictBlackout: false, step: 14 },
-        lowStimulation: { label: 'Low Stimulation', description: 'reduced intensity and slower transitions', brightness: 0.55, saturation: 1.0, peak: 0.1, gamma: 1.05, blackGate: 0.025, smoothing: 0.2, rise: 0.18, fall: 0.22, strictBlackout: false, step: 6 }
-      };
-      const preset = presets[name];
-      document.getElementById('sliderBrightness').value = preset.brightness;
-      document.getElementById('sliderSaturation').value = preset.saturation;
-      document.getElementById('sliderPeak').value = preset.peak;
-      document.getElementById('sliderGamma').value = preset.gamma;
-      document.getElementById('sliderBlackGate').value = preset.blackGate;
-      document.getElementById('sliderSmoothing').value = preset.smoothing;
-      temporalResponse = { rise: preset.rise, fall: preset.fall };
-      document.getElementById('sliderColorStep').value = preset.step;
-      document.getElementById('toggleStrictBlack').checked = preset.strictBlackout;
-      document.querySelectorAll('.preset-btn').forEach(button => button.classList.toggle('active', button.dataset.preset === name));
-      document.getElementById('presetStatus').innerText = preset.label + ' applied: ' + preset.description + '. Output trims unchanged.';
-      await updateSettings();
+      try {
+        const res = await fetch('/api/presets/' + encodeURIComponent(name), { method: 'POST' });
+        if (!res.ok) throw new Error('Preset request failed: ' + res.status);
+        document.querySelectorAll('.preset-btn').forEach(button => button.classList.toggle('active', button.dataset.preset === name));
+        document.getElementById('presetStatus').innerText = 'Preset applied. Output trims unchanged. Save settings to keep it after restart.';
+        await pollStatus();
+      } catch (e) {
+        document.getElementById('presetStatus').innerText = 'Could not apply preset: ' + e.message;
+      }
     }
 
     async function saveSettingsToDisk() {
       try {
         const res = await fetch('/api/save-config', { method: 'POST' });
         if (res.ok) alert('Settings successfully saved to TV config.json');
+        else alert('Failed to save settings to TV config.json');
       } catch (e) {
         alert('Failed to save settings: ' + e);
       }

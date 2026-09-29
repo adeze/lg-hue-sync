@@ -1,7 +1,10 @@
 use crate::web::ControlCommand;
 use crate::web::LiveSettings;
 use std::time::Duration;
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineState {
@@ -15,7 +18,7 @@ pub struct PendingCommands {
     pub restart: bool,
     pub reconfigure: bool,
     pub sync_bridge: bool,
-    pub save_config: bool,
+    pub save_config: Vec<oneshot::Sender<Result<(), String>>>,
     pub apply_settings: Option<LiveSettings>,
 }
 
@@ -28,10 +31,22 @@ impl PendingCommands {
                 ControlCommand::Restart => self.restart = true,
                 ControlCommand::Reconfigure => self.reconfigure = true,
                 ControlCommand::SyncBridge => self.sync_bridge = true,
-                ControlCommand::SaveConfig => self.save_config = true,
+                ControlCommand::SaveConfig(reply) => self.save_config.push(reply),
                 ControlCommand::ApplySettings(settings) => self.apply_settings = Some(settings),
             }
         }
+    }
+
+    pub fn has_management_action(&self) -> bool {
+        self.restart
+            || self.reconfigure
+            || self.sync_bridge
+            || !self.save_config.is_empty()
+            || self.apply_settings.is_some()
+    }
+
+    pub fn take_stop_if_running(&mut self, state: PipelineState) -> bool {
+        state == PipelineState::Running && self.desired_running.take() == Some(false)
     }
 }
 
@@ -73,14 +88,64 @@ mod tests {
     async fn latest_start_stop_command_wins_without_losing_other_actions() {
         let (sender, mut receiver) = mpsc::channel(4);
         sender.send(ControlCommand::Start).await.unwrap();
-        sender.send(ControlCommand::SaveConfig).await.unwrap();
+        let (reply, _result) = oneshot::channel();
+        sender
+            .send(ControlCommand::SaveConfig(reply))
+            .await
+            .unwrap();
         sender.send(ControlCommand::Stop).await.unwrap();
 
         let mut pending = PendingCommands::default();
         pending.receive(&mut receiver);
 
         assert_eq!(pending.desired_running, Some(false));
-        assert!(pending.save_config);
+        assert_eq!(pending.save_config.len(), 1);
+        assert!(pending.has_management_action());
+    }
+
+    #[tokio::test]
+    async fn concurrent_save_requests_keep_each_acknowledgement() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        let (first_reply, first_result) = oneshot::channel();
+        let (second_reply, second_result) = oneshot::channel();
+        sender
+            .send(ControlCommand::SaveConfig(first_reply))
+            .await
+            .unwrap();
+        sender
+            .send(ControlCommand::SaveConfig(second_reply))
+            .await
+            .unwrap();
+
+        let mut pending = PendingCommands::default();
+        pending.receive(&mut receiver);
+        assert_eq!(pending.save_config.len(), 2);
+        for reply in std::mem::take(&mut pending.save_config) {
+            reply.send(Ok(())).unwrap();
+        }
+        assert_eq!(first_result.await.unwrap(), Ok(()));
+        assert_eq!(second_result.await.unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn start_and_stop_alone_do_not_interrupt_paused_management() {
+        let mut pending = PendingCommands {
+            desired_running: Some(false),
+            ..PendingCommands::default()
+        };
+        assert!(!pending.has_management_action());
+        pending.reconfigure = true;
+        assert!(pending.has_management_action());
+    }
+
+    #[test]
+    fn paused_start_request_survives_outer_command_check() {
+        let mut pending = PendingCommands {
+            desired_running: Some(true),
+            ..PendingCommands::default()
+        };
+        assert!(!pending.take_stop_if_running(PipelineState::Paused));
+        assert_eq!(pending.desired_running, Some(true));
     }
 
     #[test]

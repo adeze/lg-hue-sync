@@ -8,6 +8,12 @@ Use `<tv-ip>` explicitly. Never add a private address or populated configuration
 make check
 ```
 
+## Read-only capture colour probe
+
+The dashboard's `/capture-patterns` page shows nominal SDR patches. Load it in the browser on the HDMI source before stopping the daemon; its controls continue to work without the server. Apple TV fixed Dolby Vision output can show how that output mode affects capture, but the browser patches are not authored Dolby Vision reference values. A verified HDR10 or Dolby Vision video is required to assess those encoded source paths.
+
+`test-capture --raw-nv12-stats` requires free vtCapture hardware and prints five central Y/Cb/Cr summaries plus the TV's read-only reported dynamic-range mode. It never saves full frames. Stop the daemon before each probe, then restart it even if the probe fails. Confirm the service is active again; the existing `make test-capture` target does not manage that lifecycle. The mode label is a TV output hint, not capture colour-space metadata. Do not change the fixed BT.601 decoder based on a mode label alone.
+
 ## Codex project setup
 
 Codex loads [`.codex/environments/environment.toml`](../.codex/environments/environment.toml) from this repository. It sets up new worktrees with `make setup` and adds actions to update dependencies, refresh Rust stable, validate/build, transfer to the TV, and clean Docker builds. Leave automatic worktree cleanup empty so reusable Docker caches survive.
@@ -53,6 +59,10 @@ Do not add a fake `getauxval` shim. Reconsider the native SDK when either:
 
 Until then, the Debian Buster container is canonical. [`hyperhdr-webos-loader`](https://github.com/webosbrew/hyperhdr-webos-loader) remains the reference for native service, frontend, autostart, and IPK layout; it uses the same Buildroot SDK, but does not solve this Rust libc boundary.
 
+[`openlgtv/buildroot-nc4`](https://github.com/openlgtv/buildroot-nc4) is the Buildroot source used by the community toolchain. Rebuilding or forking it would be a separate SDK maintenance project; it does not by itself resolve the current Rust `getauxval` link failure. Keep the cached container build unless a candidate SDK passes the link, ELF/glibc inspection, and supervised TV checks above.
+
+For native LG capture interfaces, consult [`webosbrew/webos-userland`](https://github.com/webosbrew/webos-userland/tree/main) and its [generated API reference](https://www.webosbrew.org/webos-userland/index.html). These are community headers and stub libraries, not proof that a symbol or capture mode works on this TV firmware. Keep runtime symbol checks and frame validation at the capture boundary.
+
 ## First install
 
 Root SSH must already work; rooting is a separate owner action.
@@ -72,10 +82,10 @@ ares-rs-setup-device --add tv --info host=<tv-ip> --info username=root --info po
 ares-rs-package webos-app --outdir target
 ares-rs-install --device tv target/org.webosbrew.lg-hue-sync_<version>_all.ipk
 ares-rs-push --device tv <local-file> <remote-path>
-ares-rs-shell --device tv '<command>'
+ares-rs-shell --device tv --run '<command>'
 ```
 
-Node equivalents (`ares-package`, `ares-install`, `ares-push`, `ares-shell`) remain supported. Ares handles the launcher app and ordinary transfer. Root-owned daemon/service provisioning still uses the repository's SSH workflow until the IPK owns and verifies the complete install/uninstall lifecycle.
+Node equivalents (`ares-package`, `ares-install`, `ares-push`, `ares-shell`) remain supported. The `ares-rs-*` names are local aliases for upstream's `ares-*` Rust binaries. Ares can package and install the launcher app and transfer files, but the repository's deploy scripts currently use `scripts/package_ipk.py` and SSH/Luna. Root-owned daemon/service provisioning stays on the SSH workflow until the IPK owns and verifies the complete install/uninstall lifecycle.
 
 ## Safe binary update
 
@@ -85,6 +95,12 @@ make deploy-bin TV_IP=<tv-ip>
 ```
 
 The update retains `config.json`, backs up the previous binary, uploads through a temporary filename, and restarts the service.
+
+## Apple Shortcuts and presets
+
+On the same trusted LAN, create an Apple Shortcut with a **URL** action set to `http://<tv-ip>:8088/api/presets/neutral`, followed by **Get Contents of URL** with method **POST** and no request body. Replace `neutral` with `highChroma`, `neonContrast`, `darkSceneDetail`, `fastResponse`, or `lowStimulation` for the other dashboard presets. A successful request returns `{"status":"ok"}`; an unknown name returns HTTP 400. The existing `POST /api/start` and `POST /api/stop` endpoints can be used in separate Shortcuts.
+
+Preset changes affect live settings only. Use the dashboard's **Save Settings** control, or `POST /api/save-config`, to keep the chosen settings after restart. Presets preserve Hue/Nanoleaf output trims, device enablement, alignment, and other non-preset controls. Port 8088 has no authentication; keep it on the trusted LAN and do not forward it to the Internet. No Shortcut or API call is needed to edit the TV's `config.json` directly.
 
 ## Verification
 

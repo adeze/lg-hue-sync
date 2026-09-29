@@ -15,6 +15,7 @@ Read `AGENTS.md`, then the relevant guide:
 
 - Deploy only `armv7-unknown-linux-gnueabi`; never transfer a host binary.
 - Treat `webosbrew/native-toolchain` as the reference SDK, but use the documented Debian Buster build until the SDK passes the `getauxval`/`ring` gate.
+- [`openlgtv/buildroot-nc4`](https://github.com/openlgtv/buildroot-nc4) underpins that SDK; consult [`webosbrew/webos-userland`](https://github.com/webosbrew/webos-userland/tree/main) and its [generated API reference](https://www.webosbrew.org/webos-userland/index.html) for capture headers, then verify symbols and behavior on the target firmware. See `docs/operations.md` for gates.
 - Prefer installed `ares-rs-*` aliases for launcher packaging/install and ordinary transfer; retain SSH for root service lifecycle.
 - Preserve the TV's paired `config.json` during updates.
 - Treat credentials, tokens, pins, IPs, and MACs as private.

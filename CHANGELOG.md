@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Add an opt-in raw NV12 centre-patch probe with read-only TV mode hints, plus selectable SDR browser patches at `/capture-patterns`; neither path writes frames or drives lights.
+- Allow trusted-LAN automation, including Apple Shortcuts, to apply named dashboard presets through `POST /api/presets/{name}` without changing output trims or other controls.
+- Document webOS Brew userland headers/API reference and the Buildroot source behind the native SDK.
+- Record a capture colourimetry, temporal response, precision, and latency validation plan based on HyperHDR's published pipeline.
+
+### Changed
+- Leave the unverified 8-bit midtone lift off in newly generated configurations and label it accurately in the dashboard; preserve existing configuration values and the legacy JSON key.
+
+### Fixed
+- Base Hue and Nanoleaf temporal smoothing and colour-step limits on elapsed time, preserving 30 FPS tuning across variable capture rates and bounding long-stall jumps.
+- Validate webOS capture frame dimensions and plane lengths before conversion, keep NV12 conversion safe for callers, release partially mapped display buffers when setup fails, and remove an unverified cross-thread handle guarantee.
+- Process dashboard commands while capture is paused, honor per-device output toggles on resume, and report Nanoleaf status after a successful local send.
+- Reject invalid capture sizes and dashboard settings, serialize configuration read-modify-write operations across daemon, dashboard, and setup commands, and report save failures to the dashboard.
+
 ## [0.5.0] - 2026-09-29
 
 ### Changed
@@ -76,7 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial release of headless Rust sync daemon for LG C1 webOS Smart TVs.
 - Zero-copy display frame capture via `libvtcapture.so` hardware scaler.
-- Reinhard OLED HDR10 and Dolby Vision tone-mapping.
+- Legacy 8-bit midtone lift (historically described as HDR10/Dolby Vision tone mapping; source transfer metadata was not available).
 - Philips Hue Gamut C boundary clamping and CIE 1931 xy mode.
 - Direct DTLS 1.2 PSK UDP streaming on port 2100.
 - Automatic pushlink pairing (`pair`), test pattern (`test-pattern`), and test capture (`test-capture`) CLI commands.

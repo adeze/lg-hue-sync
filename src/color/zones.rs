@@ -2,6 +2,9 @@ use crate::color::gamut::{rgb_to_xy_brightness, HueGamut, HueXYBrightness};
 use crate::config::LightZone;
 
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
+
+pub(crate) const REFERENCE_FRAME: Duration = Duration::from_nanos(33_333_333);
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RgbColor {
@@ -72,7 +75,7 @@ impl RgbColor {
         )
     }
 
-    /// Applies Reinhard tone mapping to prevent clipped highlights on HDR10/Dolby Vision video
+    /// Legacy 8-bit midtone lift; capture transfer and HDR metadata are unavailable here.
     pub fn tone_map_hdr(self) -> Self {
         let r_f = self.r as f32 / 255.0;
         let g_f = self.g as f32 / 255.0;
@@ -279,7 +282,10 @@ impl ColorProcessor {
         max_luma: f32,
         current: RgbColor,
         is_scene_cut: bool,
+        elapsed: Duration,
     ) -> RgbColor {
+        // Preserve 30 FPS tuning without treating a capture stall as one giant color jump.
+        let elapsed = elapsed.min(Duration::from_millis(100));
         let mut target = if self.peak_weight > 0.0 && max_luma > 0.0 {
             mean.lerp(peak, self.peak_weight)
         } else {
@@ -303,12 +309,19 @@ impl ColorProcessor {
         let alpha = if is_scene_cut {
             1.0
         } else if target.luminance() < current.luminance() {
-            self.fall
+            elapsed_alpha(self.fall, elapsed)
         } else {
-            self.rise
+            elapsed_alpha(self.rise, elapsed)
         };
-        limit_color_step(current, current.lerp(target, alpha), self.max_color_step)
+        let max_step = (self.max_color_step as f32 * elapsed.as_secs_f32() * 30.0)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        limit_color_step(current, current.lerp(target, alpha), max_step)
     }
+}
+
+fn elapsed_alpha(reference_alpha: f32, elapsed: Duration) -> f32 {
+    1.0 - (1.0 - reference_alpha).powf(elapsed.as_secs_f32() * 30.0)
 }
 
 /// Active viewport bounds after detecting letterbox/pillarbox bars (normalized 0.0 to 1.0)
@@ -339,6 +352,7 @@ pub struct ZoneSampler {
     active_rect: ActiveRect,
     frame_count: u64,
     last_global_color: RgbColor,
+    last_sample: Option<Instant>,
 }
 
 impl ZoneSampler {
@@ -364,6 +378,7 @@ impl ZoneSampler {
             active_rect: ActiveRect::default(),
             frame_count: 0,
             last_global_color: RgbColor::new(0, 0, 0),
+            last_sample: None,
         }
     }
 
@@ -521,6 +536,12 @@ impl ZoneSampler {
         height: u32,
         is_bgra: bool,
     ) -> (Vec<(u8, RgbColor)>, bool) {
+        let now = Instant::now();
+        let elapsed = self
+            .last_sample
+            .replace(now)
+            .map(|last| now.duration_since(last))
+            .unwrap_or(REFERENCE_FRAME);
         self.frame_count += 1;
 
         // Run letterbox detector periodically (every 15 frames) or on first frame
@@ -654,9 +675,14 @@ impl ZoneSampler {
             };
 
             let current = self.smoothed_colors[i];
-            let smoothed =
-                self.processor
-                    .process(mean_color, peak_pixel, max_luma, current, is_scene_cut);
+            let smoothed = self.processor.process(
+                mean_color,
+                peak_pixel,
+                max_luma,
+                current,
+                is_scene_cut,
+                elapsed,
+            );
             self.smoothed_colors[i] = smoothed;
 
             results.push((zone.channel_id, smoothed));
@@ -790,5 +816,122 @@ mod tests {
             limit_color_step(RgbColor::new(0, 0, 0), RgbColor::new(255, 255, 255), 12),
             RgbColor::new(12, 12, 12)
         );
+    }
+
+    #[test]
+    fn smoothing_tracks_elapsed_time_across_frame_rates() {
+        let mut processor = ColorProcessor::new(0.05, false, 1.0, 0.0);
+        processor.set_peak_weight(0.0);
+        processor.set_max_color_step(255);
+        let target = RgbColor::new(200, 200, 200);
+        assert!((elapsed_alpha(0.05, REFERENCE_FRAME) - 0.05).abs() < 0.000_01);
+        for (start, end) in [
+            (RgbColor::new(0, 0, 0), target),
+            (target, RgbColor::new(0, 0, 0)),
+        ] {
+            let mut outputs = Vec::new();
+            for fps in [20, 30, 60] {
+                let mut current = start;
+                for _ in 0..(fps / 2) {
+                    current = processor.process(
+                        end,
+                        end,
+                        1.0,
+                        current,
+                        false,
+                        Duration::from_secs_f32(1.0 / fps as f32),
+                    );
+                }
+                outputs.push(current.r);
+            }
+            assert!(
+                outputs.iter().all(|value| value.abs_diff(outputs[1]) <= 8),
+                "{outputs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn large_color_steps_have_the_same_half_second_response() {
+        let mut processor = ColorProcessor::new(1.0, false, 1.0, 0.0);
+        processor.set_peak_weight(0.0);
+        let black = RgbColor::new(0, 0, 0);
+        let white = RgbColor::new(255, 255, 255);
+        let outputs: Vec<u8> = [20, 30, 60]
+            .into_iter()
+            .map(|fps| {
+                let mut current = black;
+                for _ in 0..(fps / 2) {
+                    current = processor.process(
+                        white,
+                        white,
+                        1.0,
+                        current,
+                        false,
+                        Duration::from_secs_f32(1.0 / fps as f32),
+                    );
+                }
+                current.r
+            })
+            .collect();
+        assert_eq!(outputs, vec![180, 180, 180]);
+        assert_eq!(
+            processor.process(white, white, 1.0, black, false, Duration::from_secs(10)),
+            RgbColor::new(36, 36, 36)
+        );
+    }
+
+    #[test]
+    fn elapsed_smoothing_preserves_zero_time_scene_cuts_and_blackout() {
+        let mut processor = ColorProcessor::new(0.35, false, 1.0, 0.0);
+        processor.set_peak_weight(0.0);
+        let black = RgbColor::new(0, 0, 0);
+        let white = RgbColor::new(255, 255, 255);
+        assert_eq!(
+            processor.process(white, white, 1.0, black, false, Duration::ZERO),
+            black
+        );
+        assert_eq!(
+            processor.process(white, white, 1.0, black, true, REFERENCE_FRAME),
+            RgbColor::new(12, 12, 12)
+        );
+        assert_eq!(
+            processor.process(white, white, 1.0, black, true, Duration::ZERO),
+            black
+        );
+        processor.set_strict_blackout(true);
+        assert_eq!(
+            processor.process(black, black, 0.0, white, false, Duration::ZERO),
+            black
+        );
+    }
+
+    #[test]
+    fn legacy_midtone_lift_leaves_black_and_white_unchanged() {
+        let mut processor = ColorProcessor::new(1.0, false, 1.0, 0.0);
+        processor.set_peak_weight(0.0);
+        processor.set_max_color_step(255);
+        let black = RgbColor::new(0, 0, 0);
+        let gray = RgbColor::new(128, 128, 128);
+        let white = RgbColor::new(255, 255, 255);
+        for input in [black, gray, white] {
+            assert_eq!(
+                processor.process(input, input, 1.0, black, true, REFERENCE_FRAME),
+                input
+            );
+        }
+        processor.set_hdr_tone_mapping(true);
+        assert_eq!(
+            processor.process(black, black, 1.0, white, true, REFERENCE_FRAME),
+            black
+        );
+        assert_eq!(
+            processor.process(white, white, 1.0, black, true, REFERENCE_FRAME),
+            white
+        );
+        let lifted = processor.process(gray, gray, 1.0, black, true, REFERENCE_FRAME);
+        assert!(lifted.r > gray.r);
+        assert_eq!(lifted.r, lifted.g);
+        assert_eq!(lifted.g, lifted.b);
     }
 }

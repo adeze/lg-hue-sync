@@ -11,7 +11,7 @@ pub struct CapturedFrame<'a> {
     pub is_bgra: bool,
 }
 
-pub trait ScreenCapture: Send {
+pub trait ScreenCapture {
     fn acquire_frame(&mut self) -> Result<CapturedFrame<'_>>;
     #[allow(dead_code)]
     fn resolution(&self) -> (u32, u32);

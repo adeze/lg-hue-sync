@@ -143,7 +143,7 @@ pub struct DileVtFramebufferCapability {
 #[repr(C)]
 #[derive(Debug)]
 pub struct DileVtFramebufferProperty {
-    pub pixel_format: DileVtPixelFormat,
+    pub pixel_format: u32,
     pub stride: u32,
     pub width: u32,
     pub height: u32,
@@ -159,6 +159,14 @@ struct MappedPlane {
     data_ptr: *mut u8,
     mapped_base: *mut c_void,
     map_len: usize,
+    data_len: usize,
+}
+
+impl Drop for MappedPlane {
+    fn drop(&mut self) {
+        // SAFETY: this mapping was returned by mmap and remains owned by this plane.
+        unsafe { libc::munmap(self.mapped_base, self.map_len) };
+    }
 }
 
 type FnCreate = unsafe extern "C" fn(u32) -> *mut c_void;
@@ -178,12 +186,26 @@ type FnGetAllProperties = unsafe extern "C" fn(
 type FnGetCurrentProperty = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut u32) -> i32;
 type FnWaitVsync = unsafe extern "C" fn(*mut c_void) -> i32;
 
+struct SetupHandle {
+    handle: *mut c_void,
+    destroy: FnDestroy,
+}
+
+impl Drop for SetupHandle {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            // SAFETY: this handle is owned by setup until transferred to DileVtCapture.
+            unsafe { (self.destroy)(self.handle) };
+        }
+    }
+}
+
 pub struct DileVtCapture {
     handle: *mut c_void,
     width: u32,
     height: u32,
     stride: u32,
-    pixel_format: DileVtPixelFormat,
+    pixel_format: u32,
     num_vfbs: usize,
     #[allow(dead_code)]
     num_planes: usize,
@@ -202,10 +224,15 @@ pub struct DileVtCapture {
     _lib_dile: libloading::Library,
 }
 
-unsafe impl Send for DileVtCapture {}
-
 impl DileVtCapture {
     pub fn try_new(target_width: u32, target_height: u32, fps_limit: u32) -> Result<Self> {
+        if target_width == 0
+            || target_height == 0
+            || target_width > u16::MAX as u32
+            || target_height > u16::MAX as u32
+        {
+            return Err(anyhow!("capture dimensions exceed DILE_VT limits"));
+        }
         let dile_path = "/usr/lib/libdile_vt.so.0";
         if !std::path::Path::new(dile_path).exists() {
             return Err(anyhow!("Driver {} not found on system", dile_path));
@@ -276,6 +303,10 @@ impl DileVtCapture {
                     "Failed to acquire DILE_VT context (both CreateEx and Create returned NULL)"
                 ));
             }
+            let mut setup = SetupHandle {
+                handle,
+                destroy: *fn_destroy,
+            };
 
             info!("[+] Successfully acquired DILE_VT handle: {:?}", handle);
 
@@ -285,7 +316,6 @@ impl DileVtCapture {
                 warn!("DISPLAY_OUTPUT rejected, falling back to SCALER_OUTPUT");
                 dump_location = DUMP_SCALER_OUTPUT;
                 if fn_set_dump(handle, dump_location) != 0 {
-                    fn_destroy(handle);
                     return Err(anyhow!("Failed to set DILE_VT dump location"));
                 }
             }
@@ -298,7 +328,6 @@ impl DileVtCapture {
                 height: target_height as u16,
             };
             if fn_set_region(handle, dump_location, &region) != 0 {
-                fn_destroy(handle);
                 return Err(anyhow!(
                     "Failed to set DILE_VT output region to {}x{}",
                     target_width,
@@ -324,7 +353,6 @@ impl DileVtCapture {
                 num_planes: 0,
             };
             if fn_get_cap(handle, &mut cap) != 0 || cap.num_vfbs == 0 || cap.num_planes == 0 {
-                fn_destroy(handle);
                 return Err(anyhow!("Failed to get DILE_VT capability"));
             }
 
@@ -334,7 +362,7 @@ impl DileVtCapture {
             let mut ptr_ptrs: Vec<*mut u32> = ptr_rows.iter_mut().map(|r| r.as_mut_ptr()).collect();
 
             let mut prop = DileVtFramebufferProperty {
-                pixel_format: DileVtPixelFormat::Yuv420SemiPlanar,
+                pixel_format: DileVtPixelFormat::Yuv420SemiPlanar as u32,
                 stride: 0,
                 width: 0,
                 height: 0,
@@ -342,7 +370,6 @@ impl DileVtCapture {
             };
 
             if fn_get_all(handle, &cap, &mut prop) != 0 {
-                fn_destroy(handle);
                 return Err(anyhow!("DILE_VT_GetAllVideoFrameBufferProperty failed"));
             }
 
@@ -360,7 +387,11 @@ impl DileVtCapture {
                 .map_err(|e| anyhow!("Failed to open /dev/mem (requires root): {}", e))?;
 
             let mem_fd = mem_file.as_raw_fd();
-            let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+            if page_size <= 0 {
+                return Err(anyhow!("could not determine system page size"));
+            }
+            let page_size = page_size as usize;
             let page_mask = (page_size - 1) as libc::off_t;
 
             let capture_width = if prop.width > 0 {
@@ -378,6 +409,17 @@ impl DileVtCapture {
             } else {
                 capture_width
             };
+            let (_, _, rgb_size) =
+                super::vtcapture::nv12_lengths(capture_width, capture_height, stride)?;
+            if prop.pixel_format == DileVtPixelFormat::Yuv420SemiPlanar as u32 && cap.num_planes < 2
+            {
+                return Err(anyhow!("NV12 capture requires two planes"));
+            }
+            if prop.pixel_format == DileVtPixelFormat::Rgb as u32
+                && (stride as usize) < rgb_size / capture_height as usize
+            {
+                return Err(anyhow!("RGB capture stride is shorter than a pixel row"));
+            }
 
             let mut mapped_buffers = Vec::with_capacity(cap.num_vfbs as usize);
 
@@ -388,12 +430,22 @@ impl DileVtCapture {
                     let phys_base = phys_addr & !page_mask;
                     let page_offset = (phys_addr & page_mask) as usize;
 
-                    let plane_len = if plane_idx == 0 {
-                        (stride * capture_height) as usize
+                    let rows = if plane_idx == 0 {
+                        capture_height as usize
                     } else {
-                        (stride * (capture_height / 2)) as usize
+                        capture_height as usize / 2 + capture_height as usize % 2
                     };
-                    let map_len = page_offset + plane_len;
+                    let plane_len = (stride as usize)
+                        .checked_mul(rows)
+                        .ok_or_else(|| anyhow!("capture plane size overflow"))?;
+                    let map_len = page_offset
+                        .checked_add(plane_len)
+                        .ok_or_else(|| anyhow!("capture mapping size overflow"))?;
+                    if phys_addr == 0 || map_len == 0 {
+                        return Err(anyhow!(
+                            "capture driver returned invalid plane address or size"
+                        ));
+                    }
 
                     let mapped_base = libc::mmap(
                         std::ptr::null_mut(),
@@ -405,7 +457,6 @@ impl DileVtCapture {
                     );
 
                     if mapped_base == libc::MAP_FAILED {
-                        fn_destroy(handle);
                         return Err(anyhow!(
                             "mmap failed for VFB {} Plane {} at physical DMA address 0x{:08X}",
                             vfb_idx,
@@ -419,6 +470,7 @@ impl DileVtCapture {
                         data_ptr,
                         mapped_base,
                         map_len,
+                        data_len: plane_len,
                     });
                 }
                 mapped_buffers.push(planes);
@@ -426,11 +478,10 @@ impl DileVtCapture {
 
             // 8. Start video stream capture
             if fn_start(handle) != 0 {
-                fn_destroy(handle);
                 return Err(anyhow!("DILE_VT_Start failed"));
             }
 
-            let rgb_size = (capture_width * capture_height * 4) as usize;
+            setup.handle = std::ptr::null_mut();
 
             Ok(Self {
                 handle,
@@ -451,38 +502,6 @@ impl DileVtCapture {
                 _lib_hal: lib_hal,
                 _lib_dile: lib,
             })
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn convert_nv12_to_rgb(&mut self, y_plane: *const u8, uv_plane: *const u8) {
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let stride = self.stride as usize;
-
-        for y in 0..height {
-            let y_row = y * stride;
-            let uv_row = (y / 2) * stride;
-            let out_row = y * width * 4;
-
-            for x in 0..width {
-                let y_val = *y_plane.add(y_row + x) as i32;
-                let uv_offset = uv_row + (x / 2) * 2;
-                let u_val = *uv_plane.add(uv_offset) as i32 - 128;
-                let v_val = *uv_plane.add(uv_offset + 1) as i32 - 128;
-
-                // Fixed-point BT.709 video range conversion
-                let c = (y_val - 16).max(0);
-                let r = ((298 * c + 409 * v_val + 128) >> 8).clamp(0, 255) as u8;
-                let g = ((298 * c - 100 * u_val - 208 * v_val + 128) >> 8).clamp(0, 255) as u8;
-                let b = ((298 * c + 516 * u_val + 128) >> 8).clamp(0, 255) as u8;
-
-                let out_idx = out_row + x * 4;
-                self.rgb_buffer[out_idx] = r;
-                self.rgb_buffer[out_idx + 1] = g;
-                self.rgb_buffer[out_idx + 2] = b;
-                self.rgb_buffer[out_idx + 3] = 255;
-            }
         }
     }
 }
@@ -508,28 +527,53 @@ impl ScreenCapture for DileVtCapture {
             let planes = &self.mapped_buffers[vfb_idx];
 
             match self.pixel_format {
-                DileVtPixelFormat::Yuv420SemiPlanar => {
-                    let y_ptr = planes[0].data_ptr;
-                    let uv_ptr = planes[1].data_ptr;
-                    self.convert_nv12_to_rgb(y_ptr, uv_ptr);
+                format if format == DileVtPixelFormat::Yuv420SemiPlanar as u32 => {
+                    let (y_len, uv_len, _) =
+                        super::vtcapture::nv12_lengths(self.width, self.height, self.stride)?;
+                    if planes.len() < 2 || planes[0].data_len < y_len || planes[1].data_len < uv_len
+                    {
+                        return Err(anyhow!("mapped NV12 capture planes are too short"));
+                    }
+                    // SAFETY: these pointers refer to live mmap regions with checked lengths.
+                    let y = std::slice::from_raw_parts(planes[0].data_ptr, y_len);
+                    let uv = std::slice::from_raw_parts(planes[1].data_ptr, uv_len);
+                    super::vtcapture::convert_nv12_to_rgba(
+                        self.width,
+                        self.height,
+                        self.stride,
+                        y,
+                        uv,
+                        &mut self.rgb_buffer,
+                    )?;
                 }
-                DileVtPixelFormat::Rgb => {
-                    let src_ptr = planes[0].data_ptr;
-                    std::ptr::copy_nonoverlapping(
-                        src_ptr,
-                        self.rgb_buffer.as_mut_ptr(),
-                        self.rgb_buffer.len(),
-                    );
+                format if format == DileVtPixelFormat::Rgb as u32 => {
+                    let row_bytes = self.width as usize * 4;
+                    let required = (self.height as usize - 1) * self.stride as usize + row_bytes;
+                    if planes[0].data_len < required {
+                        return Err(anyhow!("mapped RGB capture plane is too short"));
+                    }
+                    // SAFETY: the mapped plane covers the checked source length and does not alias the output.
+                    let src = std::slice::from_raw_parts(planes[0].data_ptr, required);
+                    for (row, dst) in self.rgb_buffer.chunks_exact_mut(row_bytes).enumerate() {
+                        let offset = row * self.stride as usize;
+                        dst.copy_from_slice(&src[offset..offset + row_bytes]);
+                    }
                 }
                 _ => {
                     // Fallback to Y plane as grayscale if unexpected format
-                    let y_ptr = planes[0].data_ptr;
+                    let (y_len, _, _) =
+                        super::vtcapture::nv12_lengths(self.width, self.height, self.stride)?;
+                    if planes[0].data_len < y_len {
+                        return Err(anyhow!("mapped capture plane is too short"));
+                    }
+                    // SAFETY: the mapped plane covers the checked luma length.
+                    let y_plane = std::slice::from_raw_parts(planes[0].data_ptr, y_len);
                     let width = self.width as usize;
                     let height = self.height as usize;
                     let stride = self.stride as usize;
                     for y in 0..height {
                         for x in 0..width {
-                            let y_val = *y_ptr.add(y * stride + x);
+                            let y_val = y_plane[y * stride + x];
                             let out_idx = (y * width + x) * 4;
                             self.rgb_buffer[out_idx] = y_val;
                             self.rgb_buffer[out_idx + 1] = y_val;
@@ -562,15 +606,9 @@ impl Drop for DileVtCapture {
     fn drop(&mut self) {
         unsafe {
             (self.fn_stop)(self.handle);
-            for vfb in &self.mapped_buffers {
-                for plane in vfb {
-                    if !plane.mapped_base.is_null() && plane.mapped_base != libc::MAP_FAILED {
-                        libc::munmap(plane.mapped_base, plane.map_len);
-                    }
-                }
-            }
-            (self.fn_destroy)(self.handle);
         }
+        self.mapped_buffers.clear();
+        unsafe { (self.fn_destroy)(self.handle) };
     }
 }
 

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LG Hue Sync capture patches</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; }
+    #patch { position: fixed; inset: 0; background: #808080; }
+    #controls { position: fixed; top: 12px; left: 12px; z-index: 1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px; color: white; background: #111e; font: 16px system-ui, sans-serif; border-radius: 8px; }
+    button, select { font: inherit; padding: 6px; }
+    #note { max-width: 30rem; font-size: 13px; }
+    :fullscreen #controls { display: none; }
+  </style>
+</head>
+<body>
+  <div id="patch" aria-hidden="true"></div>
+  <div id="controls">
+    <label for="choice">Screen patch</label>
+    <select id="choice">
+      <option value="black">Black #000000</option>
+      <option value="near-black">Near black #101010</option>
+      <option value="gray18">Gray #777777</option>
+      <option value="mid-gray" selected>Mid-gray #808080</option>
+      <option value="white">White #ffffff</option>
+      <option value="red">Red #ff0000</option>
+      <option value="green">Green #00ff00</option>
+      <option value="blue">Blue #0000ff</option>
+      <option value="cyan">Cyan #00ffff</option>
+      <option value="magenta">Magenta #ff00ff</option>
+      <option value="yellow">Yellow #ffff00</option>
+    </select>
+    <button id="previous" type="button">Previous</button>
+    <button id="next" type="button">Next</button>
+    <button id="fullscreen" type="button">Fullscreen</button>
+    <span id="note">Nominal SDR browser colours. Fixed Dolby Vision output is not a mastered DV reference.</span>
+  </div>
+  <script>
+    const colors = {
+      black: '#000000', 'near-black': '#101010', gray18: '#777777',
+      'mid-gray': '#808080', white: '#ffffff', red: '#ff0000',
+      green: '#00ff00', blue: '#0000ff', cyan: '#00ffff',
+      magenta: '#ff00ff', yellow: '#ffff00'
+    };
+    const choice = document.getElementById('choice');
+    function show(name) {
+      if (!Object.prototype.hasOwnProperty.call(colors, name)) return;
+      choice.value = name;
+      document.getElementById('patch').style.backgroundColor = colors[name];
+    }
+    function move(offset) {
+      const next = (choice.selectedIndex + offset + choice.options.length) % choice.options.length;
+      show(choice.options[next].value);
+    }
+    choice.addEventListener('change', () => show(choice.value));
+    document.getElementById('previous').addEventListener('click', () => move(-1));
+    document.getElementById('next').addEventListener('click', () => move(1));
+    document.getElementById('fullscreen').addEventListener('click', () => document.documentElement.requestFullscreen?.());
+    document.addEventListener('keydown', event => {
+      if (event.key === 'ArrowLeft') move(-1);
+      if (event.key === 'ArrowRight') move(1);
+    });
+    show(choice.value);
+  </script>
+</body>
+</html>

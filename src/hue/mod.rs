@@ -74,9 +74,11 @@ pub fn pair_bridge(
     let start = Instant::now();
     let mut username = String::new();
     let mut clientkey = String::new();
+    let agent = crate::local_http::agent(None);
 
     while start.elapsed() < Duration::from_secs(timeout_secs) {
-        let resp = ureq::post(&url)
+        let resp = agent
+            .post(&url)
             .header("Content-Type", "application/json")
             .send_json(payload.clone());
 

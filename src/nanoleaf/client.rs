@@ -40,9 +40,11 @@ pub fn pair_nanoleaf(ip: &str, timeout_secs: u64) -> Result<(String, u16, Vec<u1
 
     let start = Instant::now();
     let mut auth_token = String::new();
+    let agent = crate::local_http::agent(None);
 
     while start.elapsed() < Duration::from_secs(timeout_secs) {
-        let resp = ureq::post(&url)
+        let resp = agent
+            .post(&url)
             .header("Content-Type", "application/json")
             .send_empty();
 
@@ -98,10 +100,11 @@ pub fn get_panel_layout(ip: &str, auth_token: &str) -> Result<PanelLayout> {
         "http://{}:16021/api/v1/{}/panelLayout/layout",
         ip, auth_token
     );
-    let resp = ureq::get(&url)
+    let resp = crate::local_http::agent(None)
+        .get(&url)
         .header("Content-Type", "application/json")
         .call()
-        .with_context(|| format!("Failed to fetch panel layout from {}", url))?;
+        .map_err(|error| crate::local_http::request_error("Nanoleaf panel layout", error))?;
 
     let layout: PanelLayout = resp
         .into_body()
@@ -127,15 +130,12 @@ pub fn enable_external_control(ip: &str, auth_token: &str) -> Result<u16> {
         "Enabling Nanoleaf external control (UDP v2) mode on {}...",
         ip
     );
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(3)))
-        .build()
-        .into();
+    let agent = crate::local_http::agent(Some(Duration::from_secs(3)));
     let resp = agent
         .put(&url)
         .header("Content-Type", "application/json")
         .send_json(payload)
-        .with_context(|| format!("Failed to enable extControl on {}", url))?;
+        .map_err(|error| crate::local_http::request_error("Nanoleaf external control", error))?;
 
     let default_port = 60222u16;
     // Some firmwares return UDP details in the response body or headers

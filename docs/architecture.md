@@ -8,6 +8,9 @@
 4. `src/nanoleaf/` maps perimeter samples to discovered panel IDs and sends UDP frames.
 5. `src/web/` serves the LAN dashboard and configuration API on port 8088.
 
+`src/setup.rs` owns the pairing and bridge setup commands; `src/main.rs` owns daemon orchestration.
+Existing invalid configuration files stop setup instead of being replaced with defaults.
+
 Dashboard actions enter the daemon through a bounded typed command channel. `src/runtime.rs`
 coalesces desired start/stop state while preserving restart, reconfiguration, save, and Bridge
 refresh actions. Runtime output state remains distinct from the persisted configuration.

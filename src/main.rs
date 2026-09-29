@@ -2,8 +2,10 @@ mod capture;
 mod color;
 mod config;
 mod hue;
+mod local_http;
 mod nanoleaf;
 mod runtime;
+mod setup;
 mod tv_power;
 mod web;
 
@@ -20,10 +22,11 @@ use tracing_subscriber::FmtSubscriber;
 
 use capture::{create_capture, detect_source_fps, VtCapture};
 use color::{RgbColor, ZoneSampler};
-use config::{Config, ConfigError, NanoleafAlignment};
+use config::{Config, ConfigError};
 use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
 use nanoleaf::{NanoleafPerimeterSampler, NanoleafUdpStreamer};
 use runtime::{PendingCommands, PipelineState, RetryState};
+use setup::{run_pair, run_pair_nanoleaf, run_sync_hue};
 use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
 
 #[derive(Parser)]
@@ -465,6 +468,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         sd_notify::NotifyState::Ready,
         sd_notify::NotifyState::Status(&status_desc),
     ]);
+    let mut watchdog = WatchdogHeartbeat::new();
 
     let initial_settings = LiveSettings {
         brightness_multiplier: config.brightness_multiplier,
@@ -548,7 +552,6 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut last_nanoleaf_heartbeat = tokio::time::Instant::now();
     let mut light_update_count = 0u32;
     let mut light_update_window = tokio::time::Instant::now();
-    let mut last_watchdog = tokio::time::Instant::now();
     let mut last_status_check = tokio::time::Instant::now();
     let mut last_hw_probe = tokio::time::Instant::now();
     let mut last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
@@ -572,11 +575,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         let loop_start = tokio::time::Instant::now();
         let mut emitted_light_update = false;
 
-        // Feed systemd watchdog every 2 seconds
-        if last_watchdog.elapsed() >= Duration::from_secs(2) {
-            let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
-            last_watchdog = tokio::time::Instant::now();
-        }
+        watchdog.tick();
 
         if auto_tv_power && last_tv_power_poll.elapsed() >= Duration::from_secs(2) {
             last_tv_power_poll = tokio::time::Instant::now();
@@ -660,9 +659,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
 
             while running.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::time::sleep(watchdog.pause_poll_period()).await;
                 pending_commands.receive(&mut command_rx);
-                let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
+                watchdog.tick();
 
                 let configured_auto_tv_power =
                     shared_state.current_settings.read().unwrap().auto_tv_power;
@@ -1282,7 +1281,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
                 // Sleep 750ms for webOS Display Engine and HDMI PLL/scaler to settle
                 tokio::time::sleep(Duration::from_millis(750)).await;
-                let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
+                watchdog.tick();
 
                 // Auto-adapt to new source refresh rate if enabled
                 if config.fps == 0 {
@@ -1471,133 +1470,38 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     )
 }
 
-async fn run_pair(bridge_opt: Option<String>, output: PathBuf) -> Result<()> {
-    let bridge_ip = match bridge_opt {
-        Some(ip) => ip,
-        None => match hue::discover_bridge() {
-            Ok(ip) => ip,
-            Err(e) => {
-                println!(
-                    "Auto-discovery: {}. Please enter Hue Bridge IP manually:",
-                    e
-                );
-                use std::io::{stdin, stdout, Write};
-                print!("Bridge IP: ");
-                stdout().flush().ok();
-                let mut line = String::new();
-                stdin().read_line(&mut line)?;
-                line.trim().to_string()
-            }
-        },
-    };
-
-    let (username, clientkey, area) = hue::pair_bridge(&bridge_ip, 45)?;
-    let mut config = if output.exists() {
-        Config::load(&output).unwrap_or_else(|_| {
-            Config::new_default(&bridge_ip, &username, &clientkey, &area.configuration_id)
-        })
-    } else {
-        Config::new_default(&bridge_ip, &username, &clientkey, &area.configuration_id)
-    };
-
-    config.bridge_ip = bridge_ip;
-    config.username = username;
-    config.clientkey = clientkey;
-    config.entertainment_area_id = area.configuration_id.clone();
-    config.entertainment_configuration_id = Some(area.configuration_id);
-    config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
-    if !area.zones.is_empty() {
-        config.zones = area.zones;
-    }
-
-    config.save(&output)?;
-    println!(
-        "\n[+] Configuration and Hue credentials successfully saved to {:?}",
-        output
-    );
-    println!("    You can now run: lg-hue-sync run --config {:?}", output);
-    Ok(())
+fn watchdog_period(deadline: Duration) -> Duration {
+    (deadline / 2).max(Duration::from_millis(1))
 }
 
-async fn run_sync_hue(config_path: PathBuf, target_area: Option<String>) -> Result<()> {
-    let mut config = Config::load(&config_path)?;
-    info!(
-        "Querying Hue Bridge at {} for Entertainment Areas...",
-        config.bridge_ip
-    );
-
-    let area = hue::sync_entertainment_areas(
-        &config.bridge_ip,
-        &config.username,
-        target_area.as_deref(),
-        config.hue_bridge_certificate_sha256.as_deref(),
-    )?;
-
-    config.entertainment_area_id = area.configuration_id.clone();
-    config.entertainment_configuration_id = Some(area.configuration_id);
-    config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
-    if !area.zones.is_empty() {
-        config.zones = area.zones;
-    }
-    config.save(&config_path)?;
-
-    println!(
-        "\n[+] Entertainment area '{}' (ID: {}) synced successfully!",
-        area.name, config.entertainment_area_id
-    );
-    println!(
-        "    Updated {} light zones in {:?}",
-        config.zones.len(),
-        config_path
-    );
-    println!("    3D light positions have been refreshed and projected to screen sampling boxes.");
-    Ok(())
+struct WatchdogHeartbeat {
+    period: Option<Duration>,
+    last: tokio::time::Instant,
 }
 
-async fn run_pair_nanoleaf(ip_opt: Option<String>, config_path: PathBuf) -> Result<()> {
-    let ip = match ip_opt {
-        Some(ip) => ip,
-        None => {
-            use std::io::{stdin, stdout, Write};
-            print!("Enter Nanoleaf 4D IP address: ");
-            stdout().flush().ok();
-            let mut line = String::new();
-            stdin().read_line(&mut line)?;
-            line.trim().to_string()
+impl WatchdogHeartbeat {
+    fn new() -> Self {
+        Self {
+            period: sd_notify::watchdog_enabled().map(watchdog_period),
+            last: tokio::time::Instant::now(),
         }
-    };
+    }
 
-    let (auth_token, num_panels, panel_ids) = nanoleaf::pair_nanoleaf(&ip, 45)?;
-    let mut config = if config_path.exists() {
-        Config::load(&config_path).unwrap_or_else(|_| Config::new_default("", "", "", ""))
-    } else {
-        Config::new_default("", "", "", "")
-    };
+    fn tick(&mut self) {
+        if self
+            .period
+            .is_some_and(|period| self.last.elapsed() >= period)
+        {
+            let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
+            self.last = tokio::time::Instant::now();
+        }
+    }
 
-    config.nanoleaf = Some(crate::config::NanoleafConfig {
-        enabled: true,
-        ip: ip.clone(),
-        auth_token,
-        udp_port: 60222,
-        segments: num_panels.max(30),
-        panel_ids,
-        alignment: NanoleafAlignment::default(),
-    });
-
-    config.save(&config_path)?;
-    println!(
-        "\n[+] Nanoleaf 4D controller at {} successfully paired and saved to {:?}",
-        ip, config_path
-    );
-    println!(
-        "    You can test it with: lg-hue-sync test-nanoleaf --config {:?}",
-        config_path
-    );
-    println!(
-        "    Run live sync with:   lg-hue-sync run --config {:?}",
-        config_path
-    );
-    Ok(())
+    fn pause_poll_period(&self) -> Duration {
+        self.period
+            .unwrap_or(Duration::from_millis(250))
+            .min(Duration::from_millis(250))
+    }
 }
 
 #[cfg(test)]
@@ -1609,5 +1513,24 @@ mod tests {
         let previous = vec![RgbColor::new(10, 20, 30)];
         assert!(!colors_changed(&previous, &previous));
         assert!(colors_changed(&previous, &[RgbColor::new(13, 20, 30)]));
+    }
+
+    #[test]
+    fn watchdog_uses_half_the_reported_deadline() {
+        assert_eq!(
+            watchdog_period(Duration::from_secs(10)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(watchdog_period(Duration::ZERO), Duration::from_millis(1));
+        let idle = WatchdogHeartbeat {
+            period: None,
+            last: tokio::time::Instant::now(),
+        };
+        assert_eq!(idle.pause_poll_period(), Duration::from_millis(250));
+        let fast = WatchdogHeartbeat {
+            period: Some(Duration::from_millis(50)),
+            last: tokio::time::Instant::now(),
+        };
+        assert_eq!(fast.pause_poll_period(), Duration::from_millis(50));
     }
 }

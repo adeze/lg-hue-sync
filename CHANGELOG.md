@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-29
+
 ### Changed
 - Moved pairing and bridge setup commands out of the daemon entrypoint; setup now preserves an existing unreadable configuration instead of overwriting it.
 - Keep Hue/Nanoleaf LAN HTTP traffic direct, reject redirects, and redact Nanoleaf token URLs from request errors; send watchdog heartbeats only when configured and at half the reported interval.

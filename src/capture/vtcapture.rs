@@ -4,7 +4,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::Path;
 use tracing::{error, info, warn};
 
-use super::{CapturedFrame, ScreenCapture};
+use super::{CaptureError, CapturedFrame, NativeCaptureError, ScreenCapture};
 
 pub const LIBVTCAPTURE_PATH: &str = "/usr/lib/libvtcapture.so.1";
 
@@ -74,7 +74,6 @@ pub struct VtCapture {
     stride: u32,
     rgb_buffer: Vec<u8>,
     is_stopped: bool,
-    consecutive_errors: u32,
     last_addr0: usize,
     stale_count: u32,
     raw_stats_enabled: bool,
@@ -234,14 +233,13 @@ impl VtCapture {
                     error!(
                         "[-] vtCapture_init returned error 11 (EAGAIN/EBUSY): /dev/video* hardware scaler is busy! Another capture process (e.g. lg-hue-sync.service, PicCap) is already running. Stop it with: systemctl stop lg-hue-sync"
                     );
-                    return Err(anyhow!(
-                        "vtCapture_init failed with error code 11 (EBUSY / /dev/video* device is busy)"
-                    ));
                 }
-                return Err(anyhow!(
-                    "vtCapture_init failed with error code {}",
-                    ret_init
-                ));
+                return Err(NativeCaptureError {
+                    backend: "libvtcapture",
+                    operation: "vtCapture_init",
+                    code: ret_init,
+                }
+                .into());
             }
 
             let client_str = match CStr::from_bytes_until_nul(&client_id) {
@@ -362,7 +360,6 @@ impl VtCapture {
                 stride,
                 rgb_buffer: vec![0; rgb_size],
                 is_stopped: false,
-                consecutive_errors: 0,
                 last_addr0: 0,
                 stale_count: 0,
                 raw_stats_enabled: false,
@@ -487,10 +484,13 @@ pub(super) fn nv12_lengths(width: u32, height: u32, stride: u32) -> Result<(usiz
 }
 
 impl ScreenCapture for VtCapture {
-    fn acquire_frame(&mut self) -> Result<CapturedFrame<'_>> {
+    fn acquire_frame(&mut self) -> std::result::Result<CapturedFrame<'_>, CaptureError> {
         self.last_raw_stats = None;
         if self.is_stopped {
-            return Err(anyhow!("VIDEO_FORMAT_SWITCH"));
+            return Err(CaptureError::RestartRequired {
+                backend: "libvtcapture",
+                reason: "stream stopped",
+            });
         }
 
         let mut buf_info = LibVtCaptureBufferInfo {
@@ -502,25 +502,16 @@ impl ScreenCapture for VtCapture {
 
         let ret = unsafe { (self.fn_current_buff_info)(self.driver, &mut buf_info) };
         if ret != 0 || buf_info.start_addr0.is_null() {
-            self.consecutive_errors += 1;
-            if self.consecutive_errors >= 4 {
-                warn!(
-                    "Hardware capture error (ret={}, null buffer) for {} frames: stopping pipeline to release scaler...",
-                    ret, self.consecutive_errors
-                );
-                self.stop_stream();
-                return Err(anyhow!("VIDEO_FORMAT_SWITCH"));
-            }
-            // Transient frame drop: reuse previous frame
-            return Ok(CapturedFrame {
-                data: &self.rgb_buffer,
-                width: self.width,
-                height: self.height,
-                is_bgra: false,
-            });
+            return Err(CaptureError::Unavailable(NativeCaptureError {
+                backend: "libvtcapture",
+                operation: if buf_info.start_addr0.is_null() {
+                    "vtCapture_current_capture_buff_info (null buffer)"
+                } else {
+                    "vtCapture_current_capture_buff_info"
+                },
+                code: ret,
+            }));
         }
-
-        self.consecutive_errors = 0;
 
         let curr_addr = buf_info.start_addr0 as usize;
         if curr_addr == self.last_addr0 {
@@ -529,7 +520,10 @@ impl ScreenCapture for VtCapture {
             if self.stale_count >= 90 {
                 warn!("Hardware capture buffer address unchanged for 1.5s: resetting pipeline to prevent display mute...");
                 self.stop_stream();
-                return Err(anyhow!("VIDEO_FORMAT_SWITCH"));
+                return Err(CaptureError::RestartRequired {
+                    backend: "libvtcapture",
+                    reason: "buffer address unchanged for 90 acquisitions",
+                });
             }
         } else {
             self.last_addr0 = curr_addr;
@@ -543,7 +537,7 @@ impl ScreenCapture for VtCapture {
                 && (buf_info.size1 < 0 || (buf_info.size1 as usize) < uv_len))
         {
             self.stop_stream();
-            return Err(anyhow!("capture driver returned undersized frame planes"));
+            return Err(anyhow!("capture driver returned undersized frame planes").into());
         }
         // SAFETY: the driver reports non-null plane pointers and sizes covering these slices.
         // The capture handle remains active for the duration of this conversion.
@@ -569,7 +563,7 @@ impl ScreenCapture for VtCapture {
             )?;
         } else {
             if self.raw_stats_enabled {
-                return Err(anyhow!("capture frame has no NV12 chroma plane"));
+                return Err(anyhow!("capture frame has no NV12 chroma plane").into());
             }
             let width = self.width as usize;
             let stride = self.stride as usize;

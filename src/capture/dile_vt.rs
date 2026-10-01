@@ -6,7 +6,7 @@ use std::os::unix::io::AsRawFd;
 use std::time::Instant;
 use tracing::{info, warn};
 
-pub use super::{CapturedFrame, ScreenCapture};
+pub use super::{CaptureError, CapturedFrame, NativeCaptureError, ScreenCapture};
 
 // -----------------------------------------------------------------------------
 // Mock Capture (for macOS host, local tests, and CI)
@@ -36,7 +36,7 @@ impl MockCapture {
 }
 
 impl ScreenCapture for MockCapture {
-    fn acquire_frame(&mut self) -> Result<CapturedFrame<'_>> {
+    fn acquire_frame(&mut self) -> std::result::Result<CapturedFrame<'_>, CaptureError> {
         if self.is_tv_hardware {
             // On real TV hardware, keep buffer black during fallback/settling
             // rather than distracting rainbow test pattern
@@ -507,20 +507,27 @@ impl DileVtCapture {
 }
 
 impl ScreenCapture for DileVtCapture {
-    fn acquire_frame(&mut self) -> Result<CapturedFrame<'_>> {
+    fn acquire_frame(&mut self) -> std::result::Result<CapturedFrame<'_>, CaptureError> {
         unsafe {
             // Wait for display vertical blanking
-            (self.fn_wait_vsync)(self.handle);
+            let ret = (self.fn_wait_vsync)(self.handle);
+            if ret != 0 {
+                return Err(CaptureError::Unavailable(NativeCaptureError {
+                    backend: "DILE_VT",
+                    operation: "DILE_VT_WaitVsync",
+                    code: ret,
+                }));
+            }
 
             // Query active hardware write buffer index
             let mut current_idx: u32 = 0;
-            if (self.fn_get_current)(self.handle, std::ptr::null_mut(), &mut current_idx) != 0 {
-                return Ok(CapturedFrame {
-                    data: &self.rgb_buffer,
-                    width: self.width,
-                    height: self.height,
-                    is_bgra: false,
-                });
+            let ret = (self.fn_get_current)(self.handle, std::ptr::null_mut(), &mut current_idx);
+            if ret != 0 {
+                return Err(CaptureError::Unavailable(NativeCaptureError {
+                    backend: "DILE_VT",
+                    operation: "DILE_VT_GetCurrentVideoFrameBufferProperty",
+                    code: ret,
+                }));
             }
 
             let vfb_idx = (current_idx as usize) % self.num_vfbs;
@@ -532,7 +539,7 @@ impl ScreenCapture for DileVtCapture {
                         super::vtcapture::nv12_lengths(self.width, self.height, self.stride)?;
                     if planes.len() < 2 || planes[0].data_len < y_len || planes[1].data_len < uv_len
                     {
-                        return Err(anyhow!("mapped NV12 capture planes are too short"));
+                        return Err(anyhow!("mapped NV12 capture planes are too short").into());
                     }
                     // SAFETY: these pointers refer to live mmap regions with checked lengths.
                     let y = std::slice::from_raw_parts(planes[0].data_ptr, y_len);
@@ -550,7 +557,7 @@ impl ScreenCapture for DileVtCapture {
                     let row_bytes = self.width as usize * 4;
                     let required = (self.height as usize - 1) * self.stride as usize + row_bytes;
                     if planes[0].data_len < required {
-                        return Err(anyhow!("mapped RGB capture plane is too short"));
+                        return Err(anyhow!("mapped RGB capture plane is too short").into());
                     }
                     // SAFETY: the mapped plane covers the checked source length and does not alias the output.
                     let src = std::slice::from_raw_parts(planes[0].data_ptr, required);
@@ -564,7 +571,7 @@ impl ScreenCapture for DileVtCapture {
                     let (y_len, _, _) =
                         super::vtcapture::nv12_lengths(self.width, self.height, self.stride)?;
                     if planes[0].data_len < y_len {
-                        return Err(anyhow!("mapped capture plane is too short"));
+                        return Err(anyhow!("mapped capture plane is too short").into());
                     }
                     // SAFETY: the mapped plane covers the checked luma length.
                     let y_plane = std::slice::from_raw_parts(planes[0].data_ptr, y_len);

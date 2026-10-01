@@ -59,6 +59,7 @@ async fn luna_query(uri: &str, payload: &str) -> Option<Value> {
     let output = timeout(
         Duration::from_millis(1500),
         Command::new("/usr/bin/luna-send")
+            .kill_on_drop(true)
             .args(["-n", "1", "-f", "-w", "1000", uri, payload])
             .output(),
     )

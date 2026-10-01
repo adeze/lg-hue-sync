@@ -23,6 +23,11 @@ pub struct PendingCommands {
 }
 
 impl PendingCommands {
+    pub fn shutdown(&mut self, receiver: mpsc::Receiver<ControlCommand>) {
+        // Drop queued and pending reply senders before waiting for HTTP handlers.
+        drop(receiver);
+        self.save_config.clear();
+    }
     pub fn receive(&mut self, receiver: &mut mpsc::Receiver<ControlCommand>) {
         while let Ok(command) = receiver.try_recv() {
             match command {
@@ -47,6 +52,17 @@ impl PendingCommands {
 
     pub fn take_stop_if_running(&mut self, state: PipelineState) -> bool {
         state == PipelineState::Running && self.desired_running.take() == Some(false)
+    }
+}
+
+pub async fn wait_for_capture_retry(
+    delay: Duration,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => false,
+        _ = tokio::time::sleep(delay) => true,
     }
 }
 
@@ -83,6 +99,51 @@ impl RetryState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_interrupts_capture_recovery_before_driver_recreation() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let cancel = shutdown.clone();
+        let (may_recreate, ()) = tokio::join!(
+            wait_for_capture_retry(Duration::from_secs(30), &shutdown),
+            async move {
+                tokio::task::yield_now().await;
+                cancel.cancel();
+            }
+        );
+        assert!(!may_recreate);
+        assert!(!wait_for_capture_retry(Duration::ZERO, &shutdown).await);
+        assert!(
+            wait_for_capture_retry(Duration::ZERO, &tokio_util::sync::CancellationToken::new())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_queued_sends_and_all_save_acknowledgements() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (pending_reply, pending_result) = oneshot::channel();
+        sender
+            .send(ControlCommand::SaveConfig(pending_reply))
+            .await
+            .unwrap();
+        let mut pending = PendingCommands::default();
+        pending.receive(&mut receiver);
+        let (queued_reply, queued_result) = oneshot::channel();
+        sender
+            .send(ControlCommand::SaveConfig(queued_reply))
+            .await
+            .unwrap();
+        let blocked = sender.send(ControlCommand::Start);
+        tokio::pin!(blocked);
+        assert!(tokio::time::timeout(Duration::from_millis(5), &mut blocked)
+            .await
+            .is_err());
+        pending.shutdown(receiver);
+        assert!(blocked.await.is_err());
+        assert!(pending_result.await.is_err());
+        assert!(queued_result.await.is_err());
+    }
 
     #[tokio::test]
     async fn latest_start_stop_command_wins_without_losing_other_actions() {

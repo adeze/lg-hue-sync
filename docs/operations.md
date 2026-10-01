@@ -129,6 +129,12 @@ Default behavior preserves `config.json` in a timestamped backup directory. Use 
 
 ## Diagnostics
 
+Capture skips the first three consecutive unavailable frames. A fourth unavailable frame or an explicit backend transition releases the driver and retries after 750 ms, 1.5 s, then 3 s. Thirty seconds of valid hardware frames resets this recovery budget. Invalid frame layouts or an exhausted budget pause sync; the dashboard remains available, and **Start** or **Restart** permits a manual retry. Native failures retain their backend, operation, and return code in the daemon log. Hardware initialization retries use exponential backoff capped at 16 seconds.
+
+Full deployment installs `lg-hue-sync-log.timer`, which checks `daemon.log` every minute and truncates it in place at 1 MiB (1,048,576 bytes). The timer permits temporary size overshoot between checks, discards the previous log contents, and retains no archives. It preserves the inode used by the daemon's append-only stdout/stderr, so sync does not restart. The webOS Brew boot hook restores the timer after reboot; uninstall removes it. No Rust dependency or firmware-wide logging setting changes.
+
+For an existing installation, copy `scripts/log-maintenance.sh` to `/var/home/root/lg-hue-sync/log-maintenance.sh`, make it executable, and run it on the TV with `--install`. Verify `systemctl is-active lg-hue-sync-log.timer` and `systemctl list-timers lg-hue-sync-log.timer`. Disable it without stopping sync using `systemctl stop lg-hue-sync-log.timer`; remove `/var/lib/webosbrew/init.d/55-lg-hue-sync-log` to keep it disabled after reboot. Run `sh scripts/test-log-maintenance.sh` for boundary, open-writer, and unsafe-path checks.
+
 - Hue layout changed: dashboard **Refresh selected area layout**.
 - Gradient count unexpected: inspect `entertainment_configuration.channels[].members`; physical segment count differs from stream-channel count.
 - Nanoleaf order wrong: run **4D Tracer**, then adjust corner, direction, and offset under **Calibration**.

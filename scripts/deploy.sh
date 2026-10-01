@@ -136,6 +136,9 @@ chmod +x /var/lib/webosbrew/init.d/50-lg-hue-sync
 echo "[TV] Service installed and started via systemd (/var/lib/webosbrew/init.d/50-lg-hue-sync)"
 REMOTEEOC
 
+scp $SCP_OPTS "$(dirname "$0")/log-maintenance.sh" root@"$TV_IP":"$REMOTE_DIR/log-maintenance.sh"
+ssh $SSH_OPTS root@"$TV_IP" "chmod 755 $REMOTE_DIR/log-maintenance.sh && $REMOTE_DIR/log-maintenance.sh --install"
+
 echo ""
 echo "==================================================================="
 echo "[+] SUCCESS: lg-hue-sync deployed and active on TV!"

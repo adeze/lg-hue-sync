@@ -22,6 +22,9 @@ backup_dir="/var/home/root/lg-hue-sync-backup-$(date +%Y%m%d-%H%M%S)"
 
 systemctl stop lg-hue-sync 2>/dev/null || true
 systemctl disable lg-hue-sync 2>/dev/null || true
+systemctl stop lg-hue-sync-log.timer lg-hue-sync-log.service 2>/dev/null || true
+rm -f /run/systemd/system/lg-hue-sync-log.service /run/systemd/system/lg-hue-sync-log.timer
+rm -f /var/lib/webosbrew/init.d/55-lg-hue-sync-log
 rm -f /run/systemd/system/lg-hue-sync.service /etc/systemd/system/lg-hue-sync.service
 rm -f /var/lib/webosbrew/init.d/50-lg-hue-sync
 

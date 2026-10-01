@@ -21,7 +21,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use capture::{create_capture, detect_source_fps, ScreenCapture, VtCapture};
+use capture::{
+    create_capture, detect_source_fps, CaptureRecovery, MockCapture, RecoveryAction, ScreenCapture,
+    VtCapture,
+};
 use color::{RgbColor, ZoneSampler};
 use config::{Config, ConfigError};
 use hue::{sync_entertainment_areas, HueDtlsClient, HueStreamPacketBuilder};
@@ -32,6 +35,7 @@ use web::{start_web_server, CalibrationPattern, LiveSettings, SharedState};
 
 #[derive(Parser)]
 #[command(name = "lg-hue-sync")]
+#[command(version)]
 #[command(about = "High-performance native screen capture and ambient lighting synchronizer for LG webOS (Hue & Nanoleaf 4D)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -351,8 +355,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     // Setup graceful shutdown handler for SIGINT and SIGTERM
     let running = Arc::new(AtomicBool::new(true));
+    let shutdown = CancellationToken::new();
+    let signal_shutdown = shutdown.clone();
     let r = running.clone();
-    tokio::spawn(async move {
+    let signal_task = tokio::spawn(async move {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
@@ -384,6 +390,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             info!("Received shutdown signal. Stopping sync...");
         }
         r.store(false, Ordering::SeqCst);
+        signal_shutdown.cancel();
     });
 
     // 1. Initialize Philips Hue DTLS client if active
@@ -584,7 +591,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let mut light_update_count = 0u32;
     let mut light_update_window = tokio::time::Instant::now();
     let mut last_status_check = tokio::time::Instant::now();
-    let mut last_hw_probe = tokio::time::Instant::now();
+    let mut capture_retry = RetryState::new();
+    if !capture.is_real_hardware() {
+        capture_retry.failure();
+    }
+    let mut capture_recovery = CaptureRecovery::default();
+    let mut capture_faulted = false;
     let mut last_tv_power_poll = tokio::time::Instant::now() - Duration::from_secs(2);
     let mut last_tv_power_warning = tokio::time::Instant::now() - Duration::from_secs(30);
     let mut hue_retry = RetryState::new();
@@ -715,6 +727,15 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
 
                 let requested_running = pending_commands.desired_running.take();
+                if capture_faulted {
+                    if requested_running != Some(true) {
+                        continue;
+                    }
+                    // A manual Start retries a fault; TV/app auto-resume must not loop on it.
+                    capture_faulted = false;
+                    capture_recovery = CaptureRecovery::default();
+                    pending_commands.restart = true;
+                }
                 let mut start_requested = requested_running == Some(true);
                 if auto_tv_power && last_tv_power_poll.elapsed() >= Duration::from_secs(2) {
                     last_tv_power_poll = tokio::time::Instant::now();
@@ -1082,8 +1103,26 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
         if std::mem::take(&mut pending_commands.restart) {
             info!("Pipeline restart requested via Web UI. Re-initializing capture...");
-            drop(capture);
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(std::mem::replace(
+                &mut capture,
+                Box::new(MockCapture::new(
+                    config.capture_width,
+                    config.capture_height,
+                )),
+            ));
+            shared_state
+                .capture_hardware
+                .store(false, Ordering::Relaxed);
+            if !runtime::wait_for_capture_retry(Duration::from_millis(500), &shutdown).await {
+                break 'sync_loop;
+            }
+            pending_commands.receive(&mut command_rx);
+            if pending_commands.desired_running == Some(false) || pending_commands.reconfigure {
+                continue 'sync_loop;
+            }
+            capture_faulted = false;
+            capture_recovery = CaptureRecovery::default();
+            capture_retry.success();
             capture = create_capture(config.capture_width, config.capture_height);
             shared_state
                 .capture_hardware
@@ -1112,22 +1151,27 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
         // If currently on fallback MockCapture, rapidly probe if hardware VtCapture has become available
         // (e.g. if the TV was on the home screen at boot or during input/format switch)
-        if !capture.is_real_hardware() && last_hw_probe.elapsed() >= Duration::from_millis(500) {
-            last_hw_probe = tokio::time::Instant::now();
+        if !capture.is_real_hardware() && capture_retry.ready() {
             match VtCapture::try_new(config.capture_width, config.capture_height) {
                 Ok(hw_capture) => {
                     info!("[+] Successfully upgraded from MockCapture to hardware VtCapture!");
                     capture = Box::new(hw_capture);
+                    capture_retry.success();
                     shared_state.capture_hardware.store(true, Ordering::Relaxed);
                 }
-                Err(_) => {
-                    // Hardware capture still settling
+                Err(error) => {
+                    let delay = capture_retry.failure();
+                    warn!("Hardware capture unavailable ({error:#}); retrying in {delay:?}");
                 }
             }
         }
 
+        let hardware_frame = capture.is_real_hardware();
         match capture.acquire_frame() {
             Ok(frame) => {
+                if hardware_frame {
+                    capture_recovery.frame_received(std::time::Instant::now());
+                }
                 let mut is_scene_cut = false;
 
                 if !hue_sync_enabled && nanoleaf_sync_enabled {
@@ -1351,12 +1395,36 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 }
             }
             Err(e) => {
-                warn!(
-                    "Capture frame acquisition interrupted ({}) - likely video format/timing change. Releasing hardware scaler...",
-                    e
-                );
-                // Explicitly drop capture to close /dev/video60 and free hardware scaler
-                drop(capture);
+                let delay = match capture_recovery.failed(&e) {
+                    RecoveryAction::Retry => {
+                        if !runtime::wait_for_capture_retry(frame_interval, &shutdown).await {
+                            break 'sync_loop;
+                        }
+                        continue 'sync_loop;
+                    }
+                    RecoveryAction::Pause => {
+                        error!("Capture paused ({e:#}); invalid frame or recovery limit reached. Use Start or Restart to retry.");
+                        capture = Box::new(MockCapture::new(
+                            config.capture_width,
+                            config.capture_height,
+                        ));
+                        shared_state
+                            .capture_hardware
+                            .store(false, Ordering::Relaxed);
+                        capture_faulted = true;
+                        pending_commands.desired_running = Some(false);
+                        continue 'sync_loop;
+                    }
+                    RecoveryAction::Restart(delay) => delay,
+                };
+                warn!("Capture recovery ({e:#}); releasing hardware scaler, retrying in {delay:?}");
+                capture = Box::new(MockCapture::new(
+                    config.capture_width,
+                    config.capture_height,
+                ));
+                shared_state
+                    .capture_hardware
+                    .store(false, Ordering::Relaxed);
 
                 // Clear/black out Nanoleaf during video transition
                 if let Some(ref mut ns) = nanoleaf_streamer {
@@ -1364,9 +1432,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     let _ = ns.send_frame(&black, 0);
                 }
 
-                // Sleep 750ms for webOS Display Engine and HDMI PLL/scaler to settle
-                tokio::time::sleep(Duration::from_millis(750)).await;
+                if !runtime::wait_for_capture_retry(delay, &shutdown).await {
+                    break 'sync_loop;
+                }
                 watchdog.tick();
+                pending_commands.receive(&mut command_rx);
+                if pending_commands.desired_running == Some(false) || pending_commands.reconfigure {
+                    continue 'sync_loop;
+                }
 
                 // Auto-adapt to new source refresh rate if enabled
                 if config.fps == 0 {
@@ -1389,7 +1462,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 shared_state
                     .capture_hardware
                     .store(capture.is_real_hardware(), Ordering::Relaxed);
-                last_hw_probe = tokio::time::Instant::now();
+                capture_retry.failure();
             }
         }
 
@@ -1416,6 +1489,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         let _ = set_hue_stream_active(&config, false);
     }
 
+    signal_task.abort();
+    let _ = signal_task.await;
+    pending_commands.shutdown(command_rx);
     web_shutdown.cancel();
     if let Some(tasks) = web_tasks {
         tasks.close();

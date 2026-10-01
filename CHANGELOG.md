@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-01
+
 ### Added
+- Add a boot-persistent systemd timer that checks `daemon.log` every minute and clears it in place at 1 MiB without restarting sync or retaining archives.
 - Add an opt-in raw NV12 centre-patch probe with read-only TV mode hints, plus selectable SDR browser patches at `/capture-patterns`; neither path writes frames or drives lights.
 - Allow trusted-LAN automation, including Apple Shortcuts, to apply named dashboard presets through `POST /api/presets/{name}` without changing output trims or other controls.
 - Document webOS Brew userland headers/API reference and the Buildroot source behind the native SDK.
@@ -17,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Leave the unverified 8-bit midtone lift off in newly generated configurations and label it accurately in the dashboard; preserve existing configuration values and the legacy JSON key.
 
 ### Fixed
+- Classify capture errors with native return codes and preserved source chains; skip transient frame outages, cap automatic driver recovery at three increasing delays, and pause invalid frames until manual retry.
+- Cancel capture recovery on shutdown, release queued dashboard requests before server shutdown, and terminate timed-out Luna child processes.
 - Base Hue and Nanoleaf temporal smoothing and colour-step limits on elapsed time, preserving 30 FPS tuning across variable capture rates and bounding long-stall jumps.
 - Validate webOS capture frame dimensions and plane lengths before conversion, keep NV12 conversion safe for callers, release partially mapped display buffers when setup fails, and remove an unverified cross-thread handle guarantee.
 - Process dashboard commands while capture is paused, honor per-device output toggles on resume, and report Nanoleaf status after a successful local send.

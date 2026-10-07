@@ -87,7 +87,7 @@ setup:
 ## run the host validation gate used by CI
 check: release-check
 	cargo fmt --all -- --check
-	cargo test
+	cargo nextest run --locked
 	cargo clippy --bin lg-hue-sync -- -D warnings
 	perl -0777 -ne 'print $$1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -
 	git diff --check
@@ -111,7 +111,7 @@ build-local:
 ## run local unit tests
 test:
 	@printf "$(CYAN)[*] Running test suite...$(RESET)\n"
-	cargo test
+	cargo nextest run --locked
 
 deps-check:
 	cargo update --dry-run

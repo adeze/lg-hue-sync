@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Use cargo-nextest for local Rust tests and CI, with CI pinned to nextest 0.9.146.
+
 ## [0.6.0] - 2026-10-01
 
 ### Added

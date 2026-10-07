@@ -27,7 +27,7 @@ Check [cani.rootmy.tv](https://cani.rootmy.tv/) and [webOS Brew](https://github.
 
 ## Requirements
 
-- Development host with Rust, Docker, `make`, SSH, and `uv`.
+- Development host with Rust, [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/), Docker, `make`, SSH, and `uv`.
 - Rooted webOS TV with root SSH and compatible capture libraries.
 - Hue Bridge v2 and/or Nanoleaf 4D on the same LAN.
 
@@ -35,7 +35,7 @@ Check [cani.rootmy.tv](https://cani.rootmy.tv/) and [webOS Brew](https://github.
 
 ```bash
 cargo fmt --all -- --check
-cargo test
+cargo nextest run --locked
 cargo clippy --bin lg-hue-sync -- -D warnings
 make build
 file target/armv7-unknown-linux-gnueabi/release/lg-hue-sync

@@ -4,9 +4,13 @@ Use `<tv-ip>` explicitly. Never add a private address or populated configuration
 
 ## Local gate
 
+Install [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/) before running host checks. CI uses nextest 0.9.146.
+
 ```bash
 make check
 ```
+
+Run only the Rust tests with `make test` or `cargo nextest run --locked`.
 
 ## Read-only capture colour probe
 

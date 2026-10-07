@@ -20,9 +20,12 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.146
       - run: python3 scripts/check_release.py
       - run: cargo fmt --all -- --check
-      - run: cargo test
+      - run: cargo nextest run --locked
       - run: cargo clippy --bin lg-hue-sync -- -D warnings
       - name: Validate embedded dashboard JavaScript
         run: perl -0777 -ne 'print $1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -

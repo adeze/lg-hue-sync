@@ -132,24 +132,9 @@ pub fn rgb_to_xy_brightness(r: u8, g: u8, b: u8, gamut: HueGamut) -> HueXYBright
     let g_norm = g as f64 / 255.0;
     let b_norm = b as f64 / 255.0;
 
-    // 1. Gamma correction (sRGB to linear RGB)
-    let r_lin = if r_norm > 0.04045 {
-        ((r_norm + 0.055) / 1.055).powf(2.4)
-    } else {
-        r_norm / 12.92
-    };
-
-    let g_lin = if g_norm > 0.04045 {
-        ((g_norm + 0.055) / 1.055).powf(2.4)
-    } else {
-        g_norm / 12.92
-    };
-
-    let b_lin = if b_norm > 0.04045 {
-        ((b_norm + 0.055) / 1.055).powf(2.4)
-    } else {
-        b_norm / 12.92
-    };
+    // Decode sRGB without changing the Hue-specific XYZ matrix below.
+    let linear = palette::Srgb::new(r_norm, g_norm, b_norm).into_linear();
+    let (r_lin, g_lin, b_lin) = (linear.red, linear.green, linear.blue);
 
     // 2. Linear RGB to XYZ (Wide RGB D65 conversion matrix recommended by Philips Hue)
     let x = r_lin * 0.664511 + g_lin * 0.154324 + b_lin * 0.162028;
@@ -175,5 +160,43 @@ pub fn rgb_to_xy_brightness(r: u8, g: u8, b: u8, gamut: HueGamut) -> HueXYBright
         x: clamped.x.clamp(0.0, 1.0),
         y: clamped.y.clamp(0.0, 1.0),
         brightness,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_transfer_preserves_hue_brightness_and_gamut_boundaries() {
+        for gamut in [HueGamut::GamutA, HueGamut::GamutB, HueGamut::GamutC] {
+            for (r, g, b) in [
+                (0, 0, 0),
+                (255, 255, 255),
+                (255, 0, 0),
+                (0, 255, 0),
+                (0, 0, 255),
+                (10, 11, 12),
+                (128, 64, 200),
+            ] {
+                let output = rgb_to_xy_brightness(r, g, b, gamut);
+                for value in [output.x, output.y, output.brightness] {
+                    assert!(value.is_finite() && (0.0..=1.0).contains(&value));
+                }
+                let p = Point::new(output.x, output.y);
+                assert!(distance_squared(p, gamut.clamp(p)) < 1e-20);
+                let decode = |v: u8| {
+                    let v = f64::from(v) / 255.0;
+                    if v > 0.04045 {
+                        ((v + 0.055) / 1.055).powf(2.4)
+                    } else {
+                        v / 12.92
+                    }
+                };
+                let old_brightness =
+                    decode(r) * 0.283881 + decode(g) * 0.668433 + decode(b) * 0.047685;
+                assert!((output.brightness - old_brightness).abs() < 1e-12);
+            }
+        }
     }
 }

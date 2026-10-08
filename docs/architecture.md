@@ -17,7 +17,25 @@ coalesces desired start/stop state while preserving restart, reconfiguration, sa
 refresh actions. Runtime output state remains distinct from the persisted configuration.
 
 Hue and Nanoleaf sampling share `ColorProcessor` for peak weighting, noise gating, saturation,
-gamma, HDR tone mapping, temporal response, strict black, and scene-change limits. Device modules
+gamma, the legacy midtone lift, temporal response, strict black, and scene-change limits.
+Spatial averages, colour transforms, and temporal state retain fractional RGB until output rounding.
+These values remain in the existing encoded RGB domain; this does not establish HDR decoding.
+[Palette](https://docs.rs/palette/0.7.7/palette/) owns RGB mixing, RGB/HSV conversions, and
+the sRGB decoding used before the existing Hue-specific XYZ matrix. Saturation remains
+multiplicative in HSV; smoothing, black gating, step limits, and Hue gamut clipping remain local.
+[yuv](https://docs.rs/yuv/0.8.19/yuv/) owns validated NV12-to-RGBA conversion with explicit
+BT.601, limited range, and Professional precision. Dimension, stride, buffer, and overflow checks
+remain before conversion. Sampled values differ from the legacy coefficients
+by at most one RGB count. Luma below 16 is normalized to video black before conversion,
+preserving the legacy behaviour and avoiding scalar/SIMD footroom differences. Normal frames
+are borrowed; active below-black luma or minimal final rows trigger a packed copy.
+Packing also prevents the dependency from skipping an incomplete stride-sized final row. Final channels
+are clipped to 0–255. Neither crate identifies capture colourimetry.
+Optional named-colour, parallel, and platform-specific YUV feature sets are disabled.
+Optional spatial blending mixes nearby zone centres within 0.35 normalized screen units, using
+distance-weighted RGB interpolation capped at 50%. It preserves black regions, uses a snapshot
+to avoid ordering bias, and never feeds blended colours back into temporal state. Channel IDs
+and panel membership remain unchanged. Device modules
 retain only geometry and wire-protocol responsibilities. Failed output reconnections use the same
 bounded exponential-backoff policy so a disconnected device cannot trigger frame-rate retries.
 

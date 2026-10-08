@@ -200,6 +200,9 @@ pub struct Config {
     pub saturation_boost: f32,
     #[serde(default = "default_peak_weight")]
     pub peak_weight: f32,
+    /// Nearby-zone gradient blending, 0 (off) to 0.5.
+    #[serde(default)]
+    pub spatial_blend: f32,
     #[serde(default = "default_gamma")]
     pub gamma: f32,
     #[serde(default = "default_noise_gate")]
@@ -366,6 +369,7 @@ impl Config {
             letterbox_detection: true,
             saturation_boost: default_saturation_boost(),
             peak_weight: default_peak_weight(),
+            spatial_blend: 0.0,
             gamma: default_gamma(),
             noise_gate_threshold: default_noise_gate(),
             smoothing_factor: default_smoothing_factor(),

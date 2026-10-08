@@ -43,6 +43,9 @@ pub struct LiveSettings {
     pub nanoleaf_output_brightness: f32,
     pub saturation_boost: f32,
     pub peak_weight: f32,
+    /// Nearby-zone gradient blending, 0 (off) to 0.5.
+    #[serde(default)]
+    pub spatial_blend: f32,
     pub gamma: f32,
     pub noise_gate_threshold: f32,
     #[serde(default = "default_smoothing_factor")]
@@ -100,6 +103,7 @@ impl LiveSettings {
             ),
             ("saturation_boost", self.saturation_boost, 1.0, 2.5),
             ("peak_weight", self.peak_weight, 0.0, 0.8),
+            ("spatial_blend", self.spatial_blend, 0.0, 0.5),
             ("gamma", self.gamma, 0.8, 2.0),
             ("noise_gate_threshold", self.noise_gate_threshold, 0.0, 0.06),
             ("smoothing_factor", self.smoothing_factor, 0.05, 0.8),
@@ -148,6 +152,7 @@ struct Preset {
     fall: f32,
     strict_blackout: bool,
     max_color_step: u8,
+    spatial_blend: f32,
 }
 
 impl Preset {
@@ -172,6 +177,14 @@ impl Preset {
             fall: values.7,
             strict_blackout: values.8,
             max_color_step: values.9,
+            spatial_blend: match name {
+                "neutral" | "fastResponse" => 0.0,
+                "highChroma" => 0.15,
+                "neonContrast" => 0.08,
+                "darkSceneDetail" => 0.1,
+                "lowStimulation" => 0.3,
+                _ => unreachable!(),
+            },
         })
     }
 
@@ -186,6 +199,7 @@ impl Preset {
         settings.fall_smoothing_factor = self.fall;
         settings.strict_blackout = self.strict_blackout;
         settings.max_color_step = self.max_color_step;
+        settings.spatial_blend = self.spatial_blend;
     }
 }
 
@@ -789,6 +803,7 @@ mod tests {
             nanoleaf_output_brightness: 1.0,
             saturation_boost: 1.5,
             peak_weight: 0.35,
+            spatial_blend: 0.0,
             gamma: 1.0,
             noise_gate_threshold: 0.02,
             smoothing_factor: 0.35,
@@ -819,25 +834,28 @@ mod tests {
 
     #[test]
     fn preset_changes_only_shared_color_controls() {
-        for name in [
-            "neutral",
-            "highChroma",
-            "neonContrast",
-            "darkSceneDetail",
-            "fastResponse",
-            "lowStimulation",
+        for (name, blend) in [
+            ("neutral", 0.0),
+            ("highChroma", 0.15),
+            ("neonContrast", 0.08),
+            ("darkSceneDetail", 0.1),
+            ("fastResponse", 0.0),
+            ("lowStimulation", 0.3),
         ] {
             let mut candidate = settings();
             Preset::named(name).unwrap().apply(&mut candidate);
             assert!(candidate.validate().is_ok(), "{name}");
+            assert_eq!(candidate.spatial_blend, blend, "{name}");
         }
         let mut input = settings();
         input.hue_output_brightness = 0.7;
         input.nanoleaf_output_brightness = 0.8;
         input.hue_sync_enabled = false;
         input.nanoleaf_alignment.perimeter_offset = 7;
+        input.spatial_blend = 0.25;
         Preset::named("neonContrast").unwrap().apply(&mut input);
         assert_eq!(input.saturation_boost, 2.0);
+        assert_eq!(input.spatial_blend, 0.08);
         assert_eq!(input.rise_smoothing_factor, 0.45);
         assert!(input.strict_blackout);
         assert_eq!(input.hue_output_brightness, 0.7);
@@ -899,5 +917,21 @@ mod tests {
         update.gamma = 1.5;
         assert!(shared.apply_settings(update).await.is_err());
         assert_eq!(shared.current_settings.read().unwrap().gamma, 1.0);
+    }
+
+    #[test]
+    fn spatial_blend_defaults_and_validation_are_backward_compatible() {
+        let mut json = serde_json::to_value(settings()).unwrap();
+        json.as_object_mut().unwrap().remove("spatial_blend");
+        let old: LiveSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(old.spatial_blend, 0.0);
+        for value in [0.0, 0.5, -0.1, 0.51, f32::NAN, f32::INFINITY] {
+            let mut input = settings();
+            input.spatial_blend = value;
+            assert_eq!(
+                input.validate().is_ok(),
+                value.is_finite() && (0.0..=0.5).contains(&value)
+            );
+        }
     }
 }

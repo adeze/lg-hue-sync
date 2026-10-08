@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-08
+
+### Added
+- Add optional geometry-based spatial gradient blending for Hue and Nanoleaf, controlled by the dashboard and persisted as `spatial_blend`; default off and preserve black regions.
+
 ### Changed
+- Give ambient styles explicit spatial blending: Neutral and Fast Response 0%, High Chroma 15%, Neon Contrast 8%, Dark-Scene Detail 10%, Low Stimulation 30%. Selecting a style now resets spatial blending; manual tuning remains available.
+- Replace the dashboard theme dropdown with an accessible glyph button cycling system, dark and light; retain the status subtitle and remove its duplicate update-rate counter.
+- Collapse Devices and Advanced tuning by default on the dashboard, matching Calibration while keeping status, sync controls and presets visible.
+- Replace handwritten RGB/HSV conversions, encoded-RGB mixing and sRGB decoding with Palette 0.7.7; retain device-specific gamut handling and response controls.
+- Replace the NV12 pixel loop with yuv 0.8.19 using explicit BT.601 limited-range conversion and existing buffer checks. Sample differences stay within one RGB count; normalize below-black luma to preserve legacy behaviour across scalar and SIMD paths.
+- Retain fractional spatial averages, colour transforms, temporal state, and colour-step limits until output rounding, preventing small fades from stalling at 8-bit boundaries.
+
 - Use cargo-nextest for local Rust tests and CI, with CI pinned to nextest 0.9.146.
 
 ## [0.6.0] - 2026-10-01

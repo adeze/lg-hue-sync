@@ -125,8 +125,7 @@
     header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--card-border); }
     .brand { display: flex; align-items: center; gap: 12px; }
     .header-actions { display:flex; align-items:center; gap:12px; margin-left:auto; }
-    .theme-control { display:flex; align-items:center; gap:6px; color:var(--text-muted); font-size:.75rem; }
-    .theme-select { min-height:38px; padding:6px 28px 6px 9px; border:1px solid var(--card-border); border-radius:9px; background:var(--field-bg); color:var(--text); font:inherit; }
+    .theme-control { width:44px; height:44px; padding:0; border:1px solid var(--card-border); border-radius:9px; background:var(--field-bg); color:var(--text); font-size:1.4rem; cursor:pointer; }
     .status-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 10px var(--danger-glow); transition: all 0.3s; }
     .status-dot.active { background: var(--success); box-shadow: 0 0 14px var(--success-glow); }
     h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; }
@@ -262,7 +261,7 @@
     .secondary-btn.icon-btn { flex: 0 0 44px; width: 44px; height: 44px; padding: 0; font-size: 1.4rem; line-height: 1; }
     .secondary-btn:hover { background: var(--button-hover); }
     .text-input { width: 100%; box-sizing: border-box; padding: 11px; border: 1px solid var(--card-border); border-radius: 10px; background: var(--field-bg); color: var(--text); margin: 8px 0; }
-    .theme-select:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
+    .theme-control:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
     @media (min-width: 860px) { .tuning-grid { grid-template-columns:1fr 1fr; } }
     @media (prefers-reduced-motion: reduce) { *,*::before,*::after { transition:none!important; scroll-behavior:auto!important; } }
   </style>
@@ -278,12 +277,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <label class="theme-control" for="themeSelect">Theme
-        <select class="theme-select" id="themeSelect" aria-label="Dashboard colour scheme" onchange="setTheme(this.value)">
-          <option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option>
-        </select>
-      </label>
-      <div style="font-size: 0.85rem; font-weight: 700; color: var(--accent);" id="fpsDisplay">0 updates/s</div>
+      <button class="theme-control" id="themeButton" type="button" aria-label="Theme: system. Switch to dark" title="Theme: system. Switch to dark" onclick="cycleTheme()"><span id="themeGlyph" aria-hidden="true">◐</span></button>
     </div>
   </header>
 
@@ -325,16 +319,16 @@
     <div class="toggle-desc">Choose a video-derived response profile. Adjustments below remain available for fine tuning.</div>
     <div class="preset-grid" id="presetGrid">
       <div class="preset-option"><button class="preset-btn" data-preset="neutral" onclick="applyPreset('neutral')">Neutral Reference</button><details class="preset-info"><summary aria-label="About Neutral Reference">ⓘ</summary><div class="info-tip">Faithful, restrained average colour and gentle transitions; a good baseline for most content.</div></details></div>
-      <div class="preset-option"><button class="preset-btn" data-preset="highChroma" onclick="applyPreset('highChroma')">High Chroma</button><details class="preset-info"><summary aria-label="About High Chroma">ⓘ</summary><div class="info-tip">Increases saturation and colour intensity while staying derived from the video signal.</div></details></div>
-      <div class="preset-option"><button class="preset-btn" data-preset="neonContrast" onclick="applyPreset('neonContrast')">Neon Contrast</button><details class="preset-info"><summary aria-label="About Neon Contrast">ⓘ</summary><div class="info-tip">Emphasizes bright, saturated accents and lets near-black regions fall dark.</div></details></div>
-      <div class="preset-option"><button class="preset-btn" data-preset="darkSceneDetail" onclick="applyPreset('darkSceneDetail')">Dark-Scene Detail</button><details class="preset-info"><summary aria-label="About Dark-Scene Detail">ⓘ</summary><div class="info-tip">Preserves OLED blacks while retaining local highlights in darker scenes.</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="highChroma" onclick="applyPreset('highChroma')">High Chroma</button><details class="preset-info"><summary aria-label="About High Chroma">ⓘ</summary><div class="info-tip">Increases saturation and colour intensity with gentle spatial blending (15%).</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="neonContrast" onclick="applyPreset('neonContrast')">Neon Contrast</button><details class="preset-info"><summary aria-label="About Neon Contrast">ⓘ</summary><div class="info-tip">Emphasizes bright, saturated accents with subtle spatial blending (8%); near-black regions stay dark.</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="darkSceneDetail" onclick="applyPreset('darkSceneDetail')">Dark-Scene Detail</button><details class="preset-info"><summary aria-label="About Dark-Scene Detail">ⓘ</summary><div class="info-tip">Preserves OLED blacks and local highlights with light spatial blending (10%).</div></details></div>
       <div class="preset-option"><button class="preset-btn" data-preset="fastResponse" onclick="applyPreset('fastResponse')">Fast Response</button><details class="preset-info"><summary aria-label="About Fast Response">ⓘ</summary><div class="info-tip">Tracks scene changes more quickly, with less smoothing and bounded colour steps.</div></details></div>
-      <div class="preset-option"><button class="preset-btn" data-preset="lowStimulation" onclick="applyPreset('lowStimulation')">Low Stimulation</button><details class="preset-info"><summary aria-label="About Low Stimulation">ⓘ</summary><div class="info-tip">Reduces intensity and slows transitions for a calmer ambient effect.</div></details></div>
+      <div class="preset-option"><button class="preset-btn" data-preset="lowStimulation" onclick="applyPreset('lowStimulation')">Low Stimulation</button><details class="preset-info"><summary aria-label="About Low Stimulation">ⓘ</summary><div class="info-tip">Reduces intensity, slows transitions and blends nearby zones (30%) for a calmer ambient effect.</div></details></div>
     </div>
     <div class="toggle-desc" id="presetStatus">Choose a starting point; it does not overwrite Hue or Nanoleaf output trims.</div>
   </section>
 
-  <details class="card accordion" id="devicesSection" open>
+  <details class="card accordion" id="devicesSection">
     <summary>Devices · Hue &amp; Nanoleaf</summary>
     <div class="accordion-content">
     <section class="device-subsection">
@@ -375,7 +369,7 @@
   </details>
 
   <!-- Advanced tuning controls -->
-  <details class="card accordion" id="advancedSection" open>
+  <details class="card accordion" id="advancedSection">
     <summary>Advanced tuning · response controls</summary>
     <div class="accordion-content">
     <div class="tuning-grid">
@@ -398,6 +392,12 @@
     <div class="control-group">
       <div class="control-header"><span>Peak Highlight Dynamics</span><span class="control-val" id="valPeak">35%</span></div>
       <input type="range" id="sliderPeak" aria-label="Peak Highlight Dynamics" min="0" max="0.8" step="0.05" value="0.35" oninput="updateSettings()">
+    </div>
+
+    <div class="control-group">
+      <div class="control-header"><span>Spatial Gradient Blend</span><span class="control-val" id="valSpatialBlend">0%</span></div>
+      <input type="range" id="sliderSpatialBlend" aria-label="Spatial Gradient Blend" min="0" max="0.5" step="0.05" value="0" oninput="updateSettings()">
+      <div class="toggle-desc">Blend nearby screen regions; zero preserves local boundaries. Black regions stay off.</div>
     </div>
 
     <div class="control-group">
@@ -519,11 +519,23 @@
       if (!['system', 'dark', 'light'].includes(theme)) theme = 'system';
       if (theme === 'system') delete document.documentElement.dataset.theme;
       else document.documentElement.dataset.theme = theme;
-      document.getElementById('themeSelect').value = theme;
+      const themes = ['system', 'dark', 'light'];
+      const index = themes.indexOf(theme);
+      const button = document.getElementById('themeButton');
+      const label = `Theme: ${theme}. Switch to ${themes[(index + 1) % themes.length]}`;
+      button.setAttribute('aria-label', label);
+      button.title = label;
+      document.getElementById('themeGlyph').textContent = ['◐', '☾', '☀'][index];
       try {
         if (theme === 'system') localStorage.removeItem('lg-hue-sync-theme');
         else localStorage.setItem('lg-hue-sync-theme', theme);
       } catch (_) {}
+    }
+
+    function cycleTheme() {
+      const themes = ['system', 'dark', 'light'];
+      const current = document.documentElement.dataset.theme || 'system';
+      setTheme(themes[(themes.indexOf(current) + 1) % themes.length]);
     }
 
     let initialTheme = 'system';
@@ -631,7 +643,6 @@
       }
       btn.setAttribute('aria-checked', String(isSyncing));
 
-      document.getElementById('fpsDisplay').innerText = data.light_update_fps.toFixed(1) + ' upd/s';
       document.getElementById('statHue').innerText = data.hue_connected ? 'Connected @ ' + data.hue_bridge_ip : 'Disconnected';
       document.getElementById('statNanoleaf').innerText = data.nanoleaf_connected ? 'Connected @ ' + data.nanoleaf_ip + ' (40 Panels)' : (data.nanoleaf_ip ? 'Configured @ ' + data.nanoleaf_ip + ' · Disconnected' : 'Disconnected');
       if (document.activeElement !== document.getElementById('nanoleafIp') && data.nanoleaf_ip) document.getElementById('nanoleafIp').value = data.nanoleaf_ip;
@@ -643,6 +654,8 @@
         document.getElementById('sliderNanoleafOutput').value = settings.nanoleaf_output_brightness;
         document.getElementById('sliderSaturation').value = settings.saturation_boost;
         document.getElementById('sliderPeak').value = settings.peak_weight;
+        document.getElementById('sliderSpatialBlend').value = settings.spatial_blend ?? 0;
+        document.getElementById('valSpatialBlend').innerText = Math.round((settings.spatial_blend ?? 0) * 100) + '%';
         document.getElementById('sliderGamma').value = settings.gamma;
         document.getElementById('sliderBlackGate').value = settings.noise_gate_threshold;
         document.getElementById('sliderSmoothing').value = settings.smoothing_factor;
@@ -746,12 +759,14 @@
       document.getElementById('valSmoothing').innerText = smoothing.toFixed(2);
       document.getElementById('valColorStep').innerText = maxColorStep + ' RGB steps';
 
+      document.getElementById('valSpatialBlend').innerText = Math.round(parseFloat(document.getElementById('sliderSpatialBlend').value) * 100) + '%';
       const payload = {
         brightness_multiplier: brightness,
         hue_output_brightness: hueOutputBrightness,
         nanoleaf_output_brightness: nanoleafOutputBrightness,
         saturation_boost: saturation,
         peak_weight: peak,
+        spatial_blend: parseFloat(document.getElementById('sliderSpatialBlend').value),
         gamma: gamma,
         noise_gate_threshold: noiseGate,
         smoothing_factor: smoothing,

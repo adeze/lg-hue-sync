@@ -12,6 +12,17 @@ make check
 
 Run only the Rust tests with `make test` or `cargo nextest run --locked`.
 
+## Colour response
+
+Hue and Nanoleaf retain fractional colour state for smoother small fades. In the dashboard,
+**Advanced tuning → Spatial Gradient Blend** controls blending between nearby screen regions
+(0–50%; default 0). Start at 10–20% if local transitions look too abrupt; higher values soften
+spatial boundaries. Black regions stay off. Save settings to persist the value; the JSON/API
+field is `spatial_blend`. Existing configurations default to zero. Named presets set their own
+blend: Neutral and Fast Response 0%, High Chroma 15%, Neon Contrast 8%, Dark-Scene Detail 10%,
+Low Stimulation 30%. These are conservative starting points; adjust by eye for your layout.
+This is encoded-RGB interpolation, not perceptual-space blending or HDR decoding.
+
 ## Read-only capture colour probe
 
 The dashboard's `/capture-patterns` page shows nominal SDR patches. Load it in the browser on the HDMI source before stopping the daemon; its controls continue to work without the server. Apple TV fixed Dolby Vision output can show how that output mode affects capture, but the browser patches are not authored Dolby Vision reference values. A verified HDR10 or Dolby Vision video is required to assess those encoded source paths.

@@ -419,6 +419,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         sampler.set_temporal_response(config.rise_smoothing_factor, config.fall_smoothing_factor);
         sampler.set_strict_blackout(config.strict_blackout);
         sampler.set_peak_weight(config.peak_weight);
+        sampler.set_spatial_blend(config.spatial_blend);
         sampler.set_gamma(config.gamma);
         sampler.set_max_color_step(config.max_color_step);
     }
@@ -461,6 +462,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         sampler.set_temporal_response(config.rise_smoothing_factor, config.fall_smoothing_factor);
         sampler.set_strict_blackout(config.strict_blackout);
         sampler.set_peak_weight(config.peak_weight);
+        sampler.set_spatial_blend(config.spatial_blend);
         sampler.set_gamma(config.gamma);
         sampler.set_max_color_step(config.max_color_step);
     }
@@ -514,6 +516,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         nanoleaf_output_brightness: config.nanoleaf_output_brightness,
         saturation_boost: config.saturation_boost,
         peak_weight: config.peak_weight,
+        spatial_blend: config.spatial_blend,
         gamma: config.gamma,
         noise_gate_threshold: config.noise_gate_threshold,
         smoothing_factor: config.smoothing_factor,
@@ -927,6 +930,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 s.set_letterbox_detection(live_st.letterbox_detection);
                 s.set_saturation_boost(live_st.saturation_boost);
                 s.set_peak_weight(live_st.peak_weight);
+                s.set_spatial_blend(live_st.spatial_blend);
                 s.set_gamma(live_st.gamma);
                 s.set_noise_gate_threshold(live_st.noise_gate_threshold);
                 s.set_max_color_step(live_st.max_color_step);
@@ -943,6 +947,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     live_st.brightness_multiplier * live_st.nanoleaf_output_brightness,
                 );
                 ns.set_peak_weight(live_st.peak_weight);
+                ns.set_spatial_blend(live_st.spatial_blend);
                 ns.set_gamma(live_st.gamma);
                 ns.set_noise_gate_threshold(live_st.noise_gate_threshold);
                 ns.set_max_color_step(live_st.max_color_step);
@@ -967,6 +972,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 save_cfg.nanoleaf_output_brightness = live_st.nanoleaf_output_brightness;
                 save_cfg.saturation_boost = live_st.saturation_boost;
                 save_cfg.peak_weight = live_st.peak_weight;
+                save_cfg.spatial_blend = live_st.spatial_blend;
                 save_cfg.gamma = live_st.gamma;
                 save_cfg.noise_gate_threshold = live_st.noise_gate_threshold;
                 save_cfg.smoothing_factor = live_st.smoothing_factor;
@@ -1036,6 +1042,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         );
                         sampler.set_strict_blackout(live_st.strict_blackout);
                         sampler.set_peak_weight(live_st.peak_weight);
+                        sampler.set_spatial_blend(live_st.spatial_blend);
                         sampler.set_gamma(live_st.gamma);
                         sampler.set_max_color_step(live_st.max_color_step);
                     }

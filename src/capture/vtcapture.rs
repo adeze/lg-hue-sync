@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use libloading::{Library, Symbol};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::Path;
@@ -390,9 +390,8 @@ impl VtCapture {
     }
 }
 
-/// Converts NV12 (Y plane + interleaved UV plane) to standard 32-bit RGBA using fixed-point BT.601 limited-to-full range.
-/// Optimizes ARM execution by pairing adjacent horizontal pixels to reuse chroma (U, V) calculations.
-#[inline(always)]
+/// Convert validated NV12 to RGBA with explicit BT.601 limited-range colourimetry.
+/// This preserves the capture assumption; TV source mode is not capture metadata.
 pub fn convert_nv12_to_rgba(
     width: u32,
     height: u32,
@@ -405,55 +404,62 @@ pub fn convert_nv12_to_rgba(
     if y_plane.len() < y_len || uv_plane.len() < uv_len || rgb_buffer.len() < rgb_len {
         return Err(anyhow!("NV12 plane or output buffer is too short"));
     }
-    let w = width as usize;
-    let h = height as usize;
-    let s = stride as usize;
+    let output_stride = width
+        .checked_mul(4)
+        .ok_or_else(|| anyhow!("RGBA stride overflow"))?;
+    let (luma, y_stride) = prepare_nv12_plane(y_plane, width as usize, stride, height as usize, 16);
+    let (chroma, uv_stride) = prepare_nv12_plane(
+        uv_plane,
+        width.div_ceil(2) as usize * 2,
+        stride,
+        height.div_ceil(2) as usize,
+        0,
+    );
+    let image = yuv::YuvBiPlanarImage {
+        y_plane: &luma,
+        y_stride,
+        uv_plane: &chroma,
+        uv_stride,
+        width,
+        height,
+    };
+    yuv::yuv_nv12_to_rgba(
+        &image,
+        &mut rgb_buffer[..rgb_len],
+        output_stride,
+        yuv::YuvRange::Limited,
+        yuv::YuvStandardMatrix::Bt601,
+        yuv::YuvConversionMode::Professional,
+    )
+    .context("NV12 BT.601 limited-range conversion failed")
+}
 
-    for y in 0..h {
-        let y_row = y * s;
-        let uv_row = (y / 2) * s;
-        let out_row = y * w * 4;
-
-        for x in (0..w).step_by(2) {
-            let uv_offset = uv_row + x;
-            let u_val = uv_plane[uv_offset] as i32 - 128;
-            let v_val = uv_plane[uv_offset + 1] as i32 - 128;
-
-            // Shared chroma components for both horizontal pixels
-            let rv = 409 * v_val + 128;
-            let gv = -100 * u_val - 208 * v_val + 128;
-            let bv = 516 * u_val + 128;
-
-            // First pixel (x)
-            let y0 = (y_plane[y_row + x] as i32 - 16).max(0);
-            let c0 = 298 * y0;
-            let r0 = ((c0 + rv) >> 8).clamp(0, 255) as u8;
-            let g0 = ((c0 + gv) >> 8).clamp(0, 255) as u8;
-            let b0 = ((c0 + bv) >> 8).clamp(0, 255) as u8;
-
-            let out0 = out_row + x * 4;
-            rgb_buffer[out0] = r0;
-            rgb_buffer[out0 + 1] = g0;
-            rgb_buffer[out0 + 2] = b0;
-            rgb_buffer[out0 + 3] = 255;
-
-            // Second pixel (x + 1) if within bounds
-            if x + 1 < w {
-                let y1 = (y_plane[y_row + x + 1] as i32 - 16).max(0);
-                let c1 = 298 * y1;
-                let r1 = ((c1 + rv) >> 8).clamp(0, 255) as u8;
-                let g1 = ((c1 + gv) >> 8).clamp(0, 255) as u8;
-                let b1 = ((c1 + bv) >> 8).clamp(0, 255) as u8;
-
-                let out1 = out0 + 4;
-                rgb_buffer[out1] = r1;
-                rgb_buffer[out1 + 1] = g1;
-                rgb_buffer[out1 + 2] = b1;
-                rgb_buffer[out1 + 3] = 255;
-            }
+/// yuv iterates complete stride-sized rows. Repack minimal final rows rather than silently
+/// skipping them; normalize footroom before scalar/SIMD conversion. Ordinary planes are borrowed.
+fn prepare_nv12_plane(
+    plane: &[u8],
+    row_width: usize,
+    stride: u32,
+    rows: usize,
+    minimum: u8,
+) -> (std::borrow::Cow<'_, [u8]>, u32) {
+    let full_len = (stride as usize).checked_mul(rows);
+    let needs_normalizing = minimum > 0
+        && plane
+            .chunks(stride as usize)
+            .take(rows)
+            .any(|row| row[..row_width].iter().any(|value| *value < minimum));
+    if let Some(full_len) = full_len.filter(|len| *len <= plane.len()) {
+        if !needs_normalizing {
+            return (std::borrow::Cow::Borrowed(&plane[..full_len]), stride);
         }
     }
-    Ok(())
+    // Dimensions and minimal row lengths were checked by nv12_lengths before this helper.
+    let mut packed = Vec::with_capacity(row_width * rows);
+    for row in plane.chunks(stride as usize).take(rows) {
+        packed.extend(row[..row_width].iter().map(|value| (*value).max(minimum)));
+    }
+    (std::borrow::Cow::Owned(packed), row_width as u32)
 }
 
 pub(super) fn nv12_lengths(width: u32, height: u32, stride: u32) -> Result<(usize, usize, usize)> {
@@ -751,5 +757,63 @@ mod tests {
         assert!(convert_nv12_to_rgba(2, 2, 2, &[16; 4], &[128; 1], &mut output).is_err());
         assert!(convert_nv12_to_rgba(3, 2, 3, &[16; 6], &[128; 4], &mut [0; 24]).is_err());
         assert!(convert_nv12_to_rgba(2, 2, 2, &[16; 4], &[128; 2], &mut [0; 15]).is_err());
+    }
+
+    #[test]
+    fn yuv_conversion_matches_bt601_reference_and_bounds_quantization_changes() {
+        let mut max_legacy_difference = 0;
+        for y in [0u8, 15, 16, 17, 64, 100, 128, 200, 234, 235, 255] {
+            for u in [0u8, 16, 64, 128, 192, 240, 255] {
+                for v in [0u8, 16, 64, 128, 192, 240, 255] {
+                    let mut rgba = [0; 16];
+                    convert_nv12_to_rgba(2, 2, 2, &[y; 4], &[u, v], &mut rgba).unwrap();
+                    let luma = (f64::from(y.max(16)) - 16.0) * 255.0 / 219.0;
+                    let cb = (f64::from(u) - 128.0) * 255.0 / 224.0;
+                    let cr = (f64::from(v) - 128.0) * 255.0 / 224.0;
+                    let reference = [
+                        luma + 1.402 * cr,
+                        luma - (0.114 * 1.772 * cb + 0.299 * 1.402 * cr) / 0.587,
+                        luma + 1.772 * cb,
+                    ];
+                    for (actual, expected) in rgba[..3].iter().zip(reference) {
+                        assert!(
+                            actual.abs_diff(expected.round().clamp(0.0, 255.0) as u8) <= 1,
+                            "YUV={y},{u},{v}: {rgba:?}, expected={reference:?}"
+                        );
+                    }
+                    assert!(rgba.chunks_exact(4).all(|p| p == &rgba[..4] && p[3] == 255));
+                    {
+                        let c = 298 * (i32::from(y) - 16).max(0);
+                        let d = i32::from(u) - 128;
+                        let e = i32::from(v) - 128;
+                        let legacy = [
+                            (c + 409 * e + 128) >> 8,
+                            (c - 100 * d - 208 * e + 128) >> 8,
+                            (c + 516 * d + 128) >> 8,
+                        ];
+                        for (actual, old) in rgba[..3].iter().zip(legacy) {
+                            max_legacy_difference =
+                                max_legacy_difference.max(actual.abs_diff(old.clamp(0, 255) as u8));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            max_legacy_difference <= 1,
+            "legacy difference={max_legacy_difference}"
+        );
+        // Minimal last rows are valid; padding and extra destination bytes stay untouched.
+        for size in [40, 64] {
+            let mut rgba = vec![17; size];
+            convert_nv12_to_rgba(3, 3, 4, &[235; 11], &[128; 8], &mut rgba).unwrap();
+            assert!(rgba[..36]
+                .chunks_exact(4)
+                .all(|p| p == [255, 255, 255, 255]));
+            assert!(rgba[36..].iter().all(|v| *v == 17));
+        }
+        let mut rgba = [17; 4];
+        convert_nv12_to_rgba(1, 1, u32::MAX, &[0], &[128; 2], &mut rgba).unwrap();
+        assert_eq!(rgba, [0, 0, 0, 255]);
     }
 }

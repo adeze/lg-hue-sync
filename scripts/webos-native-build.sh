@@ -13,10 +13,18 @@ export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER="$BIN/webos-native-cc"
 export CC_armv7_unknown_linux_gnueabi="$BIN/webos-native-cc"
 export AR_armv7_unknown_linux_gnueabi="$SDK/bin/arm-webos-linux-gnueabi-ar"
 export RANLIB_armv7_unknown_linux_gnueabi="$SDK/bin/arm-webos-linux-gnueabi-ranlib"
-# Homebrew cargo/rustc can shadow rustup and cannot see its installed targets.
-RUSTC="$(rustup which --toolchain stable rustc)"
-export RUSTC
-rustup run stable cargo build --locked --release --target "$TARGET" --manifest-path "$MANIFEST" --bin "$NAME"
+if [ -n "${WEBOS_RUSTC:-}" ] || [ -n "${WEBOS_CARGO:-}" ]; then
+    : "${WEBOS_RUSTC:?Set WEBOS_RUSTC and WEBOS_CARGO together}"
+    : "${WEBOS_CARGO:?Set WEBOS_RUSTC and WEBOS_CARGO together}"
+    test -x "$WEBOS_RUSTC" && test -x "$WEBOS_CARGO" || { echo "Supplied Rust compiler/Cargo is not executable." >&2; exit 1; }
+    export RUSTC="$WEBOS_RUSTC"
+    "$WEBOS_CARGO" build --locked --release --target "$TARGET" --manifest-path "$MANIFEST" --bin "$NAME"
+else
+    # Homebrew cargo/rustc can shadow rustup and cannot see its installed targets.
+    RUSTC="$(rustup which --toolchain stable rustc)"
+    export RUSTC
+    rustup run stable cargo build --locked --release --target "$TARGET" --manifest-path "$MANIFEST" --bin "$NAME"
+fi
 BINARY="$CARGO_TARGET_DIR/$TARGET/release/$NAME"
 mkdir -p "$(dirname "$OUTPUT")"
 STAGED="$(mktemp "$OUTPUT.XXXXXX")"

@@ -12,6 +12,33 @@ make check
 
 Run only the Rust tests with `make test` or `cargo nextest run --locked`.
 
+### Optional Nix development environment
+
+`nix develop` supplies Rust 1.99.1 with rustfmt, Clippy and the ARMv7 standard library,
+plus nextest, uv/Python, Bun/Node, pkg-config and host build/package utilities. The
+checked-in `flake.lock` pins nixpkgs and rust-overlay. Supported hosts are Apple
+Silicon macOS and ARM64/x86-64 Linux. Nix runs on the build computer, not the TV.
+
+```bash
+nix develop
+make check
+uv run python scripts/test_native_toolchain.py
+make build  # macOS: after the existing SDK/Buster native setup
+```
+
+The shell exports `WEBOS_RUSTC` and `WEBOS_CARGO`, so native setup/build use the Nix
+compiler and its target library instead of a host rustup/Homebrew installation.
+Set both variables together when supplying another explicit toolchain. Without
+them, the existing rustup-stable selection is unchanged. Re-run `make native-setup`
+once to refresh previously installed helper scripts before using these variables.
+
+Nix does not install or relocate the webOS SDK, create the Buster sysroot, install
+Rust Ares aliases, start Docker, or change device profiles/configuration. Keep the
+existing native setup and ABI checks; Linux target builds still use the explicit
+`make build-docker` fallback and require a running Docker daemon. `make setup` and
+`make toolchain-update` remain rustup-management commands outside this shell; the
+Nix compiler changes only when its pin is deliberately updated.
+
 ## Colour response
 
 Hue and Nanoleaf retain fractional colour state for smoother small fades. In the dashboard,
@@ -137,7 +164,8 @@ The SDK defaults to
 For another installation, export `WEBOS_SDK` for both setup and builds. Override
 `WEBOS_NATIVE_HOME` consistently to relocate the installed helpers/sysroot.
 
-The native helper explicitly selects rustup's stable Cargo/rustc and ARM target;
+The native helper uses the supplied `WEBOS_CARGO`/`WEBOS_RUSTC` pair when set,
+otherwise explicitly selects rustup's stable Cargo/rustc and ARM target;
 Homebrew Rust can otherwise shadow them. It sets target-specific GCC, `ar` and
 `ranlib`, disables SDK libc polyfills, and builds into `target/native`. Before
 atomically replacing the normal ARM release artifact, it verifies ELF32,

@@ -4,7 +4,9 @@ Rust daemon and LAN dashboard for screen-derived Philips Hue Entertainment and N
 
 ## Commands
 
-- Host gate: `cargo fmt --all -- --check && cargo nextest run --locked && cargo clippy --bin lg-hue-sync -- -D warnings`
+- Host gate: `make check` (release versions, rustfmt, nextest, Clippy, embedded dashboard JavaScript and diff checks). Rust tests alone: `make test` or `cargo nextest run --locked`.
+- Optional pinned host environment: `nix develop`; compiler/tool pins live in `flake.nix` and `flake.lock`. The shell exports `WEBOS_RUSTC`/`WEBOS_CARGO` together; native setup/build honor that pair, otherwise use rustup stable. Re-run `make native-setup` to refresh older installed helpers before using explicit toolchains.
+- Nix supplies host tools, not the webOS SDK/Buster sysroot, Rust Ares aliases or a running Docker daemon. `make setup`/`make toolchain-update` manage rustup outside Nix; updating rustup does not update the Nix pin. Linux target builds still use `make build-docker`; see `docs/operations.md`.
 - Target build: `make build` (`armv7-unknown-linux-gnueabi`, macOS webOS SDK compiler/Buster sysroot, glibc 2.28); prepare once with `make native-setup`. Explicit Docker fallback/Linux CI: `make build-docker` (`docker/Dockerfile.cross`).
 - Dependencies: `make deps-check`; update compatible versions with `make deps-update`, then run host and target gates
 - Reference SDK: `webosbrew/native-toolchain`; see `docs/operations.md` before changing the canonical build
@@ -21,6 +23,7 @@ Rust daemon and LAN dashboard for screen-derived Philips Hue Entertainment and N
 - Maintainer and agent work goes directly to `main`; do not create branches or pull requests unless explicitly requested. External contributors use pull requests.
 - Never commit device IPs, MAC addresses, Hue credentials, Nanoleaf tokens, certificate pins, or populated `config.json` files.
 - A host macOS binary is not deployable. Verify a 32-bit ARM Linux ELF compatible with webOS glibc 2.28.
+- Nix evaluation, host/container checks and ARM builds are separate evidence from a realized Nix shell or TV execution. Retain per-artifact ELF32/little-endian ARM EABI5 soft-float, `/lib/ld-linux.so.3`, and glibc <= 2.28 checks regardless of compiler source.
 - Binary updates preserve `/var/home/root/lg-hue-sync/config.json` and keep a recoverable prior binary.
 - Upload, install, restart, autoroot, Luna mutation, or live light output requires explicit user direction.
 - Verify deployment with local/remote SHA-256, service state, dashboard status, and—when claimed—physical output.

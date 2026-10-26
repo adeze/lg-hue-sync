@@ -82,6 +82,8 @@ class NativeToolchainTests(unittest.TestCase):
         }
         self.env.pop("TEST_BUILD_FAIL", None)
         self.env.pop("TEST_WHICH_FAIL", None)
+        self.env.pop("WEBOS_RUSTC", None)
+        self.env.pop("WEBOS_CARGO", None)
 
     def tool(self, path, source):
         path.write_text(f"#!{sys.executable}\n" + source)
@@ -132,6 +134,54 @@ class NativeToolchainTests(unittest.TestCase):
                 if "TEST_WHICH_FAIL" in changes:
                     last_call = json.loads(self.calls.read_text().splitlines()[-1])
                     self.assertEqual(last_call["argv"], ["which", "--toolchain", "stable", "rustc"])
+
+    def test_supplied_toolchain_bypasses_rustup_and_rejects_incomplete_setup(self):
+        compiler = self.root / "Nix toolchain/bin/rustc"
+        cargo = compiler.with_name("cargo")
+        compiler.parent.mkdir(parents=True)
+        target = self.root / "target libraries"
+        target.mkdir()
+        self.tool(compiler, 'import os; print(os.environ["TEST_TARGET_LIBDIR"])\n')
+        self.tool(cargo, FAKE_RUSTUP.replace(
+            'sys.argv[1:5] == ["run","stable","cargo","build"]',
+            'sys.argv[1:2] == ["build"]',
+        ))
+        supplied = {
+            "WEBOS_RUSTC": str(compiler), "WEBOS_CARGO": str(cargo),
+            "TEST_WHICH_FAIL": "1", "TEST_TARGET_LIBDIR": str(target),
+        }
+        result = self.build(**supplied)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["argv"][0], "build")
+        self.assertEqual(calls[0]["env"]["RUSTC"], str(compiler))
+
+        for changes in [
+            {"WEBOS_RUSTC": ""}, {"WEBOS_CARGO": ""},
+            {"WEBOS_RUSTC": str(self.root / "missing-rustc")},
+            {"WEBOS_CARGO": str(self.root / "missing-cargo")},
+            {"TEST_BUILD_FAIL": "1"},
+        ]:
+            with self.subTest(changes=changes):
+                self.output.write_bytes(b"previous deployable")
+                result = self.build(**{**supplied, **changes})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.output.read_bytes(), b"previous deployable")
+
+        # An explicit compiler must already contain the target; setup must not
+        # mutate rustup or try to bootstrap a sysroot when that evidence is absent.
+        (self.sdk / "bin/arm-webos-linux-gnueabi-gcc").write_text('#!/bin/sh\nexit 0\n')
+        (self.sdk / "bin/arm-webos-linux-gnueabi-gcc").chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(SCRIPT.with_name("setup-native-toolchain.sh"))],
+            env={**self.env, **supplied, "TEST_TARGET_LIBDIR": str(target / "missing"),
+                 "WEBOS_NATIVE_HOME": str(self.root / "not-created")},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no ARMv7 target libraries", result.stderr)
+        self.assertFalse((self.root / "not-created").exists())
 
 
 if __name__ == "__main__":

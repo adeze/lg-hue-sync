@@ -636,6 +636,34 @@ fn zones_from_v2_configuration(
                 &name,
                 [coordinate("x")?, coordinate("y")?, coordinate("z")?],
             );
+            zone.hue_positions = configuration
+                .pointer("/locations/service_locations")
+                .and_then(Value::as_array)
+                .and_then(|locations| {
+                    locations.iter().find(|location| {
+                        service_id.is_some()
+                            && location.pointer("/service/rid").and_then(Value::as_str)
+                                == service_id
+                    })
+                })
+                .and_then(|location| location.get("positions"))
+                .and_then(Value::as_array)
+                .and_then(|positions| {
+                    positions
+                        .iter()
+                        .map(|position| {
+                            let axis = |name| {
+                                position
+                                    .get(name)
+                                    .and_then(Value::as_f64)
+                                    .map(|value| value as f32)
+                                    .filter(|value| value.is_finite())
+                            };
+                            Some([axis("x")?, axis("y")?, axis("z")?])
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .unwrap_or_default();
             zone.hue_device_id = device_id.map(ToOwned::to_owned);
             zone.hue_segment_index = segment_index;
             zone.hue_segment_count = segment_count;
@@ -956,6 +984,50 @@ mod tests {
         assert_eq!(zones[0].name, "Hue Flux · Segment 2");
         assert_eq!(zones[0].hue_device_id.as_deref(), Some("device-1"));
         assert_eq!(zones[0].hue_segment_count, Some(3));
+    }
+
+    #[test]
+    fn preview_layout_preserves_hue_points_without_changing_sampling() {
+        let mut configuration = serde_json::json!({
+            "channels": [{"channel_id": 4, "position": {"x": 0.8, "y": -0.8, "z": 0.0},
+                "members": [{"service": {"rid": "strip"}, "index": 0}]}],
+            "locations": {"service_locations": [{"service": {"rid": "strip"}, "positions": [
+                {"x": 1.0, "y": -0.7, "z": 0.04}, {"x": 1.0, "y": 0.65, "z": 0.04}
+            ]}]}
+        });
+        let zones = zones_from_v2_configuration(&configuration, None, None).unwrap();
+        assert_eq!(
+            zones[0].hue_positions,
+            vec![[1.0, -0.7, 0.04], [1.0, 0.65, 0.04]]
+        );
+        let expected = crate::config::LightZone::from_3d_position(4, "", [0.8, -0.8, 0.0]);
+        assert_eq!(
+            (
+                zones[0].x_min,
+                zones[0].x_max,
+                zones[0].y_min,
+                zones[0].y_max
+            ),
+            (
+                expected.x_min,
+                expected.x_max,
+                expected.y_min,
+                expected.y_max
+            )
+        );
+        configuration["locations"]["service_locations"][0]["positions"][1]["z"] =
+            serde_json::Value::Null;
+        assert!(
+            zones_from_v2_configuration(&configuration, None, None).unwrap()[0]
+                .hue_positions
+                .is_empty()
+        );
+        configuration.as_object_mut().unwrap().remove("locations");
+        assert!(
+            zones_from_v2_configuration(&configuration, None, None).unwrap()[0]
+                .hue_positions
+                .is_empty()
+        );
     }
 
     #[test]

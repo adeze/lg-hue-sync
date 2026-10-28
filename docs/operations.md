@@ -39,6 +39,8 @@ existing native setup and ABI checks; Linux target builds still use the explicit
 `make toolchain-update` remain rustup-management commands outside this shell; the
 Nix compiler changes only when its pin is deliberately updated.
 
+For Hue preview grouping/orientation changes, also run `bun scripts/test_preview.mjs`. The preview groups channels by owner device, combines sampling bounds and averages available channel colours for display only. Orientation glyphs use Hue service layout points; the monitor end of the depth glyph marks front toward the TV wall, not the direction the LEDs face. A single point does not establish physical rotation. Sampling and stream channel IDs remain unchanged.
+
 ## Colour response
 
 Hue and Nanoleaf retain fractional colour state for smoother small fades. In the dashboard,

@@ -58,6 +58,9 @@ pub struct LightZone {
     pub hue_segment_index: Option<u8>,
     #[serde(default)]
     pub hue_segment_count: Option<u8>,
+    /// Hue service layout points in room coordinates, for preview orientation only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hue_positions: Vec<[f32; 3]>,
     /// Normalized coordinates: 0.0 to 1.0
     pub x_min: f32,
     pub x_max: f32,
@@ -98,6 +101,7 @@ impl LightZone {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min,
             x_max,
             y_min,
@@ -296,6 +300,7 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.0,
             x_max: 0.25,
             y_min: 0.1,
@@ -307,6 +312,7 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.2,
             x_max: 0.8,
             y_min: 0.0,
@@ -318,6 +324,7 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.75,
             x_max: 1.0,
             y_min: 0.1,
@@ -329,6 +336,7 @@ fn default_zones() -> Vec<LightZone> {
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
+            hue_positions: Vec::new(),
             x_min: 0.2,
             x_max: 0.8,
             y_min: 0.7,

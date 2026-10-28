@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-28
+
+### Fixed
+- Show one Hue preview box per physical device, combining the sampling bounds of its streaming channels. Keep different devices and legacy channels separate; use a representative average sampled colour for multichannel previews only.
+- Replace segment-range labels with the device name and retain channel details in the tooltip. Add large orientation glyphs when Hue supplies enough service layout points; the monitor end marks front toward the TV wall, not LED facing.
+- Preserve optional Hue layout points for preview orientation without changing sampling regions, channel IDs, segment membership, or output processing. Missing or invalid geometry does not invent orientation.
+
+### Validation
+- All 105 Rust tests, preview grouping/orientation checks, formatting, warnings-denied Clippy, dashboard syntax and release metadata checks passed. Native ARMv7 builds passed ELF/ABI, loader and glibc <= 2.28 checks.
+- Local browser checks confirmed eight device boxes, one Flux strip label and accessible orientation glyphs using captured layout data. TV deployment is verified separately from the independently built Docker CI release artifact.
+- Physical LED facing, colour accuracy and alternative sampling strategies were not tested or changed. Launcher-only IPKs and manifests remain unpublished.
+
 ## [0.9.0] - 2026-10-28
 
 ### Added

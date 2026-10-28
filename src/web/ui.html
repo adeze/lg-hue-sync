@@ -182,6 +182,9 @@
       font-weight: 700; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap;
     }
 
+    .hue-zone-orientation { pointer-events:auto; cursor:help; position:absolute; right:6px; bottom:6px; display:grid; place-items:center; width:44px; height:48px; max-width:calc(100% - 12px); max-height:calc(100% - 12px); color:#fff; background:rgba(0,0,0,0.8); border-radius:5px; }
+    .hue-zone-orientation svg { width:36px; height:40px; max-width:100%; max-height:100%; }
+
     /* Control Sliders */
     .control-group { margin-bottom: 18px; }
     .control-header { display: flex; justify-content: space-between; font-size: 0.85rem; font-weight: 600; margin-bottom: 10px; }
@@ -320,7 +323,7 @@
       </div>
     </div>
 
-    <p class="preview-caption"><strong>Selected Hue area</strong>Live sampled colours · Hue zones inside · Nanoleaf around the edge</p>
+    <p class="preview-caption"><strong>Selected Hue area</strong>One box per Hue light · sampled colour preview · Nanoleaf around the edge</p>
   </section>
 
   <section class="card" id="presetSection">
@@ -597,35 +600,101 @@
     let hueZoneSignature = '';
     let temporalResponse = { rise: 0.35, fall: 0.35 };
 
+    function groupHueZones(zones) {
+      const devices = new Map();
+      for (const zone of zones) {
+        const key = zone.hue_device_id || 'channel:' + zone.channel_id;
+        if (!devices.has(key)) {
+          devices.set(key, {
+            ...zone,
+            name: zone.name.replace(/ · Segments? [\d,\s–]+$/, ''),
+            channels: [],
+            positions: []
+          });
+        }
+        const device = devices.get(key);
+        device.channels.push(zone);
+        for (const point of zone.hue_positions || []) {
+          if (!device.positions.some(existing => existing.every((value, axis) => value === point[axis]))) {
+            device.positions.push(point);
+          }
+        }
+        device.x_min = Math.min(device.x_min, zone.x_min);
+        device.x_max = Math.max(device.x_max, zone.x_max);
+        device.y_min = Math.min(device.y_min, zone.y_min);
+        device.y_max = Math.max(device.y_max, zone.y_max);
+      }
+      return Array.from(devices.values());
+    }
+
+    function hueOrientation(positions) {
+      if (positions.length < 2) return '';
+      if (positions.length > 2) return 'Multi-point layout';
+      const delta = positions[0].map((value, axis) => Math.abs(positions[1][axis] - value));
+      const largest = Math.max(...delta);
+      if (largest < 0.001) return '';
+      const dominant = delta.indexOf(largest);
+      if (delta.some((value, axis) => axis !== dominant && value > largest * 0.1)) return 'Angled';
+      return ['Left ↔ right', 'Front ↔ back', 'Up ↔ down'][dominant];
+    }
+
+    function hueOrientationGlyph(orientation) {
+      const paths = {
+        'Front ↔ back': '<rect x="5" y="3" width="22" height="12" rx="2"/><path d="M12 18h8M16 15v3M16 23v10m-5-5 5-5 5 5"/><circle cx="16" cy="35" r="2"/>',
+        'Left ↔ right': '<path d="M4 20h24M10 14l-6 6 6 6m12-12 6 6-6 6"/>',
+        'Up ↔ down': '<path d="M16 5v30M10 11l6-6 6 6m-12 18 6 6 6-6"/>',
+        'Angled': '<path d="M5 31 27 9M5 23v8h8M19 9h8v8"/>',
+        'Multi-point layout': '<path d="M5 30V11h22v19"/><circle cx="5" cy="30" r="2"/><circle cx="27" cy="30" r="2"/>'
+      };
+      return paths[orientation] ? '<svg viewBox="0 0 32 40" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths[orientation] + '</svg>' : '';
+    }
+
     function updateHueZones(zones, colors) {
       if (!zones) return;
-      const signature = zones.map(zone => [zone.channel_id, zone.name, zone.x_min, zone.x_max, zone.y_min, zone.y_max].join(':')).join('|');
+      const devices = groupHueZones(zones);
+      const signature = JSON.stringify(devices);
       if (signature !== hueZoneSignature) {
         hueZoneOverlay.replaceChildren();
-        for (const zone of zones) {
+        for (const device of devices) {
           const element = document.createElement('div');
           element.className = 'hue-zone';
-          element.id = 'hueZone_' + zone.channel_id;
-          element.title = 'Channel ' + zone.channel_id + ': ' + zone.name;
-          element.style.left = (zone.x_min * 100) + '%';
-          element.style.top = (zone.y_min * 100) + '%';
-          element.style.width = ((zone.x_max - zone.x_min) * 100) + '%';
-          element.style.height = ((zone.y_max - zone.y_min) * 100) + '%';
+          element.id = 'hueZone_' + device.channel_id;
+          const orientation = hueOrientation(device.positions);
+          const orientationDescription = orientation === 'Front ↔ back'
+            ? 'Along room depth; monitor end is front, toward the TV wall. Does not indicate LED facing.'
+            : orientation;
+          element.title = device.channels.map(zone => 'Channel ' + zone.channel_id + ': ' + zone.name).join('\n')
+            + '\nHue layout: ' + (orientationDescription || 'orientation unavailable');
+          element.style.left = (device.x_min * 100) + '%';
+          element.style.top = (device.y_min * 100) + '%';
+          element.style.width = ((device.x_max - device.x_min) * 100) + '%';
+          element.style.height = ((device.y_max - device.y_min) * 100) + '%';
           const label = document.createElement('span');
           label.className = 'hue-zone-label';
-          label.textContent = zone.name;
+          label.textContent = device.name;
           element.appendChild(label);
+          if (orientation) {
+            const direction = document.createElement('span');
+            direction.className = 'hue-zone-orientation';
+            direction.setAttribute('role', 'img');
+            direction.setAttribute('aria-label', orientationDescription);
+            direction.title = orientationDescription;
+            direction.innerHTML = hueOrientationGlyph(orientation);
+            element.appendChild(direction);
+          }
           hueZoneOverlay.appendChild(element);
         }
         hueZoneSignature = signature;
       }
       const colorsByChannel = new Map(colors || []);
-      for (const zone of zones) {
-        const color = colorsByChannel.get(zone.channel_id);
-        const element = document.getElementById('hueZone_' + zone.channel_id);
-        if (element && color) {
-          element.style.borderColor = 'rgb(' + color.r + ',' + color.g + ',' + color.b + ')';
-          element.style.background = 'rgba(' + color.r + ',' + color.g + ',' + color.b + ',0.18)';
+      for (const device of devices) {
+        const samples = device.channels.map(zone => colorsByChannel.get(zone.channel_id)).filter(Boolean);
+        const element = document.getElementById('hueZone_' + device.channel_id);
+        if (element) {
+          const rgb = ['r', 'g', 'b'].map(component => samples.length
+            ? Math.round(samples.reduce((sum, color) => sum + color[component], 0) / samples.length) : 0);
+          element.style.borderColor = 'rgb(' + rgb.join(',') + ')';
+          element.style.background = 'rgba(' + rgb.join(',') + ',0.18)';
         }
       }
     }

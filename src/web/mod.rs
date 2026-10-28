@@ -1,4 +1,6 @@
 mod bonjour;
+mod diagnostics;
+mod preview;
 pub mod server;
 
 pub use server::{

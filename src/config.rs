@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -158,8 +159,30 @@ fn default_nanoleaf_segments() -> u16 {
     30
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PresetTuning {
+    pub brightness_multiplier: f32,
+    pub saturation_boost: f32,
+    pub peak_weight: f32,
+    pub spatial_blend: f32,
+    pub gamma: f32,
+    pub noise_gate_threshold: f32,
+    pub smoothing_factor: f32,
+    pub rise_smoothing_factor: f32,
+    pub fall_smoothing_factor: f32,
+    pub strict_blackout: bool,
+    pub max_color_step: u8,
+    pub use_xy_gamut: bool,
+    pub letterbox_detection: bool,
+    pub hdr_tone_mapping: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub active_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub preset_overrides: BTreeMap<String, PresetTuning>,
     /// Advertise the dashboard and OpenAPI URL over Bonjour.
     #[serde(default)]
     pub bonjour_enabled: bool,
@@ -390,6 +413,8 @@ impl Config {
 
     pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
         Self {
+            active_preset: None,
+            preset_overrides: BTreeMap::new(),
             bonjour_enabled: false,
             auto_tv_power: true,
             hue_enabled: true,
@@ -561,6 +586,82 @@ fn lock_config(path: &Path) -> Result<File, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_configs_start_without_preset_overrides() {
+        let mut value = serde_json::to_value(Config::new_default("", "", "", "")).unwrap();
+        value.as_object_mut().unwrap().remove("active_preset");
+        value.as_object_mut().unwrap().remove("preset_overrides");
+        let config: Config = serde_json::from_value(value).unwrap();
+        assert!(config.active_preset.is_none() && config.preset_overrides.is_empty());
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("preset_overrides")
+            .is_none());
+    }
+
+    #[test]
+    fn preset_overrides_round_trip_without_replacing_pairing_or_output_settings() {
+        let path = std::env::temp_dir().join(format!(
+            "lg-hue-sync-preset-config-{}-{}.json",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut initial = Config::new_default(
+            "fixture-bridge",
+            "fixture-key",
+            "fixture-client-key",
+            "fixture-area",
+        );
+        initial.hue_output_brightness = 0.75;
+        initial.nanoleaf_output_brightness = 1.25;
+        initial.bonjour_enabled = true;
+        Config::update(&path, Some(initial), |_| Ok(())).unwrap();
+        let tuning = PresetTuning {
+            brightness_multiplier: 1.2,
+            saturation_boost: 1.5,
+            peak_weight: 0.25,
+            spatial_blend: 0.1,
+            gamma: 1.1,
+            noise_gate_threshold: 0.025,
+            smoothing_factor: 0.35,
+            rise_smoothing_factor: 0.4,
+            fall_smoothing_factor: 0.2,
+            strict_blackout: true,
+            max_color_step: 14,
+            use_xy_gamut: false,
+            letterbox_detection: true,
+            hdr_tone_mapping: false,
+        };
+        Config::update(&path, None, |config| {
+            config.active_preset = Some("neutralReference".into());
+            config
+                .preset_overrides
+                .insert("neutralReference".into(), tuning.clone());
+            Ok(())
+        })
+        .unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.active_preset.as_deref(), Some("neutralReference"));
+        assert_eq!(
+            loaded.preset_overrides.get("neutralReference"),
+            Some(&tuning)
+        );
+        assert_eq!(loaded.username, "fixture-key");
+        assert_eq!(loaded.clientkey, "fixture-client-key");
+        assert_eq!(loaded.bridge_ip, "fixture-bridge");
+        assert_eq!(loaded.entertainment_area_id, "fixture-area");
+        assert_eq!(
+            (
+                loaded.hue_output_brightness,
+                loaded.nanoleaf_output_brightness
+            ),
+            (0.75, 1.25)
+        );
+        assert!(loaded.bonjour_enabled);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("json.lock"));
+    }
 
     #[test]
     fn pairing_without_an_area_keeps_credentials_but_clears_old_mapping() {

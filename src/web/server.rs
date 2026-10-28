@@ -1,22 +1,25 @@
+use super::diagnostics::{self, Diagnostics};
+use super::preview::{self, PreviewFrame, PreviewState};
 use crate::{
     color::RgbColor,
-    config::{Config, LightZone, NanoleafAlignment, NanoleafConfig},
+    config::{Config, LightZone, NanoleafAlignment, NanoleafConfig, PresetTuning},
     hue, nanoleaf,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info};
 use utoipa::ToSchema;
@@ -157,6 +160,44 @@ impl LiveSettings {
     }
 }
 
+impl PresetTuning {
+    fn capture(settings: &LiveSettings) -> Self {
+        Self {
+            brightness_multiplier: settings.brightness_multiplier,
+            saturation_boost: settings.saturation_boost,
+            peak_weight: settings.peak_weight,
+            spatial_blend: settings.spatial_blend,
+            gamma: settings.gamma,
+            noise_gate_threshold: settings.noise_gate_threshold,
+            smoothing_factor: settings.smoothing_factor,
+            rise_smoothing_factor: settings.rise_smoothing_factor,
+            fall_smoothing_factor: settings.fall_smoothing_factor,
+            strict_blackout: settings.strict_blackout,
+            max_color_step: settings.max_color_step,
+            use_xy_gamut: settings.use_xy_gamut,
+            letterbox_detection: settings.letterbox_detection,
+            hdr_tone_mapping: settings.hdr_tone_mapping,
+        }
+    }
+
+    fn apply(&self, settings: &mut LiveSettings) {
+        settings.brightness_multiplier = self.brightness_multiplier;
+        settings.saturation_boost = self.saturation_boost;
+        settings.peak_weight = self.peak_weight;
+        settings.spatial_blend = self.spatial_blend;
+        settings.gamma = self.gamma;
+        settings.noise_gate_threshold = self.noise_gate_threshold;
+        settings.smoothing_factor = self.smoothing_factor;
+        settings.rise_smoothing_factor = self.rise_smoothing_factor;
+        settings.fall_smoothing_factor = self.fall_smoothing_factor;
+        settings.strict_blackout = self.strict_blackout;
+        settings.max_color_step = self.max_color_step;
+        settings.use_xy_gamut = self.use_xy_gamut;
+        settings.letterbox_detection = self.letterbox_detection;
+        settings.hdr_tone_mapping = self.hdr_tone_mapping;
+    }
+}
+
 struct Preset {
     brightness: f32,
     saturation: f32,
@@ -216,6 +257,9 @@ impl Preset {
         settings.strict_blackout = self.strict_blackout;
         settings.max_color_step = self.max_color_step;
         settings.spatial_blend = self.spatial_blend;
+        settings.use_xy_gamut = false;
+        settings.letterbox_detection = true;
+        settings.hdr_tone_mapping = true;
     }
 }
 
@@ -292,6 +336,12 @@ impl SyncStatus {
 }
 
 pub struct SharedState {
+    active_preset: RwLock<Option<String>>,
+    saved_presets: RwLock<BTreeMap<String, PresetTuning>>,
+    pub preview: PreviewState,
+    preview_render_gate: Arc<Semaphore>,
+    preview_render_started: std::sync::Mutex<Option<std::time::Instant>>,
+    diagnostics: RwLock<Diagnostics>,
     sync_status: RwLock<SyncStatus>,
     command_tx: mpsc::Sender<ControlCommand>,
     /// Capture polling ceiling, not the media frame rate.
@@ -324,6 +374,12 @@ impl SharedState {
         command_tx: mpsc::Sender<ControlCommand>,
     ) -> Self {
         Self {
+            active_preset: RwLock::new(None),
+            saved_presets: RwLock::new(BTreeMap::new()),
+            preview: PreviewState::default(),
+            preview_render_gate: Arc::new(Semaphore::new(1)),
+            preview_render_started: std::sync::Mutex::new(None),
+            diagnostics: RwLock::new(Diagnostics::default()),
             sync_status: RwLock::new(SyncStatus {
                 requested_running: true,
                 pipeline_state: SyncState::Starting,
@@ -346,6 +402,77 @@ impl SharedState {
             hue_zones: RwLock::new(hue_zones),
             calibration_pattern: RwLock::new(None),
         }
+    }
+
+    pub fn configure_presets(&self, active: Option<String>, saved: BTreeMap<String, PresetTuning>) {
+        let current = self.current_settings.read().unwrap().clone();
+        *self.saved_presets.write().unwrap() = saved
+            .into_iter()
+            .filter(|(name, tuning)| {
+                let mut candidate = current.clone();
+                tuning.apply(&mut candidate);
+                Preset::named(name).is_ok() && candidate.validate().is_ok()
+            })
+            .collect();
+        *self.active_preset.write().unwrap() = active.filter(|name| Preset::named(name).is_ok());
+    }
+
+    fn factory_tuning(&self, name: &str) -> Result<PresetTuning, ApiError> {
+        let mut settings = self.current_settings.read().unwrap().clone();
+        Preset::named(name)?.apply(&mut settings);
+        Ok(PresetTuning::capture(&settings))
+    }
+
+    pub fn preset_save_snapshot(
+        &self,
+        settings: &LiveSettings,
+    ) -> (Option<String>, BTreeMap<String, PresetTuning>) {
+        let active = self.active_preset.read().unwrap().clone();
+        let mut saved = self.saved_presets.read().unwrap().clone();
+        if let Some(name) = &active {
+            let tuning = PresetTuning::capture(settings);
+            if self
+                .factory_tuning(name)
+                .is_ok_and(|factory| factory == tuning)
+            {
+                saved.remove(name);
+            } else {
+                saved.insert(name.clone(), tuning);
+            }
+        }
+        (active, saved)
+    }
+
+    pub fn mark_presets_saved(&self, saved: BTreeMap<String, PresetTuning>) {
+        *self.saved_presets.write().unwrap() = saved;
+    }
+
+    fn preset_modified(&self) -> bool {
+        let Some(name) = self.active_preset.read().unwrap().clone() else {
+            return false;
+        };
+        let saved = self.saved_presets.read().unwrap().get(&name).cloned();
+        let reference = saved.or_else(|| self.factory_tuning(&name).ok());
+        let current = PresetTuning::capture(&self.current_settings.read().unwrap());
+        reference.is_some_and(|reference| reference != current)
+    }
+
+    async fn select_preset(&self, name: String, reset: bool) -> Result<(), ApiError> {
+        let factory = Preset::named(&name)?;
+        let _guard = self.settings_update_lock.lock().await;
+        if !reset && self.active_preset.read().unwrap().as_deref() == Some(name.as_str()) {
+            return Ok(());
+        }
+        let mut settings = self.current_settings.read().unwrap().clone();
+        factory.apply(&mut settings);
+        if !reset {
+            if let Some(saved) = self.saved_presets.read().unwrap().get(&name) {
+                saved.apply(&mut settings);
+            }
+        }
+        self.apply_settings_locked(settings).await?;
+        *self.active_preset.write().unwrap() = Some(name);
+        Ok(())
     }
 
     pub fn set_fps(&self, fps: f32) {
@@ -377,6 +504,9 @@ impl SharedState {
     }
 
     pub fn set_sync_state(&self, state: SyncState, error: Option<String>) {
+        if state != SyncState::Running {
+            self.preview.clear();
+        }
         let mut status = self.sync_status.write().unwrap();
         status.pipeline_state = state;
         status.last_error = error;
@@ -413,6 +543,10 @@ impl SharedState {
         let _guard = self.settings_update_lock.lock().await;
         let mut settings = self.current_settings.read().unwrap().clone();
         update(&mut settings);
+        self.apply_settings_locked(settings).await
+    }
+
+    async fn apply_settings_locked(&self, settings: LiveSettings) -> Result<(), ApiError> {
         settings.validate()?;
         let permit = self
             .command_tx
@@ -434,6 +568,9 @@ struct AppState {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 struct StatusResponse {
+    active_preset: Option<String>,
+    preset_modified: bool,
+    diagnostics: Diagnostics,
     /// Saved discovery preference; multicast visibility depends on the network.
     bonjour_enabled: bool,
     is_syncing: bool,
@@ -522,7 +659,7 @@ pub async fn start_web_server(
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
     let (bonjour_tx, bonjour_rx) = watch::channel(bonjour_enabled);
     let app_state = AppState {
-        shared,
+        shared: Arc::clone(&shared),
         config_path,
         bonjour: Arc::new(Mutex::new(bonjour_tx)),
     };
@@ -533,6 +670,24 @@ pub async fn start_web_server(
         bonjour_rx,
         shutdown.clone(),
     ));
+    let diagnostics_shutdown = shutdown.clone();
+    tracker.spawn(async move {
+        loop {
+            let snapshot = if shared.tv_power_state.load(Ordering::Relaxed) == 2 {
+                Diagnostics::default()
+            } else {
+                tokio::select! {
+                    _ = diagnostics_shutdown.cancelled() => break,
+                    snapshot = diagnostics::collect() => snapshot,
+                }
+            };
+            *shared.diagnostics.write().unwrap() = snapshot;
+            tokio::select! {
+                _ = diagnostics_shutdown.cancelled() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            }
+        }
+    });
     tracker.spawn(async move {
         if let Err(error) = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown.cancelled_owned())
@@ -548,12 +703,15 @@ pub async fn start_web_server(
 fn build_router(state: AppState) -> anyhow::Result<Router> {
     let (router, mut document) = OpenApiRouter::<AppState>::new()
         .routes(routes!(status))
+        .routes(routes!(preview_frame))
+        .routes(routes!(preview_render))
         .routes(routes!(set_bonjour))
         .routes(routes!(start))
         .routes(routes!(stop))
         .routes(routes!(toggle))
         .routes(routes!(settings))
         .routes(routes!(apply_preset))
+        .routes(routes!(reset_preset))
         .routes(routes!(update_nanoleaf_alignment))
         .routes(routes!(hue_areas))
         .routes(routes!(select_hue_area))
@@ -581,6 +739,7 @@ fn build_router(state: AppState) -> anyhow::Result<Router> {
                 ))
             }),
         )
+        .layer(DefaultBodyLimit::max(512 * 1024))
         .with_state(state))
 }
 
@@ -590,6 +749,116 @@ async fn root() -> Html<&'static str> {
 
 async fn capture_patterns() -> Html<&'static str> {
     Html(CAPTURE_PATTERNS_HTML)
+}
+
+#[derive(Deserialize, ToSchema)]
+struct PreviewRenderRequest {
+    frame: PreviewFrame,
+    settings: LiveSettings,
+}
+
+fn preview_response(status: StatusCode, body: impl Serialize) -> Response {
+    (
+        status,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(body),
+    )
+        .into_response()
+}
+
+/// Request a bounded thumbnail from the existing HDMI capture pipeline.
+#[utoipa::path(
+    get, path = "/api/preview/frame", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "Recent captured RGB thumbnail; not cached", body = PreviewFrame),
+        (status = 202, description = "Waiting for the capture loop to publish a frame", body = ErrorResponse),
+        (status = 409, description = "HDMI hardware capture is not running", body = ErrorResponse)
+    )
+)]
+async fn preview_frame(State(state): State<AppState>) -> Response {
+    let shared = &state.shared;
+    if shared.sync_status.read().unwrap().pipeline_state != SyncState::Running
+        || !shared.capture_hardware.load(Ordering::Relaxed)
+    {
+        shared.preview.clear();
+        return preview_response(
+            StatusCode::CONFLICT,
+            ErrorResponse {
+                error: "Preview requires HDMI playback with screen sync running.".into(),
+            },
+        );
+    }
+    match shared.preview.request() {
+        Some(frame) => preview_response(StatusCode::OK, frame),
+        None => preview_response(
+            StatusCode::ACCEPTED,
+            ErrorResponse {
+                error: "Waiting for a captured frame.".into(),
+            },
+        ),
+    }
+}
+
+/// Render static colour adjustments without applying settings or touching devices.
+#[utoipa::path(
+    post, path = "/api/preview/render", tag = "LG Hue Sync",
+    request_body = PreviewRenderRequest,
+    responses(
+        (status = 200, description = "Processed RGB thumbnail", body = PreviewFrame),
+        (status = 422, description = "Invalid frame or settings", body = ErrorResponse),
+        (status = 429, description = "Preview renderer busy or rate limited", body = ErrorResponse),
+        (status = 503, description = "Preview renderer unavailable", body = ErrorResponse)
+    )
+)]
+async fn preview_render(
+    State(state): State<AppState>,
+    Json(request): Json<PreviewRenderRequest>,
+) -> Response {
+    if let Err(error) = request.settings.validate() {
+        return preview_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorResponse {
+                error: error.to_string(),
+            },
+        );
+    }
+    let Ok(permit) = state.shared.preview_render_gate.clone().try_acquire_owned() else {
+        return preview_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorResponse {
+                error: "Preview renderer is busy.".into(),
+            },
+        );
+    };
+    {
+        let mut last = state.shared.preview_render_started.lock().unwrap();
+        if last.is_some_and(|started| started.elapsed() < std::time::Duration::from_millis(100)) {
+            return preview_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                ErrorResponse {
+                    error: "Preview requests are too frequent.".into(),
+                },
+            );
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        preview::render(&request.frame, &request.settings)
+    })
+    .await
+    {
+        Ok(Ok(frame)) => preview_response(StatusCode::OK, frame),
+        Ok(Err(error)) => {
+            preview_response(StatusCode::UNPROCESSABLE_ENTITY, ErrorResponse { error })
+        }
+        Err(_) => preview_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorResponse {
+                error: "Preview renderer is unavailable.".into(),
+            },
+        ),
+    }
 }
 
 /// Read pipeline state, settings and sampled colors.
@@ -603,7 +872,12 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let shared = &state.shared;
     let sync = shared.sync_status.read().unwrap().clone();
     let bonjour_enabled = *state.bonjour.lock().await.borrow();
+    let active_preset = shared.active_preset.read().unwrap().clone();
+    let preset_modified = shared.preset_modified();
     Json(StatusResponse {
+        active_preset,
+        preset_modified,
+        diagnostics: shared.diagnostics.read().unwrap().clone(),
         bonjour_enabled,
         is_syncing: sync.pipeline_state == SyncState::Running,
         sync,
@@ -728,7 +1002,7 @@ async fn toggle(State(state): State<AppState>) -> Result<Json<StatusMessage>, Ap
     responses(
         (status = 200, description = "Success", body = StatusMessage),
         (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
-        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 413, description = "Request body exceeds the 512 KiB limit", body = String, content_type = "text/plain"),
         (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
         (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
         (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
@@ -757,12 +1031,26 @@ async fn apply_preset(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<StatusMessage>, ApiError> {
-    let preset = Preset::named(&name)?;
-    state
-        .shared
-        .update_settings(|settings| preset.apply(settings))
-        .await?;
+    state.shared.select_preset(name, false).await?;
     Ok(Json(StatusMessage { status: "ok" }))
+}
+
+/// Restore factory tuning for a preset; Save is required to persist the reset.
+#[utoipa::path(
+    post, path = "/api/presets/{name}/reset", tag = "LG Hue Sync",
+    params(("name" = String, Path, description = "Preset name")),
+    responses(
+        (status = 200, description = "Factory tuning applied live; not saved", body = StatusMessage),
+        (status = 400, description = "Unknown preset", body = ErrorResponse),
+        (status = 502, description = "Controller unavailable", body = ErrorResponse)
+    )
+)]
+async fn reset_preset(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<StatusMessage>, ApiError> {
+    state.shared.select_preset(name, true).await?;
+    Ok(Json(StatusMessage { status: "reset" }))
 }
 
 /// Save Nanoleaf alignment, then apply live settings.
@@ -772,7 +1060,7 @@ async fn apply_preset(
     responses(
         (status = 200, description = "Success", body = StatusMessage),
         (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
-        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 413, description = "Request body exceeds the 512 KiB limit", body = String, content_type = "text/plain"),
         (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
         (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
         (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
@@ -818,6 +1106,7 @@ async fn update_nanoleaf_alignment(
     )
 )]
 async fn save_config(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
+    let _guard = state.shared.settings_update_lock.lock().await;
     let (ack_tx, ack_rx) = oneshot::channel();
     state
         .shared
@@ -906,7 +1195,7 @@ async fn hue_areas(State(state): State<AppState>) -> Result<Json<HueAreasRespons
     responses(
         (status = 200, description = "Success", body = StatusMessage),
         (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
-        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 413, description = "Request body exceeds the 512 KiB limit", body = String, content_type = "text/plain"),
         (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
         (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
         (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
@@ -989,7 +1278,7 @@ async fn test_pattern(
     responses(
         (status = 200, description = "Success", body = StatusMessage),
         (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
-        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 413, description = "Request body exceeds the 512 KiB limit", body = String, content_type = "text/plain"),
         (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
         (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
         (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
@@ -1037,7 +1326,7 @@ async fn pair_hue(
     responses(
         (status = 200, description = "Success", body = StatusMessage),
         (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
-        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 413, description = "Request body exceeds the 512 KiB limit", body = String, content_type = "text/plain"),
         (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
         (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
         (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
@@ -1148,6 +1437,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preview_requires_running_hardware_and_clears_on_source_pause() {
+        use tower::ServiceExt;
+        let (sender, _receiver) = mpsc::channel(2);
+        let shared = Arc::new(SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        ));
+        let app = build_router(AppState {
+            shared: shared.clone(),
+            config_path: PathBuf::new(),
+            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
+        })
+        .unwrap();
+        let request = || {
+            axum::http::Request::builder()
+                .uri("/api/preview/frame")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        shared.capture_hardware.store(true, Ordering::Relaxed);
+        shared.set_sync_state(SyncState::Running, None);
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        shared.preview.publish(&crate::capture::CapturedFrame {
+            data: &[10, 20, 30, 255],
+            width: 1,
+            height: 1,
+            is_bgra: false,
+        });
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let frame: PreviewFrame = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(frame.rgb, [10, 20, 30]);
+        shared.set_sync_state(SyncState::UnsupportedSource, None);
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        shared.set_sync_state(SyncState::Running, None);
+        assert_eq!(
+            app.oneshot(request()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_render_is_bounded_rate_limited_and_does_not_apply_settings() {
+        use tower::ServiceExt;
+        let (sender, mut receiver) = mpsc::channel(2);
+        let shared = Arc::new(SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        ));
+        let app = build_router(AppState {
+            shared: shared.clone(),
+            config_path: PathBuf::new(),
+            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
+        })
+        .unwrap();
+        let mut adjusted = settings();
+        adjusted.brightness_multiplier = 0.5;
+        let mut payload = serde_json::json!({"frame":{"width":1,"height":1,"rgb":[200,0,0],"captured_unix_ms":1},"settings":adjusted});
+        let request = |body: String| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/preview/render")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+        let permit = shared
+            .preview_render_gate
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(request(payload.to_string()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        drop(permit);
+        let response = app
+            .clone()
+            .oneshot(request(payload.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let frame: PreviewFrame = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(frame.rgb, [100, 0, 0]);
+        assert_eq!(
+            shared
+                .current_settings
+                .read()
+                .unwrap()
+                .brightness_multiplier,
+            settings().brightness_multiplier
+        );
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            app.clone()
+                .oneshot(request(payload.to_string()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        *shared.preview_render_started.lock().unwrap() = None;
+        payload["frame"]["width"] = serde_json::json!(129);
+        assert_eq!(
+            app.clone()
+                .oneshot(request(payload.to_string()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        payload["settings"]["gamma"] = serde_json::json!(10);
+        assert_eq!(
+            app.clone()
+                .oneshot(request(payload.to_string()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            app.oneshot(request(" ".repeat(512 * 1024 + 1)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
     async fn disabled_bonjour_manager_and_http_shut_down_without_advertising() {
         let (sender, _receiver) = mpsc::channel(1);
         let shared = Arc::new(SharedState::new(
@@ -1162,7 +1610,7 @@ mod tests {
         let tasks = start_web_server(0, false, shared, PathBuf::new(), shutdown.clone())
             .await
             .unwrap();
-        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks.len(), 3);
         tasks.close();
         shutdown.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(1), tasks.wait())
@@ -1269,15 +1717,18 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(document["info"]["version"], env!("CARGO_PKG_VERSION"));
         let paths = document["paths"].as_object().unwrap();
-        assert_eq!(paths.len(), 16);
+        assert_eq!(paths.len(), 19);
         for (path, method) in [
             ("/api/status", "get"),
+            ("/api/preview/frame", "get"),
+            ("/api/preview/render", "post"),
             ("/api/bonjour", "post"),
             ("/api/start", "post"),
             ("/api/stop", "post"),
             ("/api/toggle", "post"),
             ("/api/settings", "post"),
             ("/api/presets/{name}", "post"),
+            ("/api/presets/{name}/reset", "post"),
             ("/api/nanoleaf/alignment", "post"),
             ("/api/hue/areas", "get"),
             ("/api/hue/area", "post"),
@@ -1326,6 +1777,7 @@ mod tests {
         assert!(schemas.get("Config").is_none());
         assert!(schemas.get("NanoleafConfig").is_none());
         assert_eq!(schemas["SyncState"]["enum"][0], "starting");
+        assert!(schemas.get("Diagnostics").is_some());
         let response = app
             .oneshot(
                 axum::http::Request::builder()
@@ -1341,6 +1793,8 @@ mod tests {
         let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(status.get("pipeline_state").is_some());
         assert!(status.get("sync").is_none());
+        assert_eq!(status["diagnostics"]["sampled_unix_ms"], 0);
+        assert_eq!(status["diagnostics"]["video"]["available"], false);
     }
 
     #[tokio::test]
@@ -1595,24 +2049,73 @@ mod tests {
 
     #[tokio::test]
     async fn preset_request_queues_live_settings() {
-        let (sender, mut receiver) = mpsc::channel(1);
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut initial = settings();
+        initial.hue_output_brightness = 0.7;
         let shared = Arc::new(SharedState::new(
-            settings(),
+            initial,
             String::new(),
             String::new(),
             String::new(),
             Vec::new(),
             sender,
         ));
-        let state = AppState {
-            shared: Arc::clone(&shared),
-            config_path: PathBuf::new(),
-            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
-        };
+        shared
+            .select_preset("lowStimulation".into(), false)
+            .await
+            .unwrap();
         assert!(
-            apply_preset(State(state), Path("lowStimulation".to_string()))
-                .await
-                .is_ok()
+            matches!(receiver.recv().await, Some(ControlCommand::ApplySettings(value)) if value.brightness_multiplier == 0.55)
+        );
+        let mut edited = shared.current_settings.read().unwrap().clone();
+        edited.brightness_multiplier = 0.65;
+        shared.apply_settings(edited.clone()).await.unwrap();
+        receiver.recv().await.unwrap();
+        shared
+            .select_preset("lowStimulation".into(), false)
+            .await
+            .unwrap();
+        assert!(
+            receiver.try_recv().is_err(),
+            "Selecting the active preset must preserve edits"
+        );
+        assert!(shared.preset_modified());
+        let (active, saved) = shared.preset_save_snapshot(&edited);
+        assert_eq!(active.as_deref(), Some("lowStimulation"));
+        assert_eq!(saved["lowStimulation"].brightness_multiplier, 0.65);
+        shared.mark_presets_saved(saved);
+        assert!(!shared.preset_modified());
+        shared.select_preset("neutral".into(), false).await.unwrap();
+        receiver.recv().await.unwrap();
+        shared
+            .select_preset("lowStimulation".into(), false)
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+        assert_eq!(
+            shared
+                .current_settings
+                .read()
+                .unwrap()
+                .brightness_multiplier,
+            0.65
+        );
+        shared
+            .select_preset("lowStimulation".into(), true)
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+        let reset = shared.current_settings.read().unwrap().clone();
+        assert_eq!(reset.brightness_multiplier, 0.55);
+        assert_eq!(reset.hue_output_brightness, 0.7);
+        assert!(shared.preset_modified());
+        let (_, saved) = shared.preset_save_snapshot(&reset);
+        assert!(!saved.contains_key("lowStimulation"));
+        drop(receiver);
+        assert!(shared.select_preset("neutral".into(), false).await.is_err());
+        assert_eq!(
+            shared.active_preset.read().unwrap().as_deref(),
+            Some("lowStimulation")
         );
         assert_eq!(
             shared
@@ -1622,10 +2125,44 @@ mod tests {
                 .brightness_multiplier,
             0.55
         );
-        assert!(matches!(
-            receiver.recv().await,
-            Some(ControlCommand::ApplySettings(value)) if value.brightness_multiplier == 0.55
+        shared.configure_presets(
+            Some("unknown".into()),
+            BTreeMap::from([("unknown".into(), PresetTuning::capture(&reset))]),
+        );
+        assert!(shared.active_preset.read().unwrap().is_none());
+        assert!(shared.saved_presets.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_save_preserves_saved_preset_baseline() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        let shared = Arc::new(SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
         ));
+        shared.select_preset("neutral".into(), false).await.unwrap();
+        receiver.recv().await.unwrap();
+        let mut edited = shared.current_settings.read().unwrap().clone();
+        edited.gamma = 1.5;
+        shared.apply_settings(edited).await.unwrap();
+        receiver.recv().await.unwrap();
+        let state = AppState {
+            shared: shared.clone(),
+            config_path: PathBuf::new(),
+            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
+        };
+        let save = tokio::spawn(save_config(State(state)));
+        let Some(ControlCommand::SaveConfig(ack)) = receiver.recv().await else {
+            panic!("expected save command")
+        };
+        ack.send(Err("disk unavailable".into())).unwrap();
+        assert!(save.await.unwrap().is_err());
+        assert!(shared.saved_presets.read().unwrap().is_empty());
+        assert!(shared.preset_modified());
     }
 
     #[tokio::test]

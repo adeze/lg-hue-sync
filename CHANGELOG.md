@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-29
+
+### Added
+- Add demand-driven HDMI frame capture and optional live thumbnails to Advanced tuning, using the existing capture pipeline with bounded 128×72 previews at up to one frame per second.
+- Preview static colour adjustments using the daemon's shared colour processing, with optional Hue device regions and Nanoleaf perimeter overlays. Explain unsupported spatial, temporal and physical-light effects in a preview information popup.
+- Save custom tuning per ambient style, retain the selected style, and restore factory defaults with Reset. Preserve legacy settings and keep pairing, device placement and output trims separate from preset overrides.
+- Add cached, read-only input/output diagnostics for HDMI, display output and internal-player information where the TV exposes it. Distinguish source properties from display output; unavailable fields remain unavailable.
+
+### Changed
+- Organize the dashboard into Tuning, Devices and Diagnostics tabs, with compact screen-sync and follow-TV-power controls.
+- Combine the adjusted colour preview and light layout, place ambient styles above it, and use horizontally scrolling vertical response faders with larger focus targets.
+- Place Save/Reset in Advanced tuning, remove preview pinning, and show contextual fader explanations without repetitive live-preview status announcements.
+
+### Validation
+- All 118 Rust tests, dashboard preview/preset checks, formatting, warnings-denied Clippy and embedded JavaScript syntax checks passed for 1.0.0. Launcher packaging and native-build safety tests passed. Native ARMv7 builds passed ELF/ABI, loader and glibc <= 2.28 checks.
+- The feature build passed on-TV binary hash, service/dashboard health and HDMI frame capture checks, with paired configuration preserved and a verified rollback binary. Built-in Netflix and HDMI observations distinguished internal-player properties from display output.
+- Published assets are built independently by Docker CI. The release binary is not the previously deployed feature binary; physical colour accuracy, touchscreen interaction and CPU impact were not measured. MAT/Atmos decoding and audio capture are not provided. Launcher-only IPKs and manifests remain unpublished.
+
 ## [0.9.1] - 2026-10-28
 
 ### Fixed

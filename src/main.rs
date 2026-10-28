@@ -683,6 +683,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         config.zones.clone(),
         command_tx,
     ));
+    shared_state.configure_presets(
+        config.active_preset.clone(),
+        config.preset_overrides.clone(),
+    );
     shared_state.set_requested_running(startup_requested);
     if !pipeline_should_run {
         shared_state.set_sync_state(SyncState::Paused, None);
@@ -1157,7 +1161,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         // 3. Check for save config request from Web UI
         if !pending_commands.save_config.is_empty() {
             let live_st = shared_state.current_settings.read().unwrap().clone();
+            let (active_preset, preset_overrides) = shared_state.preset_save_snapshot(&live_st);
             let result = Config::update(&config_path, Some(config.clone()), |save_cfg| {
+                save_cfg.active_preset = active_preset.clone();
+                save_cfg.preset_overrides = preset_overrides.clone();
                 save_cfg.brightness_multiplier = live_st.brightness_multiplier;
                 save_cfg.hue_output_brightness = live_st.hue_output_brightness;
                 save_cfg.nanoleaf_output_brightness = live_st.nanoleaf_output_brightness;
@@ -1182,6 +1189,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             .map(|_| ())
             .map_err(|error| error.to_string());
             if result.is_ok() {
+                shared_state.mark_presets_saved(preset_overrides);
                 info!("[+] Successfully saved live settings to {:?}", config_path);
             } else if let Err(ref error) = result {
                 error!(
@@ -1446,6 +1454,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         match capture.acquire_frame() {
             Ok(frame) => {
                 if hardware_frame {
+                    shared_state.preview.publish(&frame);
                     capture_recovery.frame_received(std::time::Instant::now());
                     shared_state.set_sync_state(SyncState::Running, None);
                 }

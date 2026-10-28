@@ -308,6 +308,23 @@ impl ColorProcessor {
         self.max_color_step = step.max(1);
     }
 
+    /// Shared per-colour adjustment; sampling and temporal response remain separate.
+    pub fn transform_color(&self, mut target: FloatColor) -> FloatColor {
+        if self.noise_gate_threshold > 0.0 {
+            target = target.apply_noise_gate(self.noise_gate_threshold);
+        }
+        if self.saturation_boost > 1.0 {
+            target = target.boost_saturation(self.saturation_boost);
+        }
+        if (self.gamma - 1.0).abs() >= 0.01 {
+            target = target.apply_gamma(self.gamma);
+        }
+        if self.hdr_tone_mapping {
+            target = target.tone_map_hdr();
+        }
+        target
+    }
+
     pub fn process(
         &self,
         mean: FloatColor,
@@ -324,18 +341,7 @@ impl ColorProcessor {
         } else {
             mean
         };
-        if self.noise_gate_threshold > 0.0 {
-            target = target.apply_noise_gate(self.noise_gate_threshold);
-        }
-        if self.saturation_boost > 1.0 {
-            target = target.boost_saturation(self.saturation_boost);
-        }
-        if (self.gamma - 1.0).abs() >= 0.01 {
-            target = target.apply_gamma(self.gamma);
-        }
-        if self.hdr_tone_mapping {
-            target = target.tone_map_hdr();
-        }
+        target = self.transform_color(target);
         if self.strict_blackout && target == FloatColor::default() {
             return target;
         }

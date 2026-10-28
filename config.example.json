@@ -1,4 +1,5 @@
 {
+  "bonjour_enabled": false,
   "bridge_ip": "192.168.1.100",
   "username": "example-user-token",
   "clientkey": "0123456789abcdef0123456789abcdef",

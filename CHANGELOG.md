@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-28
+
+### Added
+- Generate and serve `/openapi.json` with `utoipa` and `utoipa-axum`, covering all 16 API routes, request/response types, validation bounds and error responses. Cache the description at server startup.
+- Add opt-in Bonjour HTTP advertising with dashboard and OpenAPI links. Discovery defaults to off for new and existing configurations; disabling it shuts down its mDNS thread and sockets.
+- Add a dashboard Bonjour toggle and `POST /api/bonjour` to persist and apply discovery changes without restarting capture or lighting. Report the saved preference through `/api/status`; failed saves leave discovery unchanged.
+
+### Changed
+- Group Bonjour discovery and Restart Pipeline in a collapsed Maintenance panel at the bottom of the dashboard. Move Save to Disk to an accessible header glyph beside the theme control.
+- Register API routes and OpenAPI metadata together while preserving existing URLs and request formats. Document plain-text JSON extraction errors alongside application JSON errors.
+
+### Validation
+- All 104 Rust tests, formatting, warnings-denied Clippy, dashboard syntax and release metadata checks passed. Native ARMv7 builds passed ELF32, little-endian ARM EABI5 soft-float, loader and glibc <= 2.28 checks.
+- Before the version bump, feature builds passed on-TV binary hash, service, dashboard and OpenAPI checks. Bonjour enable/disable persisted correctly, started/stopped its mDNS thread without changing the daemon PID, and restored the original configuration byte-for-byte; discovery was left off.
+- Published daemon assets are built independently by Docker CI. Third-party client discovery, multicast visibility, resource impact and physical lighting output were not validated for this release. Launcher-only IPKs and manifests remain unpublished.
+
 ## [0.8.0] - 2026-10-22
 
 ### Added

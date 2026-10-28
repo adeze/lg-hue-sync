@@ -28,7 +28,7 @@ pub struct EntertainmentArea {
     pub bridge_id: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct EntertainmentAreaSummary {
     pub id: String,
     pub name: String,

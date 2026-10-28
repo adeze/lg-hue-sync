@@ -7,10 +7,13 @@ use std::time::{Duration, Instant};
 
 pub(crate) const REFERENCE_FRAME: Duration = Duration::from_nanos(33_333_333);
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RgbColor {
+    #[schema(minimum = 0, maximum = 255)]
     pub r: u8,
+    #[schema(minimum = 0, maximum = 255)]
     pub g: u8,
+    #[schema(minimum = 0, maximum = 255)]
     pub b: u8,
 }
 

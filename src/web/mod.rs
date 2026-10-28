@@ -1,3 +1,4 @@
+mod bonjour;
 pub mod server;
 
 pub use server::{

@@ -703,6 +703,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let web_shutdown = CancellationToken::new();
     let web_tasks = match start_web_server(
         8088,
+        config.bonjour_enabled,
         shared_state.clone(),
         config_path.clone(),
         web_shutdown.clone(),

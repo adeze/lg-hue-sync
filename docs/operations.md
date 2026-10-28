@@ -300,6 +300,24 @@ On the same trusted LAN, create an Apple Shortcut with a **URL** action set to `
 
 Preset changes affect live settings only. Use the dashboard's **Save Settings** control, or `POST /api/save-config`, to keep the chosen settings after restart. Presets preserve Hue/Nanoleaf output trims, device enablement, alignment, and other non-preset controls. Port 8088 has no authentication; keep it on the trusted LAN and do not forward it to the Internet. No Shortcut or API call is needed to edit the TV's `config.json` directly.
 
+## HTTP API description
+
+`GET /openapi.json` returns the OpenAPI description generated from the registered API handlers and Rust request/response types using `utoipa` and `utoipa-axum`. It includes validation bounds, named preset/pattern constraints and response status codes. The document is generated once at startup and served from memory on the dashboard's existing port; no separate documentation server is needed.
+
+```bash
+curl --fail http://<tv-ip>:8088/openapi.json -o openapi.json
+```
+
+The HTTP API remains unauthenticated and LAN-only. JSON extraction failures can return plain text; application errors return `{"error":"..."}`. Start/stop/restart and bridge refresh acknowledge queued work; use `GET /api/status` to observe pipeline state. Pairing, area selection and alignment can persist changes before a subsequent controller error. OpenAPI describes the interface; it does not automatically create HomeKit/Matter accessories.
+
+## Bonjour discovery (off by default)
+
+Use **Maintenance → Bonjour discovery** at the bottom of the dashboard to turn advertising on or off without restarting. Changes save automatically. `POST /api/bonjour` accepts `{"enabled":true}` or `{"enabled":false}`; `GET /api/status` reports the saved preference as `bonjour_enabled`. A failed config save leaves discovery unchanged. The header’s save glyph still saves color/output settings separately. The persisted configuration option is `"bonjour_enabled"`; omitted or false leaves advertising off and creates no mDNS thread or sockets. A lightweight async supervisor waits for changes while disabled. This option does not change dashboard/API availability or Hue's separate on-demand discovery.
+
+When enabled, the daemon registers `LG Hue Sync._http._tcp.local.` only after HTTP binding succeeds, on the actual HTTP port. TXT records contain `path=/`, `openapi=/openapi.json`, `app=lg-hue-sync` and the application `version`. `openapi` is an application-defined TXT key; clients must explicitly use it. No credentials or paired-device details are advertised. The advertised host starts as `lg-hue-sync.local.`; `mdns-sd` resolves name conflicts, so clients should discover the service rather than assume that hostname. Only IPv4 is advertised to match the HTTP listener.
+
+Advertising failure does not stop HTTP or sync. Graceful shutdown unregisters the service and shuts down its daemon with bounded waits. Advertising uses a persistent `mdns-sd` thread and multicast sockets; TV resource use and coexistence with its system responders require live validation before enabling. Ordinary browsers do not automatically list Bonjour dashboards.
+
 ## Verification
 
 ```bash

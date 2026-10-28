@@ -46,7 +46,7 @@ pub enum ConfigError {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LightZone {
     pub channel_id: u8,
     pub name: String,
@@ -124,17 +124,18 @@ pub struct NanoleafConfig {
     pub alignment: NanoleafAlignment,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NanoleafAlignment {
     #[serde(default)]
     pub start_corner: NanoleafStartCorner,
     #[serde(default)]
     pub reverse_direction: bool,
     #[serde(default)]
+    #[schema(minimum = 0, maximum = 39)]
     pub perimeter_offset: u8,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum NanoleafStartCorner {
     #[default]
@@ -155,6 +156,9 @@ fn default_nanoleaf_segments() -> u16 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Advertise the dashboard and OpenAPI URL over Bonjour.
+    #[serde(default)]
+    pub bonjour_enabled: bool,
     /// Automatically pause/resume outputs with the TV's active/standby state.
     #[serde(default = "default_true")]
     pub auto_tv_power: bool,
@@ -378,6 +382,7 @@ impl Config {
 
     pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
         Self {
+            bonjour_enabled: false,
             auto_tv_power: true,
             hue_enabled: true,
             hue_sync_enabled: true,
@@ -566,6 +571,25 @@ mod tests {
         assert!(config.hue_enabled && config.hue_sync_enabled);
         assert!(config.entertainment_configuration_id.is_none());
         assert!(config.entertainment_area_id.is_empty() && config.zones.is_empty());
+    }
+
+    #[test]
+    fn bonjour_is_opt_in_for_new_and_existing_configs() {
+        let config = Config::new_default("", "", "", "");
+        assert!(!config.bonjour_enabled);
+        let mut value = serde_json::to_value(config).unwrap();
+        value.as_object_mut().unwrap().remove("bonjour_enabled");
+        assert!(
+            !serde_json::from_value::<Config>(value.clone())
+                .unwrap()
+                .bonjour_enabled
+        );
+        value["bonjour_enabled"] = true.into();
+        assert!(
+            serde_json::from_value::<Config>(value)
+                .unwrap()
+                .bonjour_enabled
+        );
     }
 
     #[test]

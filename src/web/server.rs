@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -16,9 +16,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info};
+use utoipa::ToSchema;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 pub const EMBEDDED_UI_HTML: &str = include_str!("ui.html");
 const CAPTURE_PATTERNS_HTML: &str = include_str!("../../calibration-patterns/capture.html");
@@ -34,27 +36,39 @@ pub enum ControlCommand {
     ApplySettings(LiveSettings),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct LiveSettings {
+    #[schema(minimum = 0.5, maximum = 2.5)]
     pub brightness_multiplier: f32,
     #[serde(default = "default_output_trim")]
+    #[schema(minimum = 0.25, maximum = 2, default = 1.0)]
     pub hue_output_brightness: f32,
     #[serde(default = "default_output_trim")]
+    #[schema(minimum = 0.25, maximum = 2, default = 1.0)]
     pub nanoleaf_output_brightness: f32,
+    #[schema(minimum = 1, maximum = 2.5)]
     pub saturation_boost: f32,
+    #[schema(minimum = 0, maximum = 0.8)]
     pub peak_weight: f32,
     /// Nearby-zone gradient blending, 0 (off) to 0.5.
     #[serde(default)]
+    #[schema(minimum = 0, maximum = 0.5, default = 0.0)]
     pub spatial_blend: f32,
+    #[schema(minimum = 0.8, maximum = 2)]
     pub gamma: f32,
+    #[schema(minimum = 0, maximum = 0.06)]
     pub noise_gate_threshold: f32,
     #[serde(default = "default_smoothing_factor")]
+    #[schema(minimum = 0.05, maximum = 0.8, default = 0.35)]
     pub smoothing_factor: f32,
     #[serde(default = "default_smoothing_factor")]
+    #[schema(minimum = 0.05, maximum = 0.8, default = 0.35)]
     pub rise_smoothing_factor: f32,
     #[serde(default = "default_smoothing_factor")]
+    #[schema(minimum = 0.05, maximum = 0.8, default = 0.35)]
     pub fall_smoothing_factor: f32,
     #[serde(default)]
+    #[schema(default = false)]
     pub strict_blackout: bool,
     pub use_xy_gamut: bool,
     pub letterbox_detection: bool,
@@ -62,9 +76,11 @@ pub struct LiveSettings {
     pub hue_sync_enabled: bool,
     pub nanoleaf_sync_enabled: bool,
     #[serde(default = "default_true")]
+    #[schema(default = true)]
     pub auto_tv_power: bool,
     #[serde(default)]
     pub nanoleaf_alignment: NanoleafAlignment,
+    #[schema(minimum = 4, maximum = 64)]
     pub max_color_step: u8,
 }
 
@@ -246,7 +262,7 @@ impl CalibrationPattern {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncState {
     Starting,
@@ -258,7 +274,7 @@ pub enum SyncState {
     UnsupportedSource,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 struct SyncStatus {
     requested_running: bool,
     pipeline_state: SyncState,
@@ -411,15 +427,19 @@ impl SharedState {
 
 #[derive(Clone)]
 struct AppState {
+    bonjour: Arc<Mutex<watch::Sender<bool>>>,
     shared: Arc<SharedState>,
     config_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 struct StatusResponse {
+    /// Saved discovery preference; multicast visibility depends on the network.
+    bonjour_enabled: bool,
     is_syncing: bool,
     #[serde(flatten)]
     sync: SyncStatus,
+    #[schema(pattern = "^(active|standby|unknown)$")]
     tv_power_state: &'static str,
     fps: f32,
     light_update_fps: f32,
@@ -436,25 +456,36 @@ struct StatusResponse {
     calibration_pattern: Option<&'static str>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct StatusMessage {
     status: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct HueAreasResponse {
     selected_area_id: String,
     areas: Vec<hue::EntertainmentAreaSummary>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct PairRequest {
+    /// Device IP; omitted or blank enables Hue discovery. Required for Nanoleaf.
     ip: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct SelectHueAreaRequest {
     area_id: String,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+struct BonjourSettings {
+    enabled: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ErrorResponse {
+    error: String,
 }
 
 #[derive(Debug, Error)]
@@ -471,42 +502,37 @@ impl IntoResponse for ApiError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::SetupFailed(_) => StatusCode::BAD_GATEWAY,
         };
-        (status, Json(serde_json::json!({"error": self.to_string()}))).into_response()
+        (
+            status,
+            Json(ErrorResponse {
+                error: self.to_string(),
+            }),
+        )
+            .into_response()
     }
 }
 
 pub async fn start_web_server(
     port: u16,
+    bonjour_enabled: bool,
     shared: Arc<SharedState>,
     config_path: PathBuf,
     shutdown: CancellationToken,
 ) -> anyhow::Result<TaskTracker> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
+    let (bonjour_tx, bonjour_rx) = watch::channel(bonjour_enabled);
     let app_state = AppState {
         shared,
         config_path,
+        bonjour: Arc::new(Mutex::new(bonjour_tx)),
     };
-    let app = Router::new()
-        .route("/", get(root))
-        .route("/index.html", get(root))
-        .route("/capture-patterns", get(capture_patterns))
-        .route("/api/status", get(status))
-        .route("/api/start", post(start))
-        .route("/api/stop", post(stop))
-        .route("/api/toggle", post(toggle))
-        .route("/api/settings", post(settings))
-        .route("/api/presets/{name}", post(apply_preset))
-        .route("/api/nanoleaf/alignment", post(update_nanoleaf_alignment))
-        .route("/api/hue/areas", get(hue_areas))
-        .route("/api/hue/area", post(select_hue_area))
-        .route("/api/save-config", post(save_config))
-        .route("/api/restart", post(restart))
-        .route("/api/sync-bridge", post(sync_bridge))
-        .route("/api/pair/hue", post(pair_hue))
-        .route("/api/pair/nanoleaf", post(pair_nanoleaf))
-        .route("/api/test-pattern/{pattern}", post(test_pattern))
-        .with_state(app_state);
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
+    let app = build_router(app_state)?;
     let tracker = TaskTracker::new();
+    tracker.spawn(super::bonjour::manage(
+        listener.local_addr()?.port(),
+        bonjour_rx,
+        shutdown.clone(),
+    ));
     tracker.spawn(async move {
         if let Err(error) = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown.cancelled_owned())
@@ -519,6 +545,45 @@ pub async fn start_web_server(
     Ok(tracker)
 }
 
+fn build_router(state: AppState) -> anyhow::Result<Router> {
+    let (router, mut document) = OpenApiRouter::<AppState>::new()
+        .routes(routes!(status))
+        .routes(routes!(set_bonjour))
+        .routes(routes!(start))
+        .routes(routes!(stop))
+        .routes(routes!(toggle))
+        .routes(routes!(settings))
+        .routes(routes!(apply_preset))
+        .routes(routes!(update_nanoleaf_alignment))
+        .routes(routes!(hue_areas))
+        .routes(routes!(select_hue_area))
+        .routes(routes!(save_config))
+        .routes(routes!(restart))
+        .routes(routes!(sync_bridge))
+        .routes(routes!(pair_hue))
+        .routes(routes!(pair_nanoleaf))
+        .routes(routes!(test_pattern))
+        .split_for_parts();
+    document.info.title = "LG Hue Sync HTTP API".to_string();
+    document.info.version = env!("CARGO_PKG_VERSION").to_string();
+    document.info.description = Some("LAN API without authentication. Control acknowledgements do not prove physical light output. JSON extractors can return plain-text errors (400 malformed JSON, 413 oversized body, 415 missing JSON content type, 422 invalid fields). Pairing and area selection persist configuration before requesting controller reconfiguration; a later controller failure does not roll back that save.".to_string());
+    let specification = axum::body::Bytes::from(document.to_json()?);
+    Ok(router
+        .route("/", get(root))
+        .route("/index.html", get(root))
+        .route("/capture-patterns", get(capture_patterns))
+        .route(
+            "/openapi.json",
+            get(move || {
+                std::future::ready((
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    specification.clone(),
+                ))
+            }),
+        )
+        .with_state(state))
+}
+
 async fn root() -> Html<&'static str> {
     Html(EMBEDDED_UI_HTML)
 }
@@ -527,10 +592,19 @@ async fn capture_patterns() -> Html<&'static str> {
     Html(CAPTURE_PATTERNS_HTML)
 }
 
+/// Read pipeline state, settings and sampled colors.
+#[utoipa::path(
+    get, path = "/api/status", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "Success", body = StatusResponse)
+    )
+)]
 async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let shared = &state.shared;
     let sync = shared.sync_status.read().unwrap().clone();
+    let bonjour_enabled = *state.bonjour.lock().await.borrow();
     Json(StatusResponse {
+        bonjour_enabled,
         is_syncing: sync.pipeline_state == SyncState::Running,
         sync,
         tv_power_state: match shared.tv_power_state.load(Ordering::Relaxed) {
@@ -558,16 +632,81 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     })
 }
 
+/// Save and apply the Bonjour discovery preference without restarting the daemon.
+#[utoipa::path(
+    post, path = "/api/bonjour", tag = "LG Hue Sync",
+    request_body = BonjourSettings,
+    responses(
+        (status = 200, description = "Discovery preference saved and applied", body = BonjourSettings),
+        (status = 400, description = "Malformed JSON", body = String, content_type = "text/plain"),
+        (status = 413, description = "Request body too large", body = String, content_type = "text/plain"),
+        (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
+        (status = 422, description = "Invalid JSON fields", body = String, content_type = "text/plain"),
+        (status = 502, description = "Configuration save or discovery control failed", body = ErrorResponse)
+    )
+)]
+async fn set_bonjour(
+    State(state): State<AppState>,
+    Json(request): Json<BonjourSettings>,
+) -> Result<Json<BonjourSettings>, ApiError> {
+    // Serialize persistence and notification so concurrent requests cannot leave them out of order.
+    let sender = state.bonjour.lock().await;
+    if sender.is_closed() {
+        return Err(ApiError::SetupFailed(
+            "discovery controller is unavailable".to_string(),
+        ));
+    }
+    let config_path = state.config_path.clone();
+    let enabled = request.enabled;
+    tokio::task::spawn_blocking(move || {
+        Config::update(&config_path, None, |config| {
+            config.bonjour_enabled = enabled;
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|error| ApiError::SetupFailed(format!("Discovery save task failed: {error}")))?
+    .map_err(|error| ApiError::SetupFailed(error.to_string()))?;
+    sender.send(enabled).map_err(|_| {
+        ApiError::SetupFailed("discovery controller stopped after saving".to_string())
+    })?;
+    Ok(Json(request))
+}
+
+/// Queue capture and output start.
+#[utoipa::path(
+    post, path = "/api/start", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn start(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
     state.shared.send_command(ControlCommand::Start).await?;
     Ok(Json(StatusMessage { status: "starting" }))
 }
 
+/// Queue capture and output stop.
+#[utoipa::path(
+    post, path = "/api/stop", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn stop(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
     state.shared.send_command(ControlCommand::Stop).await?;
     Ok(Json(StatusMessage { status: "stopping" }))
 }
 
+/// Queue start or stop according to actual pipeline state.
+#[utoipa::path(
+    post, path = "/api/toggle", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn toggle(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
     let should_stop = state
         .shared
@@ -582,6 +721,19 @@ async fn toggle(State(state): State<AppState>) -> Result<Json<StatusMessage>, Ap
     }
 }
 
+/// Apply live settings without saving configuration.
+#[utoipa::path(
+    post, path = "/api/settings", tag = "LG Hue Sync",
+    request_body = LiveSettings,
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
+        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
+        (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn settings(
     State(state): State<AppState>,
     Json(settings): Json<LiveSettings>,
@@ -591,6 +743,16 @@ async fn settings(
     Ok(Json(StatusMessage { status: "ok" }))
 }
 
+/// Apply a named color preset without saving configuration.
+#[utoipa::path(
+    post, path = "/api/presets/{name}", tag = "LG Hue Sync",
+    params(("name" = String, Path, pattern = "^(neutral|highChroma|neonContrast|darkSceneDetail|fastResponse|lowStimulation)$")),
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn apply_preset(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -603,6 +765,19 @@ async fn apply_preset(
     Ok(Json(StatusMessage { status: "ok" }))
 }
 
+/// Save Nanoleaf alignment, then apply live settings.
+#[utoipa::path(
+    post, path = "/api/nanoleaf/alignment", tag = "LG Hue Sync",
+    request_body = NanoleafAlignment,
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
+        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
+        (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn update_nanoleaf_alignment(
     State(state): State<AppState>,
     Json(alignment): Json<NanoleafAlignment>,
@@ -634,6 +809,14 @@ async fn update_nanoleaf_alignment(
     Ok(Json(StatusMessage { status: "saved" }))
 }
 
+/// Save current configuration; wait up to five seconds for acknowledgement.
+#[utoipa::path(
+    post, path = "/api/save-config", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn save_config(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
     let (ack_tx, ack_rx) = oneshot::channel();
     state
@@ -650,6 +833,14 @@ async fn save_config(State(state): State<AppState>) -> Result<Json<StatusMessage
     Ok(Json(StatusMessage { status: "saved" }))
 }
 
+/// Queue pipeline restart.
+#[utoipa::path(
+    post, path = "/api/restart", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn restart(State(state): State<AppState>) -> Result<Json<StatusMessage>, ApiError> {
     state.shared.send_command(ControlCommand::Restart).await?;
     Ok(Json(StatusMessage {
@@ -657,6 +848,14 @@ async fn restart(State(state): State<AppState>) -> Result<Json<StatusMessage>, A
     }))
 }
 
+/// Queue Hue Bridge layout refresh; completion is asynchronous.
+#[utoipa::path(
+    post, path = "/api/sync-bridge", tag = "LG Hue Sync",
+    responses(
+        (status = 202, description = "Success", body = StatusMessage),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn sync_bridge(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<StatusMessage>), ApiError> {
@@ -670,6 +869,14 @@ async fn sync_bridge(
     ))
 }
 
+/// List Entertainment Areas from the paired Hue Bridge.
+#[utoipa::path(
+    get, path = "/api/hue/areas", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "Success", body = HueAreasResponse),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn hue_areas(State(state): State<AppState>) -> Result<Json<HueAreasResponse>, ApiError> {
     let config_path = state.config_path.clone();
     let response = tokio::task::spawn_blocking(move || {
@@ -692,6 +899,19 @@ async fn hue_areas(State(state): State<AppState>) -> Result<Json<HueAreasRespons
     response.map(Json).map_err(ApiError::SetupFailed)
 }
 
+/// Save a Hue Entertainment Area and queue reconfiguration.
+#[utoipa::path(
+    post, path = "/api/hue/area", tag = "LG Hue Sync",
+    request_body = SelectHueAreaRequest,
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
+        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
+        (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn select_hue_area(
     State(state): State<AppState>,
     Json(request): Json<SelectHueAreaRequest>,
@@ -743,6 +963,15 @@ async fn select_hue_area(
     Ok(Json(StatusMessage { status: "selected" }))
 }
 
+/// Select a live calibration pattern, or off for normal capture.
+#[utoipa::path(
+    post, path = "/api/test-pattern/{pattern}", tag = "LG Hue Sync",
+    params(("pattern" = String, Path, pattern = "^(red|green|blue|white|warm-white|daylight-white|quadrants|perimeter|off)$")),
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain")))
+    )
+)]
 async fn test_pattern(
     State(state): State<AppState>,
     Path(pattern): Path<String>,
@@ -753,6 +982,19 @@ async fn test_pattern(
     Ok(Json(StatusMessage { status: "ok" }))
 }
 
+/// Pair Hue (45-second pairing window), save credentials and queue reconfiguration.
+#[utoipa::path(
+    post, path = "/api/pair/hue", tag = "LG Hue Sync",
+    request_body = PairRequest,
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
+        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
+        (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn pair_hue(
     State(state): State<AppState>,
     Json(request): Json<PairRequest>,
@@ -788,6 +1030,19 @@ async fn pair_hue(
     Ok(Json(StatusMessage { status: "paired" }))
 }
 
+/// Pair Nanoleaf (45-second pairing window), save credentials and queue reconfiguration.
+#[utoipa::path(
+    post, path = "/api/pair/nanoleaf", tag = "LG Hue Sync",
+    request_body = PairRequest,
+    responses(
+        (status = 200, description = "Success", body = StatusMessage),
+        (status = 400, description = "Invalid request", content((ErrorResponse = "application/json"), (String = "text/plain"))),
+        (status = 413, description = "Request body exceeds the default 2 MiB limit", body = String, content_type = "text/plain"),
+        (status = 415, description = "JSON content type required", body = String, content_type = "text/plain"),
+        (status = 422, description = "Invalid JSON fields or types", body = String, content_type = "text/plain"),
+        (status = 502, description = "Controller, device or configuration operation failed", body = ErrorResponse)
+    )
+)]
 async fn pair_nanoleaf(
     State(state): State<AppState>,
     Json(request): Json<PairRequest>,
@@ -871,6 +1126,316 @@ mod tests {
         }
     }
 
+    fn test_router() -> (Router, mpsc::Receiver<ControlCommand>) {
+        let (sender, receiver) = mpsc::channel(8);
+        let shared = Arc::new(SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        ));
+        (
+            build_router(AppState {
+                shared,
+                config_path: PathBuf::new(),
+                bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
+            })
+            .unwrap(),
+            receiver,
+        )
+    }
+
+    #[tokio::test]
+    async fn disabled_bonjour_manager_and_http_shut_down_without_advertising() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let shared = Arc::new(SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        ));
+        let shutdown = CancellationToken::new();
+        let tasks = start_web_server(0, false, shared, PathBuf::new(), shutdown.clone())
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 2);
+        tasks.close();
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), tasks.wait())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bonjour_toggle_persists_and_notifies_without_changing_pairing() {
+        let directory =
+            std::env::temp_dir().join(format!("lg-hue-sync-bonjour-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.json");
+        Config::update(
+            &path,
+            Some(Config::new_default("", "preserve-pairing", "", "")),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let (sender, _commands) = mpsc::channel(1);
+        let (bonjour, mut changes) = watch::channel(false);
+        let state = AppState {
+            shared: Arc::new(SharedState::new(
+                settings(),
+                String::new(),
+                String::new(),
+                String::new(),
+                Vec::new(),
+                sender,
+            )),
+            config_path: path.clone(),
+            bonjour: Arc::new(Mutex::new(bonjour)),
+        };
+        for enabled in [true, false] {
+            let response = set_bonjour(State(state.clone()), Json(BonjourSettings { enabled }))
+                .await
+                .unwrap();
+            assert_eq!(response.0.enabled, enabled);
+            changes.changed().await.unwrap();
+            assert_eq!(*changes.borrow_and_update(), enabled);
+            let saved = Config::load(&path).unwrap();
+            assert_eq!(saved.bonjour_enabled, enabled);
+            assert_eq!(saved.username, "preserve-pairing");
+            assert_eq!(
+                status(State(state.clone())).await.0.bonjour_enabled,
+                enabled
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(directory.join("config.json.lock")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_bonjour_save_does_not_change_discovery() {
+        let (sender, _commands) = mpsc::channel(1);
+        let (bonjour, mut changes) = watch::channel(false);
+        let state = AppState {
+            shared: Arc::new(SharedState::new(
+                settings(),
+                String::new(),
+                String::new(),
+                String::new(),
+                Vec::new(),
+                sender,
+            )),
+            config_path: std::env::temp_dir()
+                .join(format!("lg-hue-sync-missing-{}", std::process::id()))
+                .join("config.json"),
+            bonjour: Arc::new(Mutex::new(bonjour)),
+        };
+        let result = set_bonjour(
+            State(state.clone()),
+            Json(BonjourSettings { enabled: true }),
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::SetupFailed(_))));
+        assert!(!*changes.borrow_and_update());
+        assert!(!changes.has_changed().unwrap());
+        drop(changes);
+        let result = set_bonjour(State(state), Json(BonjourSettings { enabled: true })).await;
+        assert!(matches!(result, Err(ApiError::SetupFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn openapi_describes_registered_routes_and_wire_schemas() {
+        use tower::ServiceExt;
+        let (app, _receiver) = test_router();
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/openapi.json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(document["info"]["version"], env!("CARGO_PKG_VERSION"));
+        let paths = document["paths"].as_object().unwrap();
+        assert_eq!(paths.len(), 16);
+        for (path, method) in [
+            ("/api/status", "get"),
+            ("/api/bonjour", "post"),
+            ("/api/start", "post"),
+            ("/api/stop", "post"),
+            ("/api/toggle", "post"),
+            ("/api/settings", "post"),
+            ("/api/presets/{name}", "post"),
+            ("/api/nanoleaf/alignment", "post"),
+            ("/api/hue/areas", "get"),
+            ("/api/hue/area", "post"),
+            ("/api/save-config", "post"),
+            ("/api/restart", "post"),
+            ("/api/sync-bridge", "post"),
+            ("/api/pair/hue", "post"),
+            ("/api/pair/nanoleaf", "post"),
+            ("/api/test-pattern/{pattern}", "post"),
+        ] {
+            assert!(paths[path].get(method).is_some(), "{method} {path}");
+        }
+        assert!(paths["/api/sync-bridge"]["post"]["responses"]
+            .get("202")
+            .is_some());
+        let schemas = &document["components"]["schemas"];
+        let live = &schemas["LiveSettings"];
+        assert_eq!(live["properties"]["gamma"]["minimum"], 0.8);
+        assert_eq!(live["properties"]["gamma"]["maximum"], 2.0);
+        assert!(live["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("gamma")));
+        assert!(!live["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("auto_tv_power")));
+        assert_eq!(
+            schemas["NanoleafAlignment"]["properties"]["perimeter_offset"]["maximum"],
+            39
+        );
+        assert_eq!(live["properties"]["auto_tv_power"]["default"], true);
+        let status_parts = schemas["StatusResponse"]["allOf"].as_array().unwrap();
+        assert!(status_parts
+            .iter()
+            .any(|part| part["$ref"] == "#/components/schemas/SyncStatus"));
+        let properties = status_parts
+            .iter()
+            .find_map(|part| part.get("properties"))
+            .unwrap();
+        let hue_pair = &properties["hue_colors"]["items"];
+        assert_eq!(hue_pair["type"], "array");
+        assert_eq!(hue_pair["prefixItems"][0]["type"], "integer");
+        assert_eq!(hue_pair["prefixItems"][1]["type"], "object");
+        assert_eq!(hue_pair["items"], false);
+        assert!(schemas.get("Config").is_none());
+        assert!(schemas.get("NanoleafConfig").is_none());
+        assert_eq!(schemas["SyncState"]["enum"][0], "starting");
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(status.get("pipeline_state").is_some());
+        assert!(status.get("sync").is_none());
+    }
+
+    #[tokio::test]
+    async fn documented_router_preserves_requests_and_errors() {
+        use tower::ServiceExt;
+        let (app, mut receiver) = test_router();
+        for (method, path, body, expected, content_type) in [
+            (
+                "GET",
+                "/api/start",
+                "",
+                StatusCode::METHOD_NOT_ALLOWED,
+                None,
+            ),
+            (
+                "POST",
+                "/api/settings",
+                "{",
+                StatusCode::BAD_REQUEST,
+                Some("text/plain"),
+            ),
+            (
+                "POST",
+                "/api/settings",
+                "{}",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Some("text/plain"),
+            ),
+            (
+                "POST",
+                "/api/presets/unknown",
+                "",
+                StatusCode::BAD_REQUEST,
+                Some("application/json"),
+            ),
+            (
+                "POST",
+                "/api/test-pattern/unknown",
+                "",
+                StatusCode::BAD_REQUEST,
+                Some("application/json"),
+            ),
+            (
+                "POST",
+                "/api/sync-bridge",
+                "",
+                StatusCode::ACCEPTED,
+                Some("application/json"),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{method} {path}");
+            if let Some(content_type) = content_type {
+                assert!(response.headers()["content-type"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with(content_type));
+            }
+        }
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ControlCommand::SyncBridge)
+        ));
+        drop(receiver);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/start")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({"error": "sync controller is unavailable"})
+        );
+    }
+
     #[test]
     fn rejects_out_of_range_dashboard_settings() {
         let mut input = settings();
@@ -932,6 +1497,7 @@ mod tests {
         let state = AppState {
             shared: shared.clone(),
             config_path: PathBuf::new(),
+            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
         };
         let _ = start(State(state.clone())).await.unwrap();
         let snapshot = status(State(state.clone())).await.0;
@@ -980,6 +1546,7 @@ mod tests {
         let state = AppState {
             shared: shared.clone(),
             config_path: PathBuf::new(),
+            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
         };
         shared.set_requested_running(false);
         shared.set_sync_state(SyncState::Running, None);
@@ -1040,6 +1607,7 @@ mod tests {
         let state = AppState {
             shared: Arc::clone(&shared),
             config_path: PathBuf::new(),
+            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
         };
         assert!(
             apply_preset(State(state), Path("lowStimulation".to_string()))

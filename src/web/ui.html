@@ -289,6 +289,7 @@
       </div>
     </div>
     <div class="header-actions">
+      <button class="theme-control" id="saveButton" type="button" aria-label="Save settings to disk" title="Save settings to disk" onclick="saveSettingsToDisk()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 3h12l4 4v14H3V3h2Z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/></svg></button>
       <button class="theme-control" id="themeButton" type="button" aria-label="Theme: system. Switch to dark" title="Theme: system. Switch to dark" onclick="cycleTheme()"><span id="themeGlyph" aria-hidden="true">◐</span></button>
     </div>
   </header>
@@ -506,11 +507,20 @@
     </div>
   </details>
 
-  <div class="btn-row">
-    <button class="secondary-btn" onclick="saveSettingsToDisk()">Save to Disk</button>
-    <button class="secondary-btn" onclick="restartPipeline()">Restart Pipeline</button>
-    <details class="restart-info"><summary aria-label="About Restart Pipeline">ⓘ</summary><div class="info-tip">Restarts the capture and lighting pipelines. Output pauses briefly; saved configuration remains. Confirm is required before restart.</div></details>
-  </div>
+  <details class="card accordion" id="maintenanceSection">
+    <summary>Maintenance</summary>
+    <div class="accordion-content">
+      <div class="toggle-row">
+        <div><div class="toggle-label" id="bonjourLabel">Bonjour discovery</div><div class="toggle-desc" id="bonjourDescription">Let compatible apps find this dashboard and its API on your local network.</div></div>
+        <label class="switch"><input type="checkbox" id="toggleBonjour" aria-labelledby="bonjourLabel" aria-describedby="bonjourDescription bonjourStatus" disabled onchange="updateBonjour()"><span class="slider"></span></label>
+      </div>
+      <div class="toggle-desc" id="bonjourStatus" role="status" aria-live="polite">Changes save automatically; no restart needed.</div>
+      <div class="btn-row">
+        <button class="secondary-btn" onclick="restartPipeline()">Restart Pipeline</button>
+        <details class="restart-info"><summary aria-label="About Restart Pipeline">ⓘ</summary><div class="info-tip">Restarts the capture and lighting pipelines. Output pauses briefly; saved configuration remains. Confirm is required before restart.</div></details>
+      </div>
+    </div>
+  </details>
 
   </main>
 
@@ -523,6 +533,7 @@
     let isSyncing = false;
     let syncRequested = false;
     let pollTimer = null;
+    let bonjourPending = false;
 
     function setTheme(theme) {
       if (!['system', 'dark', 'light'].includes(theme)) theme = 'system';
@@ -632,6 +643,11 @@
     }
 
     function updateUI(data) {
+      if (!bonjourPending) {
+        const discovery = document.getElementById('toggleBonjour');
+        discovery.checked = data.bonjour_enabled === true;
+        discovery.disabled = typeof data.bonjour_enabled !== 'boolean';
+      }
       isSyncing = data.is_syncing;
       syncRequested = ['paused', 'faulted'].includes(data.pipeline_state) ? false : (isSyncing || (data.requested_running ?? false));
       const dot = document.getElementById('statusDot');
@@ -827,6 +843,32 @@
         await pollStatus();
       } catch (e) {
         document.getElementById('presetStatus').innerText = 'Could not apply preset: ' + e.message;
+      }
+    }
+
+    async function updateBonjour() {
+      const toggle = document.getElementById('toggleBonjour');
+      const message = document.getElementById('bonjourStatus');
+      const enabled = toggle.checked;
+      bonjourPending = true;
+      toggle.disabled = true;
+      message.textContent = 'Saving discovery preference…';
+      try {
+        const response = await fetch('/api/bonjour', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Request failed');
+        toggle.checked = result.enabled;
+        message.textContent = result.enabled ? 'Discovery enabled and saved.' : 'Discovery disabled and saved.';
+      } catch (error) {
+        toggle.checked = !enabled;
+        message.textContent = 'Could not update discovery: ' + error.message;
+      } finally {
+        bonjourPending = false;
+        toggle.disabled = false;
+        pollStatus();
       }
     }
 

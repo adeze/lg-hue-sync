@@ -32,6 +32,12 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    #[error("config at {path} was replaced, but parent-directory sync failed; crash durability is unconfirmed")]
+    Durability {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to lock config at {path}")]
     Lock {
         path: PathBuf,
@@ -49,6 +55,9 @@ pub enum ConfigError {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LightZone {
+    /// Authoritative Entertainment channel centre; absent on legacy/manual rectangles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hue_channel_position: Option<[f32; 3]>,
     pub channel_id: u8,
     pub name: String,
     /// Hue V2 owner device for this channel. Empty on pre-V2 configurations.
@@ -75,40 +84,41 @@ impl LightZone {
     /// - Y: -1.0 (behind listening seat) to +1.0 (front TV wall)
     /// - Z: -1.0 (floor) to +1.0 (ceiling)
     pub fn from_3d_position(channel_id: u8, name: &str, pos: [f32; 3]) -> Self {
-        let x = pos[0].clamp(-1.0, 1.0);
-        let y = pos[1].clamp(-1.0, 1.0);
-        let z = pos[2].clamp(-1.0, 1.0);
-
-        // 1. Calculate base 2D screen center (X and Z)
-        let center_x = (x * 0.5 + 0.5).clamp(0.0, 1.0);
-        // Invert Z so +1.0 (ceiling/high) maps to top of screen (Y=0.0 in raster space)
-        let center_y = (1.0 - (z * 0.5 + 0.5)).clamp(0.0, 1.0);
-
-        // 2. Depth scaling (Y-axis):
-        // Front lights (near TV wall, Y >= 0.5): narrow, sharp directional span (25% screen box).
-        // Rear/surround lights (behind seat, Y < 0.2): expand span into a wide diffuse ambient zone (up to 70%).
-        let depth_factor = ((1.0 - y) * 0.5).clamp(0.0, 1.0); // 0.0 at TV wall, 1.0 behind couch
-        let span_x = 0.25 + 0.40 * depth_factor;
-        let span_y = 0.25 + 0.35 * depth_factor;
-
-        let x_min = (center_x - span_x * 0.5).clamp(0.0, 1.0);
-        let x_max = (center_x + span_x * 0.5).clamp(0.0, 1.0);
-        let y_min = (center_y - span_y * 0.5).clamp(0.0, 1.0);
-        let y_max = (center_y + span_y * 0.5).clamp(0.0, 1.0);
-
-        Self {
+        let mut zone = Self {
+            hue_channel_position: Some(pos),
             channel_id,
             name: name.to_string(),
             hue_device_id: None,
             hue_segment_index: None,
             hue_segment_count: None,
             hue_positions: Vec::new(),
-            x_min,
-            x_max,
-            y_min,
-            y_max,
-        }
+            x_min: 0.0,
+            x_max: 0.0,
+            y_min: 0.0,
+            y_max: 0.0,
+        };
+        zone.set_depth_influence(default_depth_influence());
+        zone
     }
+
+    pub fn set_depth_influence(&mut self, influence: f32) {
+        let Some(pos) = self.hue_channel_position else {
+            return; // Legacy/manual rectangles have no recoverable room-depth coordinate.
+        };
+        let x = pos[0].clamp(-1.0, 1.0) * 0.5 + 0.5;
+        let y = 0.5 - pos[2].clamp(-1.0, 1.0) * 0.5;
+        let depth = ((1.0 - pos[1]) * 0.5).clamp(0.0, 1.0);
+        let curve = depth * depth * (3.0 - 2.0 * depth);
+        let span = 0.25 * (1.0 + 0.5 * influence.clamp(0.0, 1.0) * curve);
+        self.x_min = (x - span * 0.5).clamp(0.0, 1.0);
+        self.x_max = (x + span * 0.5).clamp(0.0, 1.0);
+        self.y_min = (y - span * 0.5).clamp(0.0, 1.0);
+        self.y_max = (y + span * 0.5).clamp(0.0, 1.0);
+    }
+}
+
+pub fn default_depth_influence() -> f32 {
+    0.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +247,9 @@ pub struct Config {
     /// Nearby-zone gradient blending, 0 (off) to 0.5.
     #[serde(default)]
     pub spatial_blend: f32,
+    /// Hue sampling-footprint expansion; independent of colour presets and neighbour blending.
+    #[serde(default = "default_depth_influence")]
+    pub depth_influence: f32,
     #[serde(default = "default_gamma")]
     pub gamma: f32,
     #[serde(default = "default_noise_gate")]
@@ -318,6 +331,7 @@ fn default_max_color_step() -> u8 {
 fn default_zones() -> Vec<LightZone> {
     vec![
         LightZone {
+            hue_channel_position: None,
             channel_id: 0,
             name: "Left".to_string(),
             hue_device_id: None,
@@ -330,6 +344,7 @@ fn default_zones() -> Vec<LightZone> {
             y_max: 0.9,
         },
         LightZone {
+            hue_channel_position: None,
             channel_id: 1,
             name: "Top".to_string(),
             hue_device_id: None,
@@ -342,6 +357,7 @@ fn default_zones() -> Vec<LightZone> {
             y_max: 0.3,
         },
         LightZone {
+            hue_channel_position: None,
             channel_id: 2,
             name: "Right".to_string(),
             hue_device_id: None,
@@ -354,6 +370,7 @@ fn default_zones() -> Vec<LightZone> {
             y_max: 0.9,
         },
         LightZone {
+            hue_channel_position: None,
             channel_id: 3,
             name: "Bottom".to_string(),
             hue_device_id: None,
@@ -413,7 +430,7 @@ impl Config {
 
     pub fn new_default(bridge_ip: &str, username: &str, clientkey: &str, area_id: &str) -> Self {
         Self {
-            active_preset: None,
+            active_preset: Some("neutral".into()),
             preset_overrides: BTreeMap::new(),
             bonjour_enabled: false,
             auto_tv_power: true,
@@ -429,22 +446,23 @@ impl Config {
             nanoleaf: None,
             nanoleaf_sync_enabled: true,
             fps: default_fps(),
-            brightness_multiplier: default_brightness(),
+            brightness_multiplier: 1.0,
             hue_output_brightness: default_output_trim(),
             nanoleaf_output_brightness: default_output_trim(),
             use_xy_gamut: false,
             hdr_tone_mapping: false,
             letterbox_detection: true,
-            saturation_boost: default_saturation_boost(),
-            peak_weight: default_peak_weight(),
-            spatial_blend: 0.0,
+            saturation_boost: 1.0,
+            peak_weight: 0.15,
+            spatial_blend: 0.15,
+            depth_influence: default_depth_influence(),
             gamma: default_gamma(),
-            noise_gate_threshold: default_noise_gate(),
-            smoothing_factor: default_smoothing_factor(),
-            rise_smoothing_factor: default_smoothing_factor(),
-            fall_smoothing_factor: default_smoothing_factor(),
+            noise_gate_threshold: 0.02,
+            smoothing_factor: 0.35,
+            rise_smoothing_factor: 0.35,
+            fall_smoothing_factor: 0.35,
             strict_blackout: false,
-            max_color_step: default_max_color_step(),
+            max_color_step: 12,
             adaptive_throttling: true,
             zones: default_zones(),
             capture_width: default_capture_width(),
@@ -533,8 +551,22 @@ impl Config {
         if result.is_err() {
             let _ = fs::remove_file(&temp_path);
         }
-        result
+        result?;
+        sync_config_directory(path)
     }
+}
+
+fn sync_config_directory(path: &Path) -> Result<(), ConfigError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| ConfigError::Durability {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn lock_config(path: &Path) -> Result<File, ConfigError> {
@@ -586,6 +618,26 @@ fn lock_config(path: &Path) -> Result<File, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_sync_handles_relative_paths_and_reports_uncertain_durability() {
+        sync_config_directory(Path::new("config.json")).unwrap();
+        let path = std::env::temp_dir()
+            .join(format!(
+                "lg-hue-sync-missing-parent-{}-{}",
+                std::process::id(),
+                NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+            ))
+            .join("config.json");
+        let error = sync_config_directory(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            ConfigError::Durability { path: failed, source }
+                if failed == &path && source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(error.to_string().contains("was replaced"));
+        assert!(error.to_string().contains("durability is unconfirmed"));
+    }
 
     #[test]
     fn legacy_configs_start_without_preset_overrides() {
@@ -841,30 +893,56 @@ mod tests {
     }
 
     #[test]
-    fn test_3d_rear_surround_has_expanded_ambient_span() {
-        // Center rear surround behind listening position (X = 0.0, Y = -1.0)
-        let center_rear = LightZone::from_3d_position(1, "Center Rear", [0.0, -1.0, 0.0]);
-        let span_x = center_rear.x_max - center_rear.x_min;
-        let span_y = center_rear.y_max - center_rear.y_min;
-
-        // Rear lights should expand into wide diffuse ambient reflection (~0.65)
-        assert!(
-            (span_x - 0.65).abs() < 0.05,
-            "Center rear light span_x should be wide ~0.65, got {}",
-            span_x
+    fn depth_expansion_is_bounded_symmetric_and_preserves_channel_metadata() {
+        let mut zone = LightZone::from_3d_position(7, "Gradient", [0.0, -1.0, 0.0]);
+        zone.hue_device_id = Some("device".into());
+        zone.hue_segment_index = Some(3);
+        zone.hue_segment_count = Some(7);
+        for (influence, expected) in [(0.0, 0.25), (0.5, 0.3125), (1.0, 0.375)] {
+            zone.set_depth_influence(influence);
+            assert!((zone.x_max - zone.x_min - expected).abs() < 1e-6);
+            assert!((zone.y_max - zone.y_min - expected).abs() < 1e-6);
+            assert!((zone.x_min + zone.x_max - 1.0).abs() < 1e-6);
+        }
+        assert_eq!(
+            (
+                zone.channel_id,
+                zone.hue_segment_index,
+                zone.hue_segment_count
+            ),
+            (7, Some(3), Some(7))
         );
-        assert!(
-            (span_y - 0.60).abs() < 0.05,
-            "Center rear light span_y should be wide ~0.60, got {}",
-            span_y
+        assert_eq!(zone.hue_device_id.as_deref(), Some("device"));
+        let mut left = LightZone::from_3d_position(1, "Left", [-0.9, -0.4, 0.3]);
+        let mut right = LightZone::from_3d_position(2, "Right", [0.9, -0.4, 0.3]);
+        left.set_depth_influence(1.0);
+        right.set_depth_influence(1.0);
+        assert!((left.x_max - left.x_min - (right.x_max - right.x_min)).abs() < 1e-6);
+        let mut previous = 0.25;
+        for y in [1.0, 0.5, 0.0, -0.5, -1.0] {
+            let mut point = LightZone::from_3d_position(0, "", [0.0, y, 0.0]);
+            point.set_depth_influence(1.0);
+            let span = point.x_max - point.x_min;
+            assert!(span >= previous && span <= 0.375);
+            previous = span;
+        }
+        let mut legacy = zone.clone();
+        legacy.hue_channel_position = None;
+        let bounds = [legacy.x_min, legacy.x_max, legacy.y_min, legacy.y_max];
+        legacy.set_depth_influence(0.0);
+        assert_eq!(
+            bounds,
+            [legacy.x_min, legacy.x_max, legacy.y_min, legacy.y_max]
         );
-
-        // Rear Right surround (X = 0.8, Y = -1.0): reaches right edge and extends deep into screen
-        let rear_right = LightZone::from_3d_position(2, "Rear Right", [0.8, -1.0, 0.0]);
-        assert_eq!(rear_right.x_max, 1.0);
-        assert!(
-            rear_right.x_min <= 0.60,
-            "Rear right should cover broad portion of right screen"
+        let mut json = serde_json::to_value(Config::new_default("", "", "", "")).unwrap();
+        json.as_object_mut().unwrap().remove("depth_influence");
+        let restored: Config = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.depth_influence, 0.5);
+        let restored_zone: LightZone =
+            serde_json::from_str(&serde_json::to_string(&zone).unwrap()).unwrap();
+        assert_eq!(
+            restored_zone.hue_channel_position,
+            zone.hue_channel_position
         );
     }
 

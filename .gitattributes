@@ -1,0 +1,2 @@
+# Generated JavaScript contains intentional literal whitespace inside template strings.
+src/web/ui.html whitespace=-blank-at-eol

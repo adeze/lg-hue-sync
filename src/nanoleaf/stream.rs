@@ -475,7 +475,7 @@ impl NanoleafPerimeterSampler {
     }
 
     pub fn set_brightness_multiplier(&mut self, mult: f32) {
-        self.brightness_multiplier = mult.clamp(0.1, 4.0);
+        self.brightness_multiplier = mult.clamp(0.0, 6.25);
     }
 
     pub fn set_saturation_boost(&mut self, boost: f32) {
@@ -664,9 +664,9 @@ mod tests {
         let panel_ids = vec![1, 2, 3, 4];
         let mut sampler = NanoleafPerimeterSampler::new(4, &panel_ids, false, 1.0, 0.02, 1.0);
         sampler.set_strict_blackout(true);
-        sampler.sample_frame(&vec![255; 64], 4, 4, false, false);
+        sampler.sample_frame(&[255; 64], 4, 4, false, false);
 
-        let colors = sampler.sample_frame(&vec![0; 64], 4, 4, false, false);
+        let colors = sampler.sample_frame(&[0; 64], 4, 4, false, false);
         assert!(colors.iter().all(|color| *color == RgbColor::new(0, 0, 0)));
     }
 
@@ -705,12 +705,24 @@ mod tests {
     }
 
     #[test]
+    fn output_trim_supports_zero_and_combined_gain() {
+        let mut sampler = NanoleafPerimeterSampler::new(4, &[1, 2, 3, 4], false, 1.0, 0.0, 1.0);
+        sampler.set_brightness_multiplier(0.0);
+        let colors = sampler.sample_frame(&[255, 0, 0, 255].repeat(16), 4, 4, false, true);
+        assert!(colors
+            .iter()
+            .all(|color| color.r == 0 && color.g == 0 && color.b == 0));
+        sampler.set_brightness_multiplier(2.5 * 2.5);
+        assert_eq!(sampler.brightness_multiplier, 6.25);
+    }
+
+    #[test]
     fn test_nanoleaf_scene_cut_respects_limiter() {
         let panel_ids = vec![1u16, 2u16, 3u16, 4u16];
         let mut sampler = NanoleafPerimeterSampler::new(4, &panel_ids, false, 1.0, 0.0, 1.0);
 
         // Synthetic 4x4 frame of bright red (RGBA)
-        let red_frame = vec![255, 0, 0, 255].repeat(16);
+        let red_frame = [255, 0, 0, 255].repeat(16);
 
         // Scene cuts bypass EMA but must still respect the flash-safety limiter.
         let colors = sampler.sample_frame(&red_frame, 4, 4, false, true);
@@ -761,7 +773,7 @@ mod tests {
         sampler.set_max_color_step(255);
 
         // Synthetic 4x4 frame with blue color
-        let blue_frame = vec![0, 0, 255, 255].repeat(16);
+        let blue_frame = [0, 0, 255, 255].repeat(16);
         let colors = sampler.sample_frame(&blue_frame, 4, 4, false, true);
         assert_eq!(colors.len(), 40);
         for c in &colors {

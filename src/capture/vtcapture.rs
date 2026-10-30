@@ -666,7 +666,7 @@ mod tests {
     fn colored_nv12_fixture_locks_current_bt601_conversion() {
         let mut rgba = [0u8; 16];
         convert_nv12_to_rgba(2, 2, 2, &[100; 4], &[64, 192], &mut rgba).unwrap();
-        for pixel in rgba.chunks_exact(4) {
+        for pixel in rgba.as_chunks::<4>().0 {
             assert_eq!(pixel, &[200, 71, 0, 255]);
         }
     }
@@ -781,7 +781,11 @@ mod tests {
                             "YUV={y},{u},{v}: {rgba:?}, expected={reference:?}"
                         );
                     }
-                    assert!(rgba.chunks_exact(4).all(|p| p == &rgba[..4] && p[3] == 255));
+                    assert!(rgba
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| p == &rgba[..4] && p[3] == 255));
                     {
                         let c = 298 * (i32::from(y) - 16).max(0);
                         let d = i32::from(u) - 128;
@@ -808,8 +812,10 @@ mod tests {
             let mut rgba = vec![17; size];
             convert_nv12_to_rgba(3, 3, 4, &[235; 11], &[128; 8], &mut rgba).unwrap();
             assert!(rgba[..36]
-                .chunks_exact(4)
-                .all(|p| p == [255, 255, 255, 255]));
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [255, 255, 255, 255]));
             assert!(rgba[36..].iter().all(|v| *v == 17));
         }
         let mut rgba = [17; 4];

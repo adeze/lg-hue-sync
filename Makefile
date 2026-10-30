@@ -98,11 +98,10 @@ setup:
 	cargo fetch --locked
 
 ## run the host validation gate used by CI
-check: release-check
+check: release-check dashboard-check
 	cargo fmt --all -- --check
 	cargo nextest run --locked
 	cargo clippy --bin lg-hue-sync -- -D warnings
-	perl -0777 -ne 'print $$1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -
 	git diff --check
 
 ## default TV build; never silently fall back to another toolchain
@@ -262,3 +261,17 @@ clean:
 cross-clean:
 	@docker image ls --format '{{.Repository}}:{{.Tag}}' --filter 'reference=lg-hue-sync-cross:rust-*' | while IFS= read -r image; do docker image rm "$$image"; done
 	-docker volume rm $(CARGO_CACHE) $(TARGET_CACHE)
+
+# Static frontend assets stay embedded: the TV does not need Bun or Node.
+.PHONY: dashboard-build dashboard-check dashboard-preview
+dashboard-build:
+	bun run --cwd frontend build
+	cp frontend/dist/index.html src/web/ui.html
+
+dashboard-check:
+	bun run --cwd frontend check
+	bun run --cwd frontend test
+	$(MAKE) dashboard-build
+
+dashboard-preview:
+	bun run --cwd frontend dev

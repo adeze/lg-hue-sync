@@ -174,7 +174,7 @@ impl FloatColor {
 
     /// Preserve the existing multiplicative HSV saturation control, not Palette's additive one.
     pub fn boost_saturation(self, boost: f32) -> Self {
-        if boost <= 1.0 {
+        if boost == 1.0 {
             return self;
         }
         let mut hsv = Hsv::from_color(self.encoded_rgb());
@@ -289,7 +289,7 @@ impl ColorProcessor {
     }
 
     pub fn set_saturation_boost(&mut self, boost: f32) {
-        self.saturation_boost = boost.clamp(1.0, 3.0);
+        self.saturation_boost = boost.clamp(0.5, 3.0);
     }
 
     pub fn set_peak_weight(&mut self, weight: f32) {
@@ -313,7 +313,7 @@ impl ColorProcessor {
         if self.noise_gate_threshold > 0.0 {
             target = target.apply_noise_gate(self.noise_gate_threshold);
         }
-        if self.saturation_boost > 1.0 {
+        if self.saturation_boost != 1.0 {
             target = target.boost_saturation(self.saturation_boost);
         }
         if (self.gamma - 1.0).abs() >= 0.01 {
@@ -393,6 +393,12 @@ pub struct ZoneSampler {
 }
 
 impl ZoneSampler {
+    pub fn set_depth_influence(&mut self, influence: f32) {
+        for zone in &mut self.zones {
+            zone.set_depth_influence(influence);
+        }
+    }
+
     pub fn new(
         zones: Vec<LightZone>,
         smoothing_factor: f32,
@@ -759,11 +765,31 @@ fn limit_color_step(current: FloatColor, target: FloatColor, max_step: f32) -> F
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_depth_changes_sampling_without_replacing_channel_state() {
+        let zone = LightZone::from_3d_position(7, "Gradient", [0.0, -1.0, 0.0]);
+        let mut sampler = ZoneSampler::new(vec![zone], 1.0, false, false, 1.0, 0.0);
+        let mut pixels = vec![0u8; 64 * 64 * 4];
+        for y in 0..64 {
+            for x in 20..24 {
+                pixels[(y * 64 + x) * 4] = 255;
+            }
+        }
+        sampler.set_depth_influence(0.0);
+        let (off, _) = sampler.sample_frame(&pixels, 64, 64, false);
+        sampler.set_depth_influence(1.0);
+        sampler.last_sample = Some(Instant::now() - std::time::Duration::from_millis(34));
+        let (strong, _) = sampler.sample_frame(&pixels, 64, 64, false);
+        assert_eq!(off[0].1.r, 0);
+        assert!(strong[0].1.r > 0);
+        assert_eq!(sampler.zones[0].channel_id, 7);
+    }
     use super::*;
 
     #[test]
     fn test_saturation_weighting_favors_vivid_colors() {
         let zone = LightZone {
+            hue_channel_position: None,
             channel_id: 0,
             name: "Test".to_string(),
             hue_device_id: None,
@@ -841,6 +867,7 @@ mod tests {
     #[test]
     fn strict_blackout_does_not_leave_a_black_afterglow() {
         let zone = LightZone {
+            hue_channel_position: None,
             channel_id: 0,
             name: "Test".to_string(),
             hue_device_id: None,
@@ -1065,6 +1092,7 @@ mod tests {
     #[test]
     fn hue_sampler_retains_sub_byte_fades_between_frames() {
         let zone = LightZone {
+            hue_channel_position: None,
             channel_id: 7,
             name: "Test".into(),
             hue_device_id: None,
@@ -1099,7 +1127,7 @@ mod tests {
             FloatColor::new(1.0, 1.001, 0.999),
         ];
         for color in colors {
-            for boost in [1.0_f32, 1.5, 2.5, 3.0] {
+            for boost in [0.5_f32, 1.0, 1.5, 2.5, 3.0] {
                 let max = color.r.max(color.g).max(color.b);
                 let min = color.r.min(color.g).min(color.b);
                 let factor = if max > min {
@@ -1109,6 +1137,12 @@ mod tests {
                 };
                 let expected = [color.r, color.g, color.b].map(|c| max - (max - c) * factor);
                 let actual = color.boost_saturation(boost);
+                let mut processor = ColorProcessor::new(1.0, false, 1.0, 0.0);
+                processor.set_saturation_boost(boost);
+                let transformed = processor.transform_color(color);
+                assert!((transformed.r - actual.r).abs() < 0.001);
+                assert!((transformed.g - actual.g).abs() < 0.001);
+                assert!((transformed.b - actual.b).abs() < 0.001);
                 for (value, expected) in [actual.r, actual.g, actual.b].into_iter().zip(expected) {
                     assert!((value - expected).abs() < 0.001, "{color:?}, boost={boost}");
                     assert!((0.0..=255.0).contains(&value));

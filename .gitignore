@@ -34,3 +34,7 @@ dejavuln_payload/
 
 # Generated from the current user's private Hue Entertainment Area layout
 /calibration-patterns/local/
+
+# Dashboard toolchain outputs
+/frontend/node_modules/
+/frontend/dist/

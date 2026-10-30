@@ -215,6 +215,21 @@ impl HueStatus {
     }
 }
 
+fn observe_hue_status(
+    worker: &mut HueStatus,
+    config: &Config,
+    commands: &mut PendingCommands,
+    enabled: bool,
+) -> Option<hue::StreamState> {
+    // Defer processing during management work without cancelling the subscription.
+    worker.request(enabled.then_some(config));
+    if enabled && !commands.has_management_action() {
+        poll_hue_status(worker, config, commands)
+    } else {
+        None
+    }
+}
+
 fn poll_hue_status(
     worker: &mut HueStatus,
     config: &Config,
@@ -529,6 +544,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     hue_status.blocked = hue_active;
     hue_status.needs_refresh = hue_active;
 
+    for zone in &mut config.zones {
+        zone.set_depth_influence(config.depth_influence);
+    }
     let mut hue_sampler = if hue_active {
         Some(ZoneSampler::new(
             config.zones.clone(),
@@ -650,6 +668,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         saturation_boost: config.saturation_boost,
         peak_weight: config.peak_weight,
         spatial_blend: config.spatial_blend,
+        depth_influence: config.depth_influence,
         gamma: config.gamma,
         noise_gate_threshold: config.noise_gate_threshold,
         smoothing_factor: config.smoothing_factor,
@@ -758,6 +777,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     'sync_loop: while running.load(Ordering::SeqCst) {
         pending_commands.receive(&mut command_rx);
         source_policy.manual_request(pending_commands.manual_running.take());
+        source_policy.observe_display(shared_state.display_off.load(Ordering::Relaxed));
         let loop_start = tokio::time::Instant::now();
         let mut emitted_light_update = false;
 
@@ -808,25 +828,22 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         let web_stop_requested = pending_commands.take_stop_if_running(pipeline_state);
 
         // Bridge reads run on their own worker; only current-session results affect output.
-        if hue_active
-            && hue_sync_enabled
-            && !web_stop_requested
-            && !pending_commands.has_management_action()
-        {
-            if let Some(state) = poll_hue_status(&mut hue_status, &config, &mut pending_commands) {
-                if !state.active && hue_dtls.is_some() {
-                    // Ownership loss suspends Hue only; Nanoleaf keeps its own session.
-                    hue_status.blocked = true;
-                }
-                if let Some(ref mut sampler) = hue_sampler {
-                    sampler.set_smoothing_factor(state.smoothing_factor);
-                }
-                if let Some(ref mut sampler) = nanoleaf_sampler {
-                    sampler.set_smoothing_factor(state.smoothing_factor);
-                }
+        if let Some(state) = observe_hue_status(
+            &mut hue_status,
+            &config,
+            &mut pending_commands,
+            hue_active && hue_sync_enabled && !web_stop_requested,
+        ) {
+            if !state.active && hue_dtls.is_some() {
+                // Ownership loss suspends Hue only; Nanoleaf keeps its own session.
+                hue_status.blocked = true;
             }
-        } else {
-            hue_status.request(None);
+            if let Some(ref mut sampler) = hue_sampler {
+                sampler.set_smoothing_factor(state.smoothing_factor);
+            }
+            if let Some(ref mut sampler) = nanoleaf_sampler {
+                sampler.set_smoothing_factor(state.smoothing_factor);
+            }
         }
 
         if hue_status.blocked {
@@ -875,7 +892,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             shared_state
                 .nanoleaf_connected
                 .store(false, Ordering::Relaxed);
-            if source_policy.source_paused() && source_policy.blocked() {
+            if source_policy.source_paused()
+                && source_policy.blocked()
+                && !shared_state.display_off.load(Ordering::Relaxed)
+            {
                 shared_state.set_sync_state(SyncState::UnsupportedSource, Some("Built-in apps and Home are not supported by this capture backend; select HDMI to resume.".into()));
             } else if !capture_faulted {
                 shared_state.set_sync_state(SyncState::Paused, None);
@@ -885,13 +905,17 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 tokio::time::sleep(watchdog.pause_poll_period()).await;
                 pending_commands.receive(&mut command_rx);
                 source_policy.manual_request(pending_commands.manual_running.take());
+                source_policy.observe_display(shared_state.display_off.load(Ordering::Relaxed));
                 watchdog.tick();
                 if last_source_poll.elapsed() >= Duration::from_secs(2) {
                     last_source_poll = tokio::time::Instant::now();
                     source_policy
                         .observe(crate::capture_source::current_source().await.compatible());
                 }
-                if source_policy.source_paused() && source_policy.blocked() {
+                if source_policy.source_paused()
+                    && source_policy.blocked()
+                    && !shared_state.display_off.load(Ordering::Relaxed)
+                {
                     shared_state.set_sync_state(SyncState::UnsupportedSource, Some("Built-in apps and Home are not supported by this capture backend; select HDMI to resume.".into()));
                 } else if source_policy.manually_stopped() && !capture_faulted {
                     shared_state.set_sync_state(SyncState::Paused, None);
@@ -966,6 +990,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 // A Stop received during an awaited observation must beat auto-resume.
                 pending_commands.receive(&mut command_rx);
                 source_policy.manual_request(pending_commands.manual_running.take());
+                source_policy.observe_display(shared_state.display_off.load(Ordering::Relaxed));
                 if pending_commands.reconfigure {
                     break;
                 }
@@ -1067,6 +1092,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             current_hue_brightness = live_st.brightness_multiplier * live_st.hue_output_brightness;
             current_use_xy = live_st.use_xy_gamut;
+            config.depth_influence = live_st.depth_influence;
+            for zone in &mut config.zones {
+                zone.set_depth_influence(live_st.depth_influence);
+            }
             *shared_state.hue_zones.write().unwrap() = config.zones.clone();
             if hue_sync_enabled != live_st.hue_sync_enabled {
                 hue_status.request(None);
@@ -1126,6 +1155,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 s.set_saturation_boost(live_st.saturation_boost);
                 s.set_peak_weight(live_st.peak_weight);
                 s.set_spatial_blend(live_st.spatial_blend);
+                s.set_depth_influence(live_st.depth_influence);
                 s.set_gamma(live_st.gamma);
                 s.set_noise_gate_threshold(live_st.noise_gate_threshold);
                 s.set_max_color_step(live_st.max_color_step);
@@ -1171,6 +1201,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 save_cfg.saturation_boost = live_st.saturation_boost;
                 save_cfg.peak_weight = live_st.peak_weight;
                 save_cfg.spatial_blend = live_st.spatial_blend;
+                save_cfg.depth_influence = live_st.depth_influence;
                 save_cfg.gamma = live_st.gamma;
                 save_cfg.noise_gate_threshold = live_st.noise_gate_threshold;
                 save_cfg.smoothing_factor = live_st.smoothing_factor;
@@ -1230,9 +1261,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     config.entertainment_configuration_id = Some(area.configuration_id);
                     config.hue_bridge_id = Some(area.bridge_id.clone());
                     config.hue_bridge_certificate_sha256 = Some(area.certificate_sha256);
-                    config.zones = area.zones;
-                    *shared_state.hue_zones.write().unwrap() = config.zones.clone();
                     let live_st = shared_state.current_settings.read().unwrap().clone();
+                    config.zones = area.zones;
+                    for zone in &mut config.zones {
+                        zone.set_depth_influence(live_st.depth_influence);
+                    }
+                    *shared_state.hue_zones.write().unwrap() = config.zones.clone();
                     hue_sampler = Some(ZoneSampler::new(
                         config.zones.clone(),
                         live_st.smoothing_factor,
@@ -1381,10 +1415,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             pending_commands.receive(&mut command_rx);
             source_policy.manual_request(pending_commands.manual_running.take());
+            source_policy.observe_display(shared_state.display_off.load(Ordering::Relaxed));
             source_policy.observe(crate::capture_source::current_source().await.compatible());
             last_source_poll = tokio::time::Instant::now();
             pending_commands.receive(&mut command_rx);
             source_policy.manual_request(pending_commands.manual_running.take());
+            source_policy.observe_display(shared_state.display_off.load(Ordering::Relaxed));
             if pending_commands.capture_restart_cancelled()
                 || source_policy.blocked()
                 || source_policy.manually_stopped()
@@ -1706,10 +1742,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 watchdog.tick();
                 pending_commands.receive(&mut command_rx);
                 source_policy.manual_request(pending_commands.manual_running.take());
+                source_policy.observe_display(shared_state.display_off.load(Ordering::Relaxed));
                 source_policy.observe(crate::capture_source::current_source().await.compatible());
                 last_source_poll = tokio::time::Instant::now();
                 pending_commands.receive(&mut command_rx);
                 source_policy.manual_request(pending_commands.manual_running.take());
+                source_policy.observe_display(shared_state.display_off.load(Ordering::Relaxed));
                 if pending_commands.capture_restart_cancelled()
                     || source_policy.blocked()
                     || source_policy.manually_stopped()
@@ -1988,6 +2026,35 @@ impl WatchdogHeartbeat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn management_updates_keep_hue_subscription_until_output_stops() {
+        let events = hue::events::HueEvents::new(
+            |_| anyhow::bail!("unexpected snapshot"),
+            |_| anyhow::bail!("unexpected connection"),
+        )
+        .unwrap();
+        let mut worker = HueStatus {
+            events,
+            enabled: true,
+            blocked: false,
+            needs_refresh: false,
+        };
+        let config = Config::new_default("", "", "", "");
+        let mut commands = PendingCommands::default();
+        commands.save_config.push(tokio::sync::oneshot::channel().0);
+        assert!(observe_hue_status(&mut worker, &config, &mut commands, true).is_none());
+        assert!(
+            worker.enabled,
+            "management work must not restart Hue observation"
+        );
+        assert!(!worker.blocked && !commands.sync_bridge);
+        observe_hue_status(&mut worker, &config, &mut commands, false);
+        assert!(
+            !worker.enabled,
+            "stopping output must still cancel observation"
+        );
+    }
 
     #[test]
     fn duplicate_output_frames_are_suppressed_but_meaningful_changes_pass() {

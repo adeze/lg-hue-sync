@@ -298,7 +298,7 @@ The update retains `config.json`, backs up the previous binary, uploads through 
 
 ## Apple Shortcuts and presets
 
-On the same trusted LAN, create an Apple Shortcut with a **URL** action set to `http://<tv-ip>:8088/api/presets/neutral`, followed by **Get Contents of URL** with method **POST** and no request body. Replace `neutral` with `highChroma`, `neonContrast`, `darkSceneDetail`, `fastResponse`, or `lowStimulation` for the other dashboard presets. A successful request returns `{"status":"ok"}`; an unknown name returns HTTP 400. The existing `POST /api/start` and `POST /api/stop` endpoints can be used in separate Shortcuts.
+On the same trusted LAN, create an Apple Shortcut with a **URL** action set to `http://<tv-ip>:8088/api/presets/neutral`, followed by **Get Contents of URL** with method **POST** and no request body. Replace `neutral` with `softColor` or `vividColor` for the other dashboard colour choices. Legacy names `highChroma`, `neonContrast`, `darkSceneDetail`, `fastResponse`, and `lowStimulation` remain accepted by HTTP; the last two retain full-profile behaviour. A successful request returns `{"status":"ok"}`; an unknown name returns HTTP 400. The existing `POST /api/start` and `POST /api/stop` endpoints can be used in separate Shortcuts.
 
 Preset changes affect live settings only. Use the dashboard's **Save Settings** control, or `POST /api/save-config`, to keep the chosen settings after restart. Presets preserve Hue/Nanoleaf output trims, device enablement, alignment, and other non-preset controls. Port 8088 has no authentication; keep it on the trusted LAN and do not forward it to the Internet. No Shortcut or API call is needed to edit the TV's `config.json` directly.
 
@@ -314,13 +314,13 @@ The HTTP API remains unauthenticated and LAN-only. JSON extraction failures can 
 
 ## Captured-frame tuning preview
 
-The Tuning workspace stacks Ambient style, a full-width adjusted-image preview with optional light-region overlays, a compact preview toolbar and a horizontally scrolling bank of vertical faders. Fader thumbs and values enlarge on focus without changing track geometry. Preview limitations are available from its info control; faders show contextual help below the bank. Devices, Calibration and Maintenance live on the Devices tab. It can capture an in-memory RGB thumbnail from QSync's existing hardware HDMI frames. It never starts a second capture pipeline. Copying is demand-driven, capped at 128 × 72 and one frame per second, with a two-second lease. Leaving Tuning or hiding the page stops browser requests; the capture loop skips copying once the lease expires. Source pause clears the cached frame. Frozen thumbnails remain in the browser until replaced or the page closes.
+Capture is explicit: press **Capture frame** once, then tune against that frozen image. There is no continuous preview mode. **Light regions** is a touch-sized pressed-state button that shows or hides the overlay. The Tuning workspace stacks Ambient style, a full-width adjusted-image preview with optional light-region overlays, a compact preview toolbar and a horizontally scrolling bank of vertical faders. Fader thumbs and values enlarge on focus without changing track geometry. Preview limitations are available from its info control; faders show contextual help below the bank. Devices, Calibration and Maintenance live on the Devices tab. It can capture an in-memory RGB thumbnail from QSync's existing hardware HDMI frames. It never starts a second capture pipeline. Copying is demand-driven, capped at 128 × 72 and one frame per second, with a two-second lease. Leaving Tuning or hiding the page stops browser requests; the capture loop skips copying once the lease expires. Source pause clears the cached frame. Frozen thumbnails remain in the browser until replaced or the page closes.
 
 `GET /api/preview/frame` returns a recent thumbnail, 202 while waiting, or 409 when hardware sync is not running. `POST /api/preview/render` applies the shared Rust static colour transform to supplied bounded RGB pixels without changing settings. Rendering permits one worker and at most ten requests per second; dashboard edits debounce at 200 ms. JSON bodies are limited to 512 KiB. Responses use `Cache-Control: no-store`; no images are written to disk. Like the existing unauthenticated HTTP API, preview endpoints are available to clients that can reach the TV's LAN port.
 
 The adjusted image demonstrates brightness, saturation, gamma, black gating and the legacy midtone lift. They do not simulate regional peak weighting, spatial sampling, temporal response, device output trims, physical lamp colour or calibrated HDR display reproduction. Native-app video metadata does not establish native-app frame capture support. Run `bun scripts/test_frame_preview.mjs` for the focused browser-state self-check.
 
-Save and Reset live in Advanced tuning. Ambient presets remain selected while tuning. Save stores the active preset name and its tuned colour/sampling values in `preset_overrides`, alongside the existing atomic configuration save. Selecting another preset recalls its saved override or factory values; selecting the active preset preserves unsaved edits. Reset applies factory tuning live and requires Save to persist. Saving factory values removes that preset’s override. Device output trims, output enablement, pairing and alignment are not part of preset overrides. Legacy configurations retain their current tuning with no inferred active preset.
+Save and Reset live in Advanced tuning. Ambient presets remain selected while tuning. Save stores the active preset name and its tuned colour/sampling values in `preset_overrides`, alongside the existing atomic configuration save. Selecting another preset recalls its saved override or factory values; selecting the active preset preserves unsaved edits. Reset applies factory colour tuning and schedules autosave, preserving response, spatial blending and processing options. Saving factory values removes that preset’s override. Device output trims, output enablement, pairing and alignment are not part of preset overrides. Legacy configurations retain their current tuning; new configurations start with the three middle choices.
 
 ## Input and output diagnostics
 
@@ -433,3 +433,102 @@ built artifact; native TV results do not establish runtime validation of that bi
 `make pair TV_IP=<tv-ip>` now invokes the TV's Rust pairing command over SSH and
 restarts the daemon only after successful pairing. The deprecated Python wrapper is
 for host-side pairing and intentionally rejects its removed `--tv-ip` option.
+
+## Display-only controls and Shortcuts
+
+The header Display switch controls the panel separately from TV standby.
+`GET /api/display` returns `{"enabled":true}`, `false`, or `null` when unavailable.
+Use **Get Contents of URL** in Apple Shortcuts with method **POST** and no body:
+
+- `http://<tv-ip>:8088/api/display/on`
+- `http://<tv-ip>:8088/api/display/off`
+- `http://<tv-ip>:8088/api/display/toggle`
+
+Use on/off for retry-safe actions. Toggle reads the TV's actual state under a
+shared command lock, then reverses it; retrying toggle can undo the first call.
+These endpoints never send standby/power-on commands. Standby or unknown states
+are rejected. Successful responses report observed panel state, rather than
+assuming a command changed it. Display off also pauses both ambient outputs, independently of Follow TV power.
+Display on resumes an automatic pause; a manual Stop remains stopped.
+TV audio is not muted or rerouted. The display preference is not saved to QSync
+configuration. The existing API is LAN-only and unauthenticated.
+
+## Coarse tuning controls
+
+Save and Reset share the always-visible Advanced tuning heading.
+Ambient style stays expanded with three segmented profile groups and contextual
+help. Colour (Soft/Default/Vivid), Response (Slow/Default/Fast) and Spatial blending
+(Local/Balanced/Soft) are independent, giving 27 combinations. New configurations
+use the middle choices; existing configuration is preserved. Successful user
+edits autosave after one second of inactivity and after pending live requests
+finish. Polling never triggers writes. Last saved settings restore at startup.
+Colour styles, response modes and blending are independent. Selecting or resetting a
+colour style preserves current smoothing, rise/fall response, scene limit and
+spatial blending. Processing options and device trims remain global.
+Slow/Default/Fast change only those four response fields; the current values
+identify the selected response after reload. Manual response edits show Custom.
+Autosave and manual Save persist global response/blending alongside colour overrides; older override files
+remain readable, but their response fields do not override global response on
+recall. Existing fastResponse/lowStimulation HTTP preset names retain legacy
+full-profile behaviour; the dashboard uses independent response settings. Rarely used processing switches live in a closed Processing
+options disclosure. Header controls are compact pressed-state buttons with glyphs and On/Off labels.
+Follow TV power is a checkbox in Devices; Capture frame uses a camera glyph.
+Live processing/status text is shown in Diagnostics. Controls use coarse indexed
+stops while retaining exact saved/preset values until the corresponding fader
+is moved; changing another control must not round a saved preset.
+
+| Control | Stops |
+|---|---|
+| Hue / Nanoleaf output trim | 0–2.5×, 0.5× steps |
+| Brightness / saturation | 0.5×, 1×, 1.5×, 2×, 2.5× |
+| Highlights | 0–100%, 10% steps |
+| Blend | 0–50%, 5% steps; half local colour, half nearby average at maximum |
+| Gamma | 0.5, 0.6, 0.7, 0.85, 1, 1.2, 1.4, 1.7, 2; neutral in the centre |
+| Response | 5, 8, 12, 18, 25, 35, 50, 65, 80, 100%; EMA coefficient |
+| Scene limit | 4, 6, 8, 12, 16, 24, 32, 48, 64 RGB counts per 1/30 second |
+| Black gate | 0, 0.5, 1, 1.5, 2, 3, 4, 6% luminance; Strict black in the same card |
+
+Response and scene limit use more stops near subtle changes. Gamma stops are
+approximately multiplicative around neutral. Midtone lift retains its legacy
+curve and does not perform HDR correction. Haptics are optional: native switches remain browser-controlled.
+Buttons use the locally bundled MIT-licensed ios-haptics 3.3.0 package, whose
+transparent label forwards a real tap to a native switch on iOS. Android uses
+navigator.vibrate when available. There is no CDN or audio fallback. The hidden
+switch is excluded from keyboard navigation; the original button remains the
+accessible control. The native label action completes before asynchronous
+handlers can disable a button. Range-step ticks use navigator.vibrate where
+available; iOS slider-drag feedback is not implemented because a native switch
+overlay would interfere with range interaction. Physical feedback still depends on Safari/iOS and device
+settings; test on an iPhone before claiming haptic support.
+
+
+### Dashboard development (Svelte)
+
+`frontend/` is the editable Svelte 5/TypeScript source, using Tailwind 4 and a
+locally owned shadcn-svelte Button. CSS provides the glass appearance; no shader
+library is loaded. `src/web/ui.html` is generated, self-contained production
+output, retained in Git so Rust/ARM builds need no JavaScript runtime.
+
+- Install development dependencies: `bun install --cwd frontend --frozen-lockfile`.
+- Open isolated local preview: `make dashboard-preview` (localhost port 18089).
+- Validate and refresh embedded assets: `make dashboard-check` (also in `make check`).
+- After editing frontend code, run `make dashboard-build` before direct `cargo build`
+  or the ARM build. CI rejects a stale embedded bundle.
+
+The development server simulates all `/api/` responses in memory. It never
+forwards requests to the TV. Preview pairing, calibration and autosave controls
+therefore do not operate hardware or write TV configuration. The local banner
+identifies simulated data, including the illustrative frame transform. Reloading
+the page retains mock-server state; restarting the preview server resets it.
+Production assets use same-origin HTTP endpoints and contain no mock API.
+
+Settings writes are serialized; an unsent burst is collapsed to its newest
+complete snapshot. Exact preset values survive indexed fader display. Autosave
+waits for writes, then uses the existing acknowledged config transaction.
+
+Config storage remains Serde/JSON plus the shared locked read-modify-write
+helper. It now syncs the parent directory after rename. A directory-sync failure
+reports that replacement already happened but durability could not be confirmed;
+it must not imply that the old file is still present. No config-library or schema
+migration was needed. Atomic replacement and controlled crash testing remain
+different evidence from real TV power-loss validation.

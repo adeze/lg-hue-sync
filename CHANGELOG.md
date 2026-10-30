@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-30
+
+### Changed
+- Rebuild the embedded dashboard with Svelte, Tailwind and selected shadcn-svelte components; keep the existing local HTTP API and single-file deployment.
+- Use consistent Item rows and touch-sized Switches for processing/device settings, with pressed Toggles for screen sync, display and light regions.
+- Make Colour, Response and Spatial preset groups independently combinable, automatically save selections, and restore the last saved choices.
+- Add bounded Off/Mild/Strong depth influence while preserving Hue channel centres and separate gradient-channel sampling.
+- Combine capture polling ceiling, measured light-update rate and sender connection status into one diagnostic gauge; distinguish paused, stale and unavailable readings.
+
+### Fixed
+- Add display-only on/off/toggle HTTP controls and pause screen synchronization while the display is off, independently of TV standby power.
+- Keep tuning preview capture explicit and frozen; remove live polling from colour tuning and avoid redundant settings updates.
+- Use practical fader/output-trim steps, place Strict black with Black gate, and group infrequent processing options separately.
+- Harden atomic configuration writes and preserve independent preset overrides and device credentials.
+
+### Validation
+- Host checks cover 127 Rust tests, 9 frontend tests, Svelte diagnostics, formatting, Clippy and release metadata. Native ARMv7 builds pass ELF32, soft-float, loader and glibc <= 2.28 checks.
+- The pre-version-bump UX build was deployed and its binary hash, service, dashboard, hardware capture and Hue/Nanoleaf connections verified. Physical colour accuracy and iPhone haptics were not measured.
+- HLS, native video encoding and audio interception are excluded. CI builds published daemon assets independently; launcher-only packages/manifests remain unpublished.
+
 ## [1.0.0] - 2026-10-29
 
 ### Added

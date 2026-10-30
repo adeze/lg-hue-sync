@@ -28,8 +28,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo nextest run --locked
       - run: cargo clippy --bin lg-hue-sync -- -D warnings
-      - name: Validate embedded dashboard JavaScript
-        run: perl -0777 -ne 'print $1 if /<script>(.*)<\/script>/s' src/web/ui.html | node --check -
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --cwd frontend --frozen-lockfile
+      - run: make dashboard-check
+      - name: Verify embedded dashboard matches sources
+        run: git diff --exit-code -- src/web/ui.html
 
   webos-target:
     runs-on: ubuntu-latest

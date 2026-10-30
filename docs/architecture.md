@@ -89,6 +89,17 @@ bounded exponential-backoff policy so a disconnected device cannot trigger frame
 
 Hue v2 may group several physical gradient segments into one Entertainment channel. Preserve that grouping. Dashboard overlays describe daemon sampling; they are not additional Bridge channels.
 
+Hue sampling uses each channel's authoritative centre, with X mapped horizontally and Z vertically.
+The base footprint is 25% of each screen axis before clipping. `depth_influence` (0–1, default 0.5)
+controls bounded expansion: for normalized rearward depth `d = clamp((1 - Y) / 2)`, the span is
+`0.25 * (1 + 0.5 * depth_influence * d*d*(3 - 2*d))`. Off stays at 25%; Mild reaches 31.25%;
+Strong reaches 37.5%. This is QSync policy, not a Hue-prescribed projection or measured beam size.
+The setting applies to Hue only and is saved independently of colour/response/blend presets.
+Changes update sampling and reported rectangles without reconnecting Hue or resetting temporal state.
+Legacy/manual rectangles without `hue_channel_position` retain their bounds until a Hue layout refresh
+supplies authoritative channel coordinates. Device preview boxes enclose member rectangles; empty gaps
+inside that enclosure are not additional sampled pixels. Edge clipping can reduce the visible footprint.
+
 ## Security
 
 - Dashboard is intended for a trusted LAN and has no remote authentication layer.

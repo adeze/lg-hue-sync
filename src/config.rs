@@ -101,6 +101,10 @@ impl LightZone {
         zone
     }
 
+    pub(crate) fn uses_room_sampling(&self) -> bool {
+        self.hue_device_id.is_some() && self.hue_segment_count == Some(1)
+    }
+
     pub fn set_depth_influence(&mut self, influence: f32) {
         let Some(pos) = self.hue_channel_position else {
             return; // Legacy/manual rectangles have no recoverable room-depth coordinate.
@@ -109,7 +113,9 @@ impl LightZone {
         let y = 0.5 - pos[2].clamp(-1.0, 1.0) * 0.5;
         let depth = ((1.0 - pos[1]) * 0.5).clamp(0.0, 1.0);
         let curve = depth * depth * (3.0 - 2.0 * depth);
-        let span = 0.25 * (1.0 + 0.5 * influence.clamp(0.0, 1.0) * curve);
+        let span = 0.25
+            * (1.0 + 0.5 * influence.clamp(0.0, 1.0) * curve)
+            * if self.uses_room_sampling() { 1.5 } else { 1.0 };
         self.x_min = (x - span * 0.5).clamp(0.0, 1.0);
         self.x_max = (x + span * 0.5).clamp(0.0, 1.0);
         self.y_min = (y - span * 0.5).clamp(0.0, 1.0);

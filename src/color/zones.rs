@@ -194,6 +194,7 @@ impl FloatColor {
     }
 }
 
+#[derive(Clone)]
 pub struct ColorProcessor {
     rise: f32,
     fall: f32,
@@ -205,6 +206,7 @@ pub struct ColorProcessor {
     max_color_step: u8,
     strict_blackout: bool,
     spatial_blend: f32,
+    room_response: bool,
 }
 
 impl ColorProcessor {
@@ -225,6 +227,7 @@ impl ColorProcessor {
             max_color_step: 12,
             strict_blackout: false,
             spatial_blend: 0.0,
+            room_response: false,
         }
     }
 
@@ -262,6 +265,13 @@ impl ColorProcessor {
             if total > 0.0 {
                 *color = color.lerp(sum.scale(1.0 / total), self.spatial_blend);
             }
+        }
+    }
+
+    fn for_room(&self) -> Self {
+        Self {
+            room_response: true,
+            ..self.clone()
         }
     }
 
@@ -309,9 +319,13 @@ impl ColorProcessor {
     }
 
     /// Shared per-colour adjustment; sampling and temporal response remain separate.
-    pub fn transform_color(&self, mut target: FloatColor) -> FloatColor {
-        if self.noise_gate_threshold > 0.0 {
-            target = target.apply_noise_gate(self.noise_gate_threshold);
+    pub fn transform_color(&self, target: FloatColor) -> FloatColor {
+        self.transform_with_gate(target, self.noise_gate_threshold)
+    }
+
+    fn transform_with_gate(&self, mut target: FloatColor, threshold: f32) -> FloatColor {
+        if threshold > 0.0 {
+            target = target.apply_noise_gate(threshold);
         }
         if self.saturation_boost != 1.0 {
             target = target.boost_saturation(self.saturation_boost);
@@ -341,7 +355,14 @@ impl ColorProcessor {
         } else {
             mean
         };
-        target = self.transform_color(target);
+        // Require more light to leave black than to remain lit. Uniform black still stops.
+        let threshold = self.noise_gate_threshold
+            * if current == FloatColor::default() {
+                1.2
+            } else {
+                0.8
+            };
+        target = self.transform_with_gate(target, threshold);
         if self.strict_blackout && target == FloatColor::default() {
             return target;
         }
@@ -353,7 +374,37 @@ impl ColorProcessor {
             elapsed_alpha(self.rise, elapsed)
         };
         let max_step = self.max_color_step as f32 * elapsed.as_secs_f32() * 30.0;
-        limit_color_step(current, current.lerp(target, alpha), max_step)
+        let next = if self.room_response && !is_scene_cut {
+            let brightness = |c: FloatColor| c.r.max(c.g).max(c.b);
+            let from = brightness(current);
+            let to = brightness(target);
+            let base = if to < from { self.fall } else { self.rise };
+            let slow_elapsed = elapsed.mul_f32(0.6);
+            let brightness_alpha = elapsed_alpha(base, slow_elapsed);
+            let colour_alpha = elapsed_alpha(base.min(0.25), slow_elapsed);
+            let from_colour = if from > 0.0 {
+                current.scale(1.0 / from)
+            } else if to > 0.0 {
+                target.scale(1.0 / to)
+            } else {
+                FloatColor::default()
+            };
+            let to_colour = if to > 0.0 {
+                target.scale(1.0 / to)
+            } else {
+                from_colour
+            };
+            let colour = from_colour.lerp(to_colour, colour_alpha);
+            let norm = brightness(colour);
+            if norm > 0.0 {
+                colour.scale((from + (to - from) * brightness_alpha) / norm)
+            } else {
+                FloatColor::default()
+            }
+        } else {
+            current.lerp(target, alpha)
+        };
+        limit_color_step(current, next, max_step)
     }
 }
 
@@ -601,11 +652,12 @@ impl ZoneSampler {
             .replace(now)
             .map(|last| now.duration_since(last))
             .unwrap_or(REFERENCE_FRAME);
+        let mut output = self.smoothed_colors.clone();
         if self
             .black_frame
-            .apply(data, width, height, &mut self.smoothed_colors, now)
+            .apply(data, width, height, &mut output, now)
         {
-            return (self.output_colors(), false);
+            return (self.output_colors(output), false);
         }
         self.frame_count += 1;
 
@@ -672,6 +724,26 @@ impl ZoneSampler {
 
         for (i, zone) in self.zones.iter().enumerate() {
             // Remap normalized coordinates to the active viewport
+            let room = zone.uses_room_sampling();
+            let (center_x, center_y) = zone
+                .hue_channel_position
+                .filter(|_| room)
+                .map(|pos| {
+                    (
+                        pos[0].clamp(-1.0, 1.0) * 0.5 + 0.5,
+                        0.5 - pos[2].clamp(-1.0, 1.0) * 0.5,
+                    )
+                })
+                .unwrap_or((
+                    (zone.x_min + zone.x_max) * 0.5,
+                    (zone.y_min + zone.y_max) * 0.5,
+                ));
+            let half_x = (center_x - zone.x_min)
+                .abs()
+                .max((zone.x_max - center_x).abs());
+            let half_y = (center_y - zone.y_min)
+                .abs()
+                .max((zone.y_max - center_y).abs());
             let mapped_x_min = act_x_min + zone.x_min * act_x_range;
             let mapped_x_max = act_x_min + zone.x_max * act_x_range;
             let mapped_y_min = act_y_min + zone.y_min * act_y_range;
@@ -682,14 +754,28 @@ impl ZoneSampler {
             let y_start = (mapped_y_min * height as f32).clamp(0.0, (height - 1) as f32) as u32;
             let y_end = (mapped_y_max * height as f32).clamp(0.0, height as f32) as u32;
 
-            let mut weighted_r: f32 = 0.0;
-            let mut weighted_g: f32 = 0.0;
-            let mut weighted_b: f32 = 0.0;
-            let mut total_weight: f32 = 0.0;
-            let mut peak_pixel = RgbColor::new(0, 0, 0);
-            let mut max_luma = 0.0f32;
+            let mut region = crate::color::sampling::RegionSample::default();
 
+            let x_weights: Vec<f32> = if room {
+                (x_start..x_end)
+                    .step_by(2)
+                    .map(|x| {
+                        let nx = ((x as f32 / width as f32 - act_x_min) / act_x_range - center_x)
+                            / half_x.max(0.001);
+                        (-2.0 * nx * nx).exp()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for y in (y_start..y_end).step_by(2) {
+                let y_weight = if room {
+                    let ny = ((y as f32 / height as f32 - act_y_min) / act_y_range - center_y)
+                        / half_y.max(0.001);
+                    (-2.0 * ny * ny).exp()
+                } else {
+                    1.0
+                };
                 let row_offset = (y * width * 4) as usize;
                 for x in (x_start..x_end).step_by(2) {
                     let pixel_offset = row_offset + (x * 4) as usize;
@@ -709,38 +795,32 @@ impl ZoneSampler {
                         };
 
                         let pix = RgbColor::new(r, g, b);
-                        let luma = pix.luminance();
-                        if luma > max_luma {
-                            max_luma = luma;
-                            peak_pixel = pix;
-                        }
 
                         // Saturation weighting: vivid accents get higher weight so they aren't diluted by grey
                         let sat = pix.saturation();
-                        let weight = self.processor.sample_weight(sat);
+                        let spatial = if room {
+                            x_weights[((x - x_start) / 2) as usize] * y_weight
+                        } else {
+                            1.0
+                        };
+                        let weight = self.processor.sample_weight(sat) * spatial;
 
-                        weighted_r += (r as f32) * weight;
-                        weighted_g += (g as f32) * weight;
-                        weighted_b += (b as f32) * weight;
-                        total_weight += weight;
+                        region.add(pix, weight);
                     }
                 }
             }
 
-            let mean_color = if total_weight > 0.0 {
-                FloatColor::new(
-                    (weighted_r / total_weight).clamp(0.0, 255.0),
-                    (weighted_g / total_weight).clamp(0.0, 255.0),
-                    (weighted_b / total_weight).clamp(0.0, 255.0),
-                )
-            } else {
-                FloatColor::default()
-            };
+            let (mean_color, highlight, max_luma) = region.finish();
 
             let current = self.smoothed_colors[i];
-            let smoothed = self.processor.process(
+            let processor = if room {
+                self.processor.for_room()
+            } else {
+                self.processor.clone()
+            };
+            let smoothed = processor.process(
                 mean_color,
-                peak_pixel.into(),
+                highlight,
                 max_luma,
                 current,
                 is_scene_cut,
@@ -749,11 +829,11 @@ impl ZoneSampler {
             self.smoothed_colors[i] = smoothed;
         }
 
-        (self.output_colors(), is_scene_cut)
+        output.clone_from(&self.smoothed_colors);
+        (self.output_colors(output), is_scene_cut)
     }
 
-    fn output_colors(&self) -> Vec<(u8, RgbColor)> {
-        let mut results = self.smoothed_colors.clone();
+    fn output_colors(&self, mut results: Vec<FloatColor>) -> Vec<(u8, RgbColor)> {
         self.processor.blend_spatial(&mut results, |i| {
             let z = &self.zones[i];
             ((z.x_min + z.x_max) * 0.5, (z.y_min + z.y_max) * 0.5)
@@ -783,6 +863,109 @@ fn limit_color_step(current: FloatColor, target: FloatColor, max_step: f32) -> F
 #[cfg(test)]
 mod tests {
     #[test]
+    fn room_response_is_gentler_than_edges_and_keeps_black_immediate() {
+        let mut edge = ColorProcessor::new(0.35, false, 1.0, 0.0);
+        edge.set_peak_weight(0.0);
+        edge.set_max_color_step(255);
+        edge.set_strict_blackout(true);
+        let room = edge.for_room();
+        let current = FloatColor::new(100.0, 100.0, 100.0);
+        let target = FloatColor::new(200.0, 0.0, 0.0);
+        let fast = edge.process(target, target, 1.0, current, false, REFERENCE_FRAME);
+        let gentle = room.process(target, target, 1.0, current, false, REFERENCE_FRAME);
+        assert!(gentle.r < fast.r);
+        assert!(gentle.g > fast.g);
+        let red = FloatColor::new(100.0, 0.0, 0.0);
+        let green = FloatColor::new(0.0, 100.0, 0.0);
+        let shifted = room.process(green, green, 1.0, red, false, REFERENCE_FRAME);
+        assert!((shifted.r.max(shifted.g).max(shifted.b) - 100.0).abs() < 0.001);
+        assert_eq!(
+            room.process(
+                FloatColor::default(),
+                FloatColor::default(),
+                0.0,
+                current,
+                false,
+                REFERENCE_FRAME
+            ),
+            FloatColor::default()
+        );
+    }
+
+    #[test]
+    fn black_hysteresis_requires_more_light_to_wake_than_to_remain_lit() {
+        let mut processor = ColorProcessor::new(1.0, false, 1.0, 0.02);
+        processor.set_peak_weight(0.0);
+        processor.set_strict_blackout(true);
+        let target = FloatColor::new(6.0, 6.0, 6.0);
+        assert_eq!(
+            processor.process(
+                target,
+                target,
+                0.1,
+                FloatColor::default(),
+                false,
+                REFERENCE_FRAME
+            ),
+            FloatColor::default()
+        );
+        let lit = processor.process(
+            target,
+            target,
+            0.1,
+            FloatColor::new(3.0, 3.0, 3.0),
+            false,
+            REFERENCE_FRAME,
+        );
+        assert!(lit.r > 0.0);
+    }
+
+    #[test]
+    fn single_channel_room_footprints_expand_without_moving_gradient_channels() {
+        let mut room = LightZone::from_3d_position(2, "Fixture", [0.0, 0.0, 0.0]);
+        room.hue_device_id = Some("fixture-device".into());
+        room.hue_segment_count = Some(1);
+        let mut gradient = room.clone();
+        gradient.hue_segment_count = Some(7);
+        room.set_depth_influence(0.5);
+        gradient.set_depth_influence(0.5);
+        assert!(room.uses_room_sampling());
+        assert!(!gradient.uses_room_sampling());
+        assert!(
+            (room.x_max - room.x_min - 1.5 * (gradient.x_max - gradient.x_min)).abs() < 0.00001
+        );
+        assert_eq!(room.hue_channel_position, gradient.hue_channel_position);
+        assert_eq!(room.channel_id, 2);
+        room.hue_segment_count = None;
+        assert!(!room.uses_room_sampling());
+
+        let mut corner = LightZone::from_3d_position(2, "Fixture", [-1.0, 0.0, 1.0]);
+        corner.hue_device_id = Some("fixture-device".into());
+        corner.hue_segment_count = Some(1);
+        corner.set_depth_influence(0.5);
+        let mut uniform = corner.clone();
+        uniform.hue_device_id = None;
+        let mut gaussian = ZoneSampler::new(vec![corner], 1.0, false, false, 1.0, 0.0);
+        let mut box_sample = ZoneSampler::new(vec![uniform], 1.0, false, false, 1.0, 0.0);
+        gaussian.set_peak_weight(0.0);
+        box_sample.set_peak_weight(0.0);
+        gaussian.set_max_color_step(255);
+        box_sample.set_max_color_step(255);
+        let mut pixels = vec![0u8; 64 * 64 * 4];
+        for y in 0..64 {
+            for x in 0..64 {
+                pixels[(y * 64 + x) * 4 + if x < 4 { 0 } else { 2 }] = 180;
+            }
+        }
+        let g = gaussian.sample_frame(&pixels, 64, 64, false).0[0].1;
+        let b = box_sample.sample_frame(&pixels, 64, 64, false).0[0].1;
+        assert!(
+            g.r > b.r && g.b < b.b,
+            "Gaussian must favour the true corner: {g:?} vs {b:?}"
+        );
+    }
+
+    #[test]
     fn whole_screen_black_holds_before_strict_black_and_resets_without_stale_colours() {
         let zone = LightZone::from_3d_position(7, "Fixture", [0.0, -1.0, 0.0]);
         let mut sampler = ZoneSampler::new(vec![zone], 1.0, false, true, 1.0, 0.02);
@@ -793,6 +976,15 @@ mod tests {
             .fill(FloatColor::new(80.0, 40.0, 20.0));
         let (held, cut) = sampler.sample_frame(&[0; 64], 4, 4, false);
         assert_eq!(held, vec![(7, RgbColor::new(80, 40, 20))]);
+        sampler.set_black_frame_timing(0, 1);
+        sampler.sample_frame(&[0; 64], 4, 4, false);
+        std::thread::sleep(Duration::from_millis(3));
+        let (faded, _) = sampler.sample_frame(&[0; 64], 4, 4, false);
+        assert_eq!(faded, vec![(7, RgbColor::new(0, 0, 0))]);
+        assert_eq!(
+            sampler.smoothed_colors,
+            vec![FloatColor::new(80.0, 40.0, 20.0)]
+        );
         assert!(!cut);
         assert_eq!(sampler.active_rect, ActiveRect::default());
         sampler.reset_black_frame();

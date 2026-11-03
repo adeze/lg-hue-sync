@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-03
+
+### Changed
+- Use robust regional colour estimates for Hue and Nanoleaf: trim the lowest and highest 1% of weighted luminance mass, and average bright pixels instead of selecting one brightest pixel.
+- Give identified single-channel Hue fixtures wider Gaussian sampling footprints anchored to their authoritative Hue positions, with gentler independent brightness and colour response. Preserve narrow Nanoleaf 4D perimeter regions, multi-segment Hue gradient channels and legacy/manual geometry.
+- Add regional black-gate hysteresis to reduce threshold chatter while preserving Strict black and whole-screen hold/fade behaviour.
+
+### Fixed
+- Apply black-frame hold/fade only to output copies, preserving normal colour-smoothing history when picture returns.
+- Preserve brightness while smoothing between equally bright colours, and retain authoritative Gaussian centres where footprints meet screen edges.
+
+### Validation
+- Host checks cover 140 Rust tests, 9 frontend tests, Svelte diagnostics, formatting, Clippy and release metadata. Native ARMv7 builds pass ELF32, soft-float, loader and glibc <= 2.28 checks.
+- The pre-version-bump feature build was deployed with matching binary hashes, retained rollback, preserved credentials/settings, active hardware capture and both output connections. The user confirmed Hue Color Lamp 2 stays steady on a paused non-black frame with hold/fade enabled after the output-history correction.
+- Physical black-screen fade and return-to-picture behaviour remain unverified. Published daemon assets are independently built by CI; launcher-only packages and manifests remain unpublished.
+
 ## [1.0.2] - 2026-11-03
 
 ### Added

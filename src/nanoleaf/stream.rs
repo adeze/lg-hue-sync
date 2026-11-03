@@ -542,11 +542,12 @@ impl NanoleafPerimeterSampler {
             .replace(now)
             .map(|last| now.duration_since(last))
             .unwrap_or(REFERENCE_FRAME);
+        let mut output = self.smoothed_colors.clone();
         if self
             .black_frame
-            .apply(frame_data, width, height, &mut self.smoothed_colors, now)
+            .apply(frame_data, width, height, &mut output, now)
         {
-            return self.output_colors();
+            return self.output_colors(output);
         }
         let (act_x_min, act_x_max, act_y_min, act_y_max) = match self.active_rect {
             Some(rect) => (rect.x_min, rect.x_max, rect.y_min, rect.y_max),
@@ -571,12 +572,7 @@ impl NanoleafPerimeterSampler {
                 .min(height)
                 .max(y_start + 1);
 
-            let mut weighted_r = 0.0f32;
-            let mut weighted_g = 0.0f32;
-            let mut weighted_b = 0.0f32;
-            let mut total_weight = 0.0f32;
-            let mut peak_pixel = RgbColor::new(0, 0, 0);
-            let mut max_luma = 0.0f32;
+            let mut region = crate::color::sampling::RegionSample::default();
 
             // 2x2 spatial subsampling for zero-lag 60 FPS performance
             for y in (y_start..y_end).step_by(2) {
@@ -594,36 +590,20 @@ impl NanoleafPerimeterSampler {
                     };
 
                     let pix = RgbColor::new(r_raw, g_raw, b_raw);
-                    let luma = pix.luminance();
-                    if luma > max_luma {
-                        max_luma = luma;
-                        peak_pixel = pix;
-                    }
 
                     let sat = pix.saturation();
                     let weight = self.processor.sample_weight(sat);
 
-                    weighted_r += (r_raw as f32) * weight;
-                    weighted_g += (g_raw as f32) * weight;
-                    weighted_b += (b_raw as f32) * weight;
-                    total_weight += weight;
+                    region.add(pix, weight);
                 }
             }
 
-            let mean_color = if total_weight > 0.0 {
-                FloatColor::new(
-                    (weighted_r / total_weight).clamp(0.0, 255.0),
-                    (weighted_g / total_weight).clamp(0.0, 255.0),
-                    (weighted_b / total_weight).clamp(0.0, 255.0),
-                )
-            } else {
-                FloatColor::default()
-            };
+            let (mean_color, highlight, max_luma) = region.finish();
 
             let current = self.smoothed_colors[i];
             let smoothed = self.processor.process(
                 mean_color,
-                peak_pixel.into(),
+                highlight,
                 max_luma,
                 current,
                 is_scene_cut,
@@ -632,11 +612,11 @@ impl NanoleafPerimeterSampler {
             self.smoothed_colors[i] = smoothed;
         }
 
-        self.output_colors()
+        output.clone_from(&self.smoothed_colors);
+        self.output_colors(output)
     }
 
-    fn output_colors(&self) -> Vec<RgbColor> {
-        let mut result = self.smoothed_colors.clone();
+    fn output_colors(&self, mut result: Vec<FloatColor>) -> Vec<RgbColor> {
         self.processor.blend_spatial(&mut result, |i| {
             let z = &self.zones[i];
             ((z.x_min + z.x_max) * 0.5, (z.y_min + z.y_max) * 0.5)
@@ -660,6 +640,17 @@ mod tests {
             .fill(FloatColor::new(80.0, 40.0, 20.0));
         let held = sampler.sample_frame(&[0; 64], 4, 4, false, true);
         assert_eq!(held, vec![RgbColor::new(40, 20, 10); 4]);
+        sampler.set_black_frame_timing(0, 1);
+        sampler.sample_frame(&[0; 64], 4, 4, false, false);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_eq!(
+            sampler.sample_frame(&[0; 64], 4, 4, false, false),
+            vec![RgbColor::new(0, 0, 0); 4]
+        );
+        assert_eq!(
+            sampler.smoothed_colors,
+            vec![FloatColor::new(80.0, 40.0, 20.0); 4]
+        );
         sampler.set_alignment(NanoleafAlignment::default());
         sampler.set_black_frame_timing(1000, 3000);
         assert_eq!(sampler.sample_frame(&[0; 64], 4, 4, false, true), held);

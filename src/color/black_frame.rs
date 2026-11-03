@@ -27,7 +27,7 @@ impl BlackFrameGuard {
         self.held.clear();
     }
 
-    /// Update temporal state directly so picture recovery starts from the faded output.
+    /// Fade an output copy; callers must preserve their normal sampling history.
     /// RGB/BGRA order is immaterial: every colour component must be near zero.
     pub fn apply(
         &mut self,

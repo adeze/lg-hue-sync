@@ -263,6 +263,11 @@ pub struct Config {
     /// When a sampled region passes the black gate, turn that output fully off without afterglow.
     #[serde(default)]
     pub strict_blackout: bool,
+    /// Whole-screen black hold and fade; both zero disables protection.
+    #[serde(default = "default_black_frame_hold_ms")]
+    pub black_frame_hold_ms: u32,
+    #[serde(default = "default_black_frame_fade_ms")]
+    pub black_frame_fade_ms: u32,
     /// Maximum per-component RGB change per reference frame at 30 FPS.
     #[serde(default = "default_max_color_step")]
     pub max_color_step: u8,
@@ -318,6 +323,14 @@ fn default_gamma() -> f32 {
 
 fn default_noise_gate() -> f32 {
     0.02
+}
+
+pub fn default_black_frame_hold_ms() -> u32 {
+    750
+}
+
+pub fn default_black_frame_fade_ms() -> u32 {
+    2000
 }
 
 fn default_smoothing_factor() -> f32 {
@@ -462,6 +475,8 @@ impl Config {
             rise_smoothing_factor: 0.35,
             fall_smoothing_factor: 0.35,
             strict_blackout: false,
+            black_frame_hold_ms: default_black_frame_hold_ms(),
+            black_frame_fade_ms: default_black_frame_fade_ms(),
             max_color_step: 12,
             adaptive_throttling: true,
             zones: default_zones(),

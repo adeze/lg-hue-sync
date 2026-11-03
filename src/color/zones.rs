@@ -385,6 +385,7 @@ pub struct ZoneSampler {
     zones: Vec<LightZone>,
     smoothed_colors: Vec<FloatColor>,
     processor: ColorProcessor,
+    black_frame: super::black_frame::BlackFrameGuard,
     letterbox_detection: bool,
     active_rect: ActiveRect,
     frame_count: u64,
@@ -417,6 +418,7 @@ impl ZoneSampler {
                 saturation_boost,
                 noise_gate_threshold,
             ),
+            black_frame: Default::default(),
             letterbox_detection,
             active_rect: ActiveRect::default(),
             frame_count: 0,
@@ -440,6 +442,16 @@ impl ZoneSampler {
 
     pub fn set_strict_blackout(&mut self, enabled: bool) {
         self.processor.set_strict_blackout(enabled);
+    }
+
+    pub fn set_black_frame_timing(&mut self, hold_ms: u32, fade_ms: u32) {
+        self.black_frame.configure(hold_ms, fade_ms);
+    }
+
+    pub fn reset_black_frame(&mut self) {
+        self.black_frame.reset();
+        self.smoothed_colors.fill(FloatColor::default());
+        self.last_sample = None;
     }
 
     pub fn set_hdr_tone_mapping(&mut self, enabled: bool) {
@@ -589,6 +601,12 @@ impl ZoneSampler {
             .replace(now)
             .map(|last| now.duration_since(last))
             .unwrap_or(REFERENCE_FRAME);
+        if self
+            .black_frame
+            .apply(data, width, height, &mut self.smoothed_colors, now)
+        {
+            return (self.output_colors(), false);
+        }
         self.frame_count += 1;
 
         // Run letterbox detector periodically (every 15 frames) or on first frame
@@ -646,8 +664,6 @@ impl ZoneSampler {
         let is_scene_cut =
             self.frame_count > 1 && current_global_color.delta(self.last_global_color) > 0.35;
         self.last_global_color = current_global_color;
-
-        let mut results = Vec::with_capacity(self.zones.len());
 
         let act_x_min = self.active_rect.x_min;
         let act_x_range = (self.active_rect.x_max - act_x_min).max(0.1);
@@ -731,21 +747,22 @@ impl ZoneSampler {
                 elapsed,
             );
             self.smoothed_colors[i] = smoothed;
-
-            results.push(smoothed);
         }
 
+        (self.output_colors(), is_scene_cut)
+    }
+
+    fn output_colors(&self) -> Vec<(u8, RgbColor)> {
+        let mut results = self.smoothed_colors.clone();
         self.processor.blend_spatial(&mut results, |i| {
             let z = &self.zones[i];
             ((z.x_min + z.x_max) * 0.5, (z.y_min + z.y_max) * 0.5)
         });
-        let results = self
-            .zones
+        self.zones
             .iter()
             .zip(results)
             .map(|(z, c)| (z.channel_id, c.to_rgb()))
-            .collect();
-        (results, is_scene_cut)
+            .collect()
     }
 
     #[allow(dead_code)]
@@ -765,6 +782,30 @@ fn limit_color_step(current: FloatColor, target: FloatColor, max_step: f32) -> F
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn whole_screen_black_holds_before_strict_black_and_resets_without_stale_colours() {
+        let zone = LightZone::from_3d_position(7, "Fixture", [0.0, -1.0, 0.0]);
+        let mut sampler = ZoneSampler::new(vec![zone], 1.0, false, true, 1.0, 0.02);
+        sampler.set_strict_blackout(true);
+        sampler.set_black_frame_timing(750, 2000);
+        sampler
+            .smoothed_colors
+            .fill(FloatColor::new(80.0, 40.0, 20.0));
+        let (held, cut) = sampler.sample_frame(&[0; 64], 4, 4, false);
+        assert_eq!(held, vec![(7, RgbColor::new(80, 40, 20))]);
+        assert!(!cut);
+        assert_eq!(sampler.active_rect, ActiveRect::default());
+        sampler.reset_black_frame();
+        let (black, _) = sampler.sample_frame(&[0; 64], 4, 4, true);
+        assert_eq!(black, vec![(7, RgbColor::new(0, 0, 0))]);
+        sampler
+            .smoothed_colors
+            .fill(FloatColor::new(80.0, 40.0, 20.0));
+        sampler.set_black_frame_timing(0, 0);
+        let (disabled, _) = sampler.sample_frame(&[0; 64], 4, 4, false);
+        assert_eq!(disabled, vec![(7, RgbColor::new(0, 0, 0))]);
+    }
+
     #[test]
     fn live_depth_changes_sampling_without_replacing_channel_state() {
         let zone = LightZone::from_3d_position(7, "Gradient", [0.0, -1.0, 0.0]);

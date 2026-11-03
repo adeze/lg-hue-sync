@@ -6,6 +6,8 @@
   "entertainment_area_id": "1",
   "fps": 30,
   "brightness_multiplier": 1.0,
+  "black_frame_hold_ms": 750,
+  "black_frame_fade_ms": 2000,
   "zones": [
     {
       "channel_id": 0,

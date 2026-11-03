@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-03
+
+### Added
+- Hold the last Hue and Nanoleaf colours during whole-screen black interruptions for 750 ms, then fade to off over 2000 ms. Returning picture cancels the fade; individual dark regions retain Strict black behaviour.
+- Add independent hold/fade controls under Processing options, with validated persisted settings and backwards-compatible defaults. Set both durations to zero to disable protection; colour presets preserve them.
+- Add QSync web app installation guidance, a web manifest and embedded icons. Browser support determines installation availability; no offline cache or service worker is installed.
+
+### Fixed
+- Preserve Nanoleaf colour history when live settings resend unchanged alignment. Clear held colours on actual alignment changes, Stop, source pauses and output disable.
+
+### Validation
+- Host checks cover 134 Rust tests, 9 frontend tests, Svelte diagnostics, formatting, Clippy and release metadata. Native ARMv7 builds pass ELF32, soft-float, loader and glibc <= 2.28 checks.
+- The pre-version-bump feature build was installed on the TV with matching binary hashes, a retained rollback binary, active hardware capture and both output connections. Configuration changed only to add the two new timing defaults. Physical fade behaviour remains unverified.
+- Published daemon assets are independently built by Docker CI; launcher-only packages and manifests remain unpublished.
+
 ## [1.0.1] - 2026-10-30
 
 ### Changed

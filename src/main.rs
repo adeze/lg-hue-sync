@@ -562,6 +562,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     if let Some(ref mut sampler) = hue_sampler {
         sampler.set_temporal_response(config.rise_smoothing_factor, config.fall_smoothing_factor);
         sampler.set_strict_blackout(config.strict_blackout);
+        sampler.set_black_frame_timing(config.black_frame_hold_ms, config.black_frame_fade_ms);
         sampler.set_peak_weight(config.peak_weight);
         sampler.set_spatial_blend(config.spatial_blend);
         sampler.set_gamma(config.gamma);
@@ -605,6 +606,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     if let Some(ref mut sampler) = nanoleaf_sampler {
         sampler.set_temporal_response(config.rise_smoothing_factor, config.fall_smoothing_factor);
         sampler.set_strict_blackout(config.strict_blackout);
+        sampler.set_black_frame_timing(config.black_frame_hold_ms, config.black_frame_fade_ms);
         sampler.set_peak_weight(config.peak_weight);
         sampler.set_spatial_blend(config.spatial_blend);
         sampler.set_gamma(config.gamma);
@@ -675,6 +677,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         rise_smoothing_factor: config.rise_smoothing_factor,
         fall_smoothing_factor: config.fall_smoothing_factor,
         strict_blackout: config.strict_blackout,
+        black_frame_hold_ms: config.black_frame_hold_ms,
+        black_frame_fade_ms: config.black_frame_fade_ms,
         use_xy_gamut: config.use_xy_gamut,
         letterbox_detection: config.letterbox_detection,
         hdr_tone_mapping: config.hdr_tone_mapping,
@@ -869,6 +873,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 shared_state.set_sync_state(SyncState::Stopping, None);
             }
             release_capture(&mut capture);
+            if let Some(sampler) = &mut hue_sampler {
+                sampler.reset_black_frame();
+            }
+            if let Some(sampler) = &mut nanoleaf_sampler {
+                sampler.reset_black_frame();
+            }
             shared_state
                 .capture_hardware
                 .store(false, Ordering::Relaxed);
@@ -1098,6 +1108,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
             *shared_state.hue_zones.write().unwrap() = config.zones.clone();
             if hue_sync_enabled != live_st.hue_sync_enabled {
+                if let Some(sampler) = &mut hue_sampler {
+                    sampler.reset_black_frame();
+                }
                 hue_status.request(None);
                 hue_sync_enabled = live_st.hue_sync_enabled;
                 hue_status.blocked = hue_status.needs_refresh;
@@ -1113,6 +1126,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             }
 
             if nanoleaf_sync_enabled != live_st.nanoleaf_sync_enabled {
+                if let Some(sampler) = &mut nanoleaf_sampler {
+                    sampler.reset_black_frame();
+                }
                 nanoleaf_sync_enabled = live_st.nanoleaf_sync_enabled;
                 if nanoleaf_sync_enabled && pipeline_state == PipelineState::Running {
                     if let (Some(n_cfg), Some(sampler)) =
@@ -1150,6 +1166,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     live_st.fall_smoothing_factor,
                 );
                 s.set_strict_blackout(live_st.strict_blackout);
+                s.set_black_frame_timing(live_st.black_frame_hold_ms, live_st.black_frame_fade_ms);
                 s.set_hdr_tone_mapping(live_st.hdr_tone_mapping);
                 s.set_letterbox_detection(live_st.letterbox_detection);
                 s.set_saturation_boost(live_st.saturation_boost);
@@ -1166,6 +1183,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     live_st.fall_smoothing_factor,
                 );
                 ns.set_strict_blackout(live_st.strict_blackout);
+                ns.set_black_frame_timing(live_st.black_frame_hold_ms, live_st.black_frame_fade_ms);
                 ns.set_hdr_tone_mapping(live_st.hdr_tone_mapping);
                 ns.set_saturation_boost(live_st.saturation_boost);
                 ns.set_brightness_multiplier(
@@ -1208,6 +1226,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 save_cfg.rise_smoothing_factor = live_st.rise_smoothing_factor;
                 save_cfg.fall_smoothing_factor = live_st.fall_smoothing_factor;
                 save_cfg.strict_blackout = live_st.strict_blackout;
+                save_cfg.black_frame_hold_ms = live_st.black_frame_hold_ms;
+                save_cfg.black_frame_fade_ms = live_st.black_frame_fade_ms;
                 save_cfg.use_xy_gamut = live_st.use_xy_gamut;
                 save_cfg.letterbox_detection = live_st.letterbox_detection;
                 save_cfg.hdr_tone_mapping = live_st.hdr_tone_mapping;
@@ -1281,6 +1301,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                             live_st.fall_smoothing_factor,
                         );
                         sampler.set_strict_blackout(live_st.strict_blackout);
+                        sampler.set_black_frame_timing(
+                            live_st.black_frame_hold_ms,
+                            live_st.black_frame_fade_ms,
+                        );
                         sampler.set_peak_weight(live_st.peak_weight);
                         sampler.set_spatial_blend(live_st.spatial_blend);
                         sampler.set_gamma(live_st.gamma);
@@ -1407,6 +1431,12 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 shared_state.set_sync_state(SyncState::Stopping, None);
             }
             release_capture(&mut capture);
+            if let Some(sampler) = &mut hue_sampler {
+                sampler.reset_black_frame();
+            }
+            if let Some(sampler) = &mut nanoleaf_sampler {
+                sampler.reset_black_frame();
+            }
             shared_state
                 .capture_hardware
                 .store(false, Ordering::Relaxed);

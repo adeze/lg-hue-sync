@@ -49,6 +49,8 @@ Apple Shortcuts can apply a dashboard preset over the trusted LAN with a `POST` 
 
 ## Install and update
 
+The dashboard includes a web app manifest and QSync icons. In **Devices → QSync app**, find installation guidance or an install button when supported. On iPhone/iPad, use Safari **Share → Add to Home Screen**; on Mac, **File → Add to Dock**. Automatic PWA install prompts require HTTPS (or localhost during development); the TV's plain HTTP LAN address may only support manual installation or a shortcut, depending on the browser. The app requires a reachable TV and does not cache controls or frames offline. No service worker or additional TV process is installed.
+
 First installation, after root SSH already works:
 
 ```bash

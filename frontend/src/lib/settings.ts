@@ -12,6 +12,8 @@ export interface LiveSettings {
   rise_smoothing_factor: number;
   fall_smoothing_factor: number;
   strict_blackout: boolean;
+  black_frame_hold_ms: number;
+  black_frame_fade_ms: number;
   use_xy_gamut: boolean;
   letterbox_detection: boolean;
   hdr_tone_mapping: boolean;
@@ -39,6 +41,8 @@ export const initialSettings: LiveSettings = {
   rise_smoothing_factor: 0.35,
   fall_smoothing_factor: 0.35,
   strict_blackout: false,
+  black_frame_hold_ms: 750,
+  black_frame_fade_ms: 2000,
   use_xy_gamut: false,
   letterbox_detection: true,
   hdr_tone_mapping: false,

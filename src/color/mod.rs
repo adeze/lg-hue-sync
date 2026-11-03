@@ -1,3 +1,4 @@
+pub(crate) mod black_frame;
 pub mod gamut;
 pub mod zones;
 

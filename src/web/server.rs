@@ -77,6 +77,14 @@ pub struct LiveSettings {
     #[serde(default)]
     #[schema(default = false)]
     pub strict_blackout: bool,
+    /// Hold the last colours during a whole-screen black interruption.
+    #[serde(default = "crate::config::default_black_frame_hold_ms")]
+    #[schema(minimum = 0, maximum = 5000, default = 750)]
+    pub black_frame_hold_ms: u32,
+    /// Fade to black after the hold; both durations zero disables protection.
+    #[serde(default = "crate::config::default_black_frame_fade_ms")]
+    #[schema(minimum = 0, maximum = 10000, default = 2000)]
+    pub black_frame_fade_ms: u32,
     pub use_xy_gamut: bool,
     pub letterbox_detection: bool,
     pub hdr_tone_mapping: bool,
@@ -150,6 +158,11 @@ impl LiveSettings {
                     "{name} must be between {min} and {max}"
                 )));
             }
+        }
+        if self.black_frame_hold_ms > 5000 || self.black_frame_fade_ms > 10000 {
+            return Err(ApiError::BadRequest(
+                "black_frame_hold_ms must be between 0 and 5000; black_frame_fade_ms must be between 0 and 10000".to_string(),
+            ));
         }
         if !(4..=64).contains(&self.max_color_step) {
             return Err(ApiError::BadRequest(
@@ -752,6 +765,51 @@ fn build_router(state: AppState) -> anyhow::Result<Router> {
         .route("/", get(root))
         .route("/index.html", get(root))
         .route(
+            "/manifest.webmanifest",
+            get(|| async {
+                embedded_asset(
+                    "application/manifest+json",
+                    include_bytes!("../../frontend/public/manifest.webmanifest"),
+                )
+            }),
+        )
+        .route(
+            "/favicon.svg",
+            get(|| async {
+                embedded_asset(
+                    "image/svg+xml",
+                    include_bytes!("../../frontend/public/favicon.svg"),
+                )
+            }),
+        )
+        .route(
+            "/icon-192.png",
+            get(|| async {
+                embedded_asset(
+                    "image/png",
+                    include_bytes!("../../frontend/public/icon-192.png"),
+                )
+            }),
+        )
+        .route(
+            "/icon-512.png",
+            get(|| async {
+                embedded_asset(
+                    "image/png",
+                    include_bytes!("../../frontend/public/icon-512.png"),
+                )
+            }),
+        )
+        .route(
+            "/apple-touch-icon.png",
+            get(|| async {
+                embedded_asset(
+                    "image/png",
+                    include_bytes!("../../frontend/public/apple-touch-icon.png"),
+                )
+            }),
+        )
+        .route(
             "/assets/ios-haptics-3.3.0.js",
             get(|| async {
                 (
@@ -779,6 +837,16 @@ fn build_router(state: AppState) -> anyhow::Result<Router> {
 
 async fn root() -> Html<&'static str> {
     Html(EMBEDDED_UI_HTML)
+}
+
+fn embedded_asset(content_type: &'static str, bytes: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        bytes,
+    )
 }
 
 async fn capture_patterns() -> Html<&'static str> {
@@ -1485,6 +1553,61 @@ fn validate_device_ip(value: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn black_frame_settings_default_validate_and_survive_colour_presets() {
+        let mut value = serde_json::to_value(settings()).unwrap();
+        value.as_object_mut().unwrap().remove("black_frame_hold_ms");
+        value.as_object_mut().unwrap().remove("black_frame_fade_ms");
+        let mut input: LiveSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            (input.black_frame_hold_ms, input.black_frame_fade_ms),
+            (750, 2000)
+        );
+        for (hold, fade, valid) in [
+            (0, 0, true),
+            (5000, 10000, true),
+            (5001, 10000, false),
+            (5000, 10001, false),
+        ] {
+            input.black_frame_hold_ms = hold;
+            input.black_frame_fade_ms = fade;
+            assert_eq!(input.validate().is_ok(), valid);
+        }
+        input.black_frame_hold_ms = 1500;
+        input.black_frame_fade_ms = 3000;
+        Preset::named("neonContrast").unwrap().apply(&mut input);
+        assert_eq!(
+            (input.black_frame_hold_ms, input.black_frame_fade_ms),
+            (1500, 3000)
+        );
+
+        let mut config = serde_json::to_value(Config::new_default(
+            "fixture", "fixture", "fixture", "fixture",
+        ))
+        .unwrap();
+        config
+            .as_object_mut()
+            .unwrap()
+            .remove("black_frame_hold_ms");
+        config
+            .as_object_mut()
+            .unwrap()
+            .remove("black_frame_fade_ms");
+        let mut config: Config = serde_json::from_value(config).unwrap();
+        assert_eq!(
+            (config.black_frame_hold_ms, config.black_frame_fade_ms),
+            (750, 2000)
+        );
+        config.black_frame_hold_ms = input.black_frame_hold_ms;
+        config.black_frame_fade_ms = input.black_frame_fade_ms;
+        let restored: Config =
+            serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+        assert_eq!(
+            (restored.black_frame_hold_ms, restored.black_frame_fade_ms),
+            (1500, 3000)
+        );
+    }
+
     fn settings() -> LiveSettings {
         LiveSettings {
             brightness_multiplier: 1.0,
@@ -1500,6 +1623,8 @@ mod tests {
             rise_smoothing_factor: 0.35,
             fall_smoothing_factor: 0.35,
             strict_blackout: false,
+            black_frame_hold_ms: crate::config::default_black_frame_hold_ms(),
+            black_frame_fade_ms: crate::config::default_black_frame_fade_ms(),
             use_xy_gamut: false,
             letterbox_detection: true,
             hdr_tone_mapping: false,
@@ -1530,6 +1655,62 @@ mod tests {
             .unwrap(),
             receiver,
         )
+    }
+
+    #[tokio::test]
+    async fn pwa_assets_are_embedded_with_correct_types_and_revalidation() {
+        use tower::ServiceExt;
+        let (app, _receiver) = test_router();
+        for (path, content_type, expected) in [
+            (
+                "/manifest.webmanifest",
+                "application/manifest+json",
+                include_bytes!("../../frontend/public/manifest.webmanifest").as_slice(),
+            ),
+            (
+                "/favicon.svg",
+                "image/svg+xml",
+                include_bytes!("../../frontend/public/favicon.svg").as_slice(),
+            ),
+            (
+                "/icon-192.png",
+                "image/png",
+                include_bytes!("../../frontend/public/icon-192.png").as_slice(),
+            ),
+            (
+                "/icon-512.png",
+                "image/png",
+                include_bytes!("../../frontend/public/icon-512.png").as_slice(),
+            ),
+            (
+                "/apple-touch-icon.png",
+                "image/png",
+                include_bytes!("../../frontend/public/apple-touch-icon.png").as_slice(),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.headers()["content-type"], content_type, "{path}");
+            assert_eq!(response.headers()["cache-control"], "no-cache", "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), expected, "{path}");
+            if path == "/manifest.webmanifest" {
+                let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(manifest["name"], "QSync");
+                assert_eq!(manifest["display"], "standalone");
+            }
+        }
     }
 
     #[tokio::test]

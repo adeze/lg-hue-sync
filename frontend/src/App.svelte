@@ -18,6 +18,8 @@
   import Fader from './lib/Fader.svelte';
   import Preview from './lib/Preview.svelte';
   import Devices from './lib/Devices.svelte';
+  import InstallApp from './lib/InstallApp.svelte';
+  import BlackFrameSettings from './lib/BlackFrameSettings.svelte';
   import Diagnostics from './lib/Diagnostics.svelte';
   import { vibrate } from './lib/haptics';
   import { registerAgentTools } from './lib/agent-tools';
@@ -293,6 +295,11 @@
       <details class="processing">
         <summary>Processing options</summary>
         <div class="section-body">
+          <BlackFrameSettings
+            {settings}
+            disabled={model.busy}
+            onchange={(patch) => model.patch(patch)}
+          />
           <Segmented
             label="Depth influence"
             options={depthOptions}
@@ -331,6 +338,7 @@
   </div>
   <div id="panel-devices" role="tabpanel" aria-labelledby="tab-devices" hidden={tab !== 'devices'}>
     <Devices {model} />
+    <InstallApp />
   </div>
   <div
     id="panel-diagnostics"

@@ -80,6 +80,9 @@ footprints with separable Gaussian weights around their saved Hue centres; multi
 gradient channels and legacy/manual rectangles retain their existing geometry. Reported
 Hue rectangles reflect the expanded footprint. Room fixtures smooth brightness and normalised
 colour separately, at 60% of the ordinary response clock, with colour alpha capped at 0.25.
+Room highlight influence is additionally scaled by mean-to-maximum regional luminance,
+so sparse bright samples cannot overwhelm a dark footprint and bypass its black gate.
+Perimeter highlight weighting is unchanged; genuinely bright neutral regions remain valid.
 Scene cuts still use the existing step limit. Regional black gating uses 1.2-times the configured
 threshold to wake from black and 0.8-times to remain lit; Strict black still turns gated output off.
 Whole-screen black interruptions use a shared hold/fade guard before regional processing:

@@ -6,10 +6,11 @@ use crate::{
     hue, nanoleaf,
 };
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::get,
+    serve::ListenerExt,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -361,6 +362,9 @@ pub struct SharedState {
     active_preset: RwLock<Option<String>>,
     saved_presets: RwLock<BTreeMap<String, PresetTuning>>,
     pub preview: PreviewState,
+    pub stream_frames: PreviewState,
+    pub nv12_stream: Arc<crate::frame_stream::Nv12Stream>,
+    pub nv12_supported: AtomicBool,
     preview_render_gate: Arc<Semaphore>,
     preview_render_started: std::sync::Mutex<Option<std::time::Instant>>,
     diagnostics: RwLock<Diagnostics>,
@@ -403,6 +407,9 @@ impl SharedState {
             active_preset: RwLock::new(None),
             saved_presets: RwLock::new(BTreeMap::new()),
             preview: PreviewState::default(),
+            stream_frames: PreviewState::stream(),
+            nv12_stream: Arc::new(crate::frame_stream::Nv12Stream::default()),
+            nv12_supported: AtomicBool::new(false),
             preview_render_gate: Arc::new(Semaphore::new(1)),
             preview_render_started: std::sync::Mutex::new(None),
             diagnostics: RwLock::new(Diagnostics::default()),
@@ -550,6 +557,8 @@ impl SharedState {
     pub fn set_sync_state(&self, state: SyncState, error: Option<String>) {
         if state != SyncState::Running {
             self.preview.clear();
+            self.stream_frames.clear();
+            self.nv12_stream.clear();
         }
         let mut status = self.sync_status.write().unwrap();
         status.pipeline_state = state;
@@ -734,6 +743,12 @@ pub async fn start_web_server(
         }
     });
     tracker.spawn(async move {
+        let listener = listener.tap_io(|socket| {
+            // Deliver interactive replies and frame boundaries without Nagle batching.
+            if let Err(error) = socket.set_nodelay(true) {
+                tracing::debug!("Could not disable HTTP socket batching: {error}");
+            }
+        });
         if let Err(error) = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown.cancelled_owned())
             .await
@@ -751,6 +766,8 @@ fn build_router(state: AppState) -> anyhow::Result<Router> {
         .routes(routes!(display_status))
         .routes(routes!(display_control))
         .routes(routes!(preview_frame))
+        .routes(routes!(stream_frame))
+        .routes(routes!(nv12_stream))
         .routes(routes!(preview_render))
         .routes(routes!(set_bonjour))
         .routes(routes!(start))
@@ -911,6 +928,133 @@ async fn preview_frame(State(state): State<AppState>) -> Response {
             },
         ),
     }
+}
+
+/// Export RGB pixels from the existing capture; encode on the companion host.
+#[utoipa::path(
+    get, path = "/api/stream/frame", tag = "LG Hue Sync",
+    responses(
+        (status = 200, description = "RGB24 pixels, at most 320 by 180; X-Frame-Width, X-Frame-Height and X-Captured-Unix-Ms headers", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = 202, description = "Waiting for a captured frame", body = ErrorResponse),
+        (status = 409, description = "HDMI hardware capture is not running", body = ErrorResponse)
+    )
+)]
+async fn stream_frame(State(state): State<AppState>) -> Response {
+    let shared = &state.shared;
+    if shared.sync_status.read().unwrap().pipeline_state != SyncState::Running
+        || !shared.capture_hardware.load(Ordering::Relaxed)
+    {
+        shared.stream_frames.clear();
+        return preview_response(
+            StatusCode::CONFLICT,
+            ErrorResponse {
+                error: "Streaming requires HDMI playback with screen sync running.".into(),
+            },
+        );
+    }
+    match shared.stream_frames.request() {
+        Some(frame) => (
+            [
+                ("content-type", "application/octet-stream".to_owned()),
+                ("cache-control", "no-store".to_owned()),
+                ("x-frame-width", frame.width.to_string()),
+                ("x-frame-height", frame.height.to_string()),
+                ("x-captured-unix-ms", frame.captured_unix_ms.to_string()),
+            ],
+            frame.rgb,
+        )
+            .into_response(),
+        None => preview_response(
+            StatusCode::ACCEPTED,
+            ErrorResponse {
+                error: "Waiting for a captured frame.".into(),
+            },
+        ),
+    }
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+struct Nv12Query {
+    /// Independent export ceiling, 1 to 15 FPS; defaults to 10.
+    fps: Option<u32>,
+}
+
+/// Persistent length-prefixed NV12 frames; never acquires another capture owner.
+#[utoipa::path(
+    get, path = "/api/stream/nv12", tag = "LG Hue Sync",
+    params(Nv12Query),
+    responses(
+        (status = 200, description = "Length-prefixed JSON metadata followed by NV12 planes; bounded latest-frame stream", body = Vec<u8>, content_type = "application/x-qsync-nv12"),
+        (status = 400, description = "Export rate must be between 1 and 15 FPS"),
+        (status = 409, description = "HDMI capture is not running"),
+        (status = 429, description = "Another NV12 receiver owns the stream"),
+        (status = 501, description = "Current capture backend does not export NV12")
+    )
+)]
+async fn nv12_stream(State(state): State<AppState>, Query(query): Query<Nv12Query>) -> Response {
+    struct PacketOwner(Arc<Vec<u8>>);
+    impl AsRef<[u8]> for PacketOwner {
+        fn as_ref(&self) -> &[u8] {
+            self.0.as_slice()
+        }
+    }
+    let shared = state.shared;
+    let fps = query.fps.unwrap_or(10);
+    if !(1..=15).contains(&fps) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Export rate must be between 1 and 15 FPS.",
+        )
+            .into_response();
+    }
+    if shared.sync_status.read().unwrap().pipeline_state != SyncState::Running
+        || !shared.capture_hardware.load(Ordering::Relaxed)
+    {
+        return (
+            StatusCode::CONFLICT,
+            "HDMI hardware capture is not running.",
+        )
+            .into_response();
+    }
+    if !shared.nv12_supported.load(Ordering::Relaxed) {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "Current capture backend does not export NV12.",
+        )
+            .into_response();
+    }
+    let Ok((receiver, lease)) = shared.nv12_stream.subscribe(fps) else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Another receiver owns the NV12 stream.",
+        )
+            .into_response();
+    };
+    let stream =
+        futures_util::stream::unfold((receiver, lease), |(mut receiver, lease)| async move {
+            lease.renew();
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), receiver.changed()).await,
+                Ok(Ok(()))
+            ) {
+                return None;
+            }
+            let packet = receiver.borrow_and_update().clone()?;
+            Some((
+                Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_owner(PacketOwner(
+                    packet,
+                ))),
+                (receiver, lease),
+            ))
+        });
+    (
+        [
+            ("content-type", "application/x-qsync-nv12"),
+            ("cache-control", "no-store"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
 }
 
 /// Render static colour adjustments without applying settings or touching devices.
@@ -1728,6 +1872,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nv12_stream_is_bounded_exclusive_and_ends_on_capture_pause_without_commands() {
+        use futures_util::StreamExt;
+        use tower::ServiceExt;
+        let (sender, mut receiver) = mpsc::channel(2);
+        let shared = Arc::new(SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        ));
+        let initial_settings =
+            serde_json::to_value(&*shared.current_settings.read().unwrap()).unwrap();
+        let app = build_router(AppState {
+            shared: Arc::clone(&shared),
+            config_path: PathBuf::new(),
+            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
+        })
+        .unwrap();
+        let request = |uri| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(request("/api/stream/nv12?fps=0"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request("/api/stream/nv12"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        shared.capture_hardware.store(true, Ordering::Relaxed);
+        shared.set_sync_state(SyncState::Running, None);
+        assert_eq!(
+            app.clone()
+                .oneshot(request("/api/stream/nv12"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+        shared.nv12_supported.store(true, Ordering::Relaxed);
+        let response = app
+            .clone()
+            .oneshot(request("/api/stream/nv12?fps=10"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/x-qsync-nv12"
+        );
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            app.clone()
+                .oneshot(request("/api/stream/nv12"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        shared.nv12_stream.publish(2, 2, 2, &[16; 4], &[128; 2]);
+        let mut body = response.into_body().into_data_stream();
+        let packet = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let header_len = u32::from_be_bytes(packet[..4].try_into().unwrap()) as usize;
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&packet[4..4 + header_len]).unwrap();
+        assert_eq!(metadata["format"], "nv12");
+        assert_eq!(&packet[4 + header_len..], &[16, 16, 16, 16, 128, 128]);
+        shared.set_sync_state(SyncState::UnsupportedSource, None);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            serde_json::to_value(&*shared.current_settings.read().unwrap()).unwrap(),
+            initial_settings
+        );
+        shared.set_sync_state(SyncState::Running, None);
+        let response = app.oneshot(request("/api/stream/nv12")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+    }
+
+    #[tokio::test]
     async fn preview_requires_running_hardware_and_clears_on_source_pause() {
         use tower::ServiceExt;
         let (sender, _receiver) = mpsc::channel(2);
@@ -1774,6 +2021,81 @@ mod tests {
             .unwrap();
         let frame: PreviewFrame = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(frame.rgb, [10, 20, 30]);
+        shared.set_sync_state(SyncState::UnsupportedSource, None);
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        shared.set_sync_state(SyncState::Running, None);
+        assert_eq!(
+            app.oneshot(request()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_exports_raw_rgb_without_commands_and_clears_on_source_pause() {
+        use tower::ServiceExt;
+        let (sender, mut receiver) = mpsc::channel(2);
+        let shared = Arc::new(SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        ));
+        let app = build_router(AppState {
+            shared: shared.clone(),
+            config_path: PathBuf::new(),
+            bonjour: Arc::new(Mutex::new(watch::channel(false).0)),
+        })
+        .unwrap();
+        let request = || {
+            axum::http::Request::builder()
+                .uri("/api/stream/frame")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        shared.capture_hardware.store(true, Ordering::Relaxed);
+        shared.set_sync_state(SyncState::Running, None);
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        shared
+            .stream_frames
+            .publish(&crate::capture::CapturedFrame {
+                data: &[10, 20, 30, 255],
+                width: 1,
+                height: 1,
+                is_bgra: false,
+            });
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/octet-stream"
+        );
+        assert_eq!(response.headers()["x-frame-width"], "1");
+        assert_eq!(response.headers()["x-frame-height"], "1");
+        assert!(
+            response.headers()["x-captured-unix-ms"]
+                .to_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), [10, 20, 30]);
+        assert!(receiver.try_recv().is_err());
         shared.set_sync_state(SyncState::UnsupportedSource, None);
         assert_eq!(
             app.clone().oneshot(request()).await.unwrap().status(),
@@ -2008,12 +2330,14 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(document["info"]["version"], env!("CARGO_PKG_VERSION"));
         let paths = document["paths"].as_object().unwrap();
-        assert_eq!(paths.len(), 21);
+        assert_eq!(paths.len(), 23);
         for (path, method) in [
             ("/api/status", "get"),
             ("/api/display", "get"),
             ("/api/display/{action}", "post"),
             ("/api/preview/frame", "get"),
+            ("/api/stream/frame", "get"),
+            ("/api/stream/nv12", "get"),
             ("/api/preview/render", "post"),
             ("/api/bonjour", "post"),
             ("/api/start", "post"),

@@ -12,6 +12,7 @@
     "@lucide/svelte": "^1.64.0",
     "@tailwindcss/vite": "^4.3.3",
     "clsx": "^2.1.1",
+    "hls.js": "^1.7.4",
     "ios-haptics": "^3.3.0",
     "svelte": "^5.57.3",
     "tailwind-merge": "^3.7.0",

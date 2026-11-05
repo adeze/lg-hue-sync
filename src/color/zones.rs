@@ -350,8 +350,15 @@ impl ColorProcessor {
     ) -> FloatColor {
         // Preserve 30 FPS tuning without treating a capture stall as one giant color jump.
         let elapsed = elapsed.min(Duration::from_millis(100));
-        let mut target = if self.peak_weight > 0.0 && max_luma > 0.0 {
-            mean.lerp(peak, self.peak_weight)
+        // A room bulb represents the region: sparse highlights must not turn a
+        // mostly black footprint into a bright, neutral target before black gating.
+        let peak_weight = if self.room_response && max_luma > 0.0 {
+            self.peak_weight * (mean.luminance() / max_luma).clamp(0.0, 1.0)
+        } else {
+            self.peak_weight
+        };
+        let mut target = if peak_weight > 0.0 && max_luma > 0.0 {
+            mean.lerp(peak, peak_weight)
         } else {
             mean
         };
@@ -862,6 +869,60 @@ fn limit_color_step(current: FloatColor, target: FloatColor, max_step: f32) -> F
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sparse_white_highlights_cannot_wake_a_black_room_region() {
+        let mut sample = crate::color::sampling::RegionSample::default();
+        for _ in 0..1000 {
+            sample.add(RgbColor::new(0, 0, 0), 1.0);
+        }
+        for _ in 0..20 {
+            sample.add(RgbColor::new(255, 255, 255), 1.0);
+        }
+        let (mean, highlight, max_luma) = sample.finish();
+        let mut edge = ColorProcessor::new(0.35, false, 1.1, 0.025);
+        edge.set_peak_weight(0.4);
+        edge.set_saturation_boost(1.8);
+        edge.set_hdr_tone_mapping(true);
+        edge.set_strict_blackout(true);
+        edge.set_max_color_step(12);
+        let room = edge.for_room();
+        assert!(mean.luminance() < 0.025 * 0.8);
+        assert_eq!(highlight.to_rgb(), RgbColor::new(255, 255, 255));
+        for current in [FloatColor::default(), FloatColor::new(100.0, 20.0, 0.0)] {
+            for cut in [false, true] {
+                assert_eq!(
+                    room.process(mean, highlight, max_luma, current, cut, REFERENCE_FRAME),
+                    FloatColor::default(),
+                    "sparse highlight must not defeat the regional black gate"
+                );
+            }
+        }
+        // Perimeter highlights retain their independent response.
+        assert!(
+            edge.process(
+                mean,
+                highlight,
+                max_luma,
+                FloatColor::default(),
+                false,
+                REFERENCE_FRAME
+            )
+            .luminance()
+                > 0.0
+        );
+        // A genuinely bright neutral region remains allowed to produce white.
+        let white = FloatColor::new(200.0, 200.0, 200.0);
+        let lit = room.process(
+            white,
+            white,
+            white.luminance(),
+            FloatColor::default(),
+            false,
+            REFERENCE_FRAME,
+        );
+        assert!(lit.r > 0.0 && lit.r == lit.g && lit.g == lit.b);
+    }
+
     #[test]
     fn room_response_is_gentler_than_edges_and_keeps_black_immediate() {
         let mut edge = ColorProcessor::new(0.35, false, 1.0, 0.0);

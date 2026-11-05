@@ -191,13 +191,18 @@ select:disabled {
 }
 .dashboard-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.25rem;
   padding: 0.3rem;
   background: color-mix(in oklch, var(--field) 65%, transparent);
   border: 1px solid var(--card-border);
   border-radius: 1rem;
   margin-block-end: 1.25rem;
+}
+@media (max-width: 560px) {
+  .dashboard-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .dashboard-tabs [role='tab'] {
   border-radius: 0.8rem;

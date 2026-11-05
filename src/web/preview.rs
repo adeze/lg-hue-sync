@@ -29,11 +29,26 @@ pub struct PreviewFrame {
     pub captured_unix_ms: u64,
 }
 
-#[derive(Default)]
 pub struct PreviewState {
     requested_until: AtomicU64,
     next_copy: AtomicU64,
     frame: RwLock<Option<PreviewFrame>>,
+    max_width: u32,
+    max_height: u32,
+    copy_interval_ms: u64,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            requested_until: AtomicU64::new(0),
+            next_copy: AtomicU64::new(0),
+            frame: RwLock::new(None),
+            max_width: MAX_WIDTH,
+            max_height: MAX_HEIGHT,
+            copy_interval_ms: COPY_INTERVAL_MS,
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -45,6 +60,15 @@ fn now_ms() -> u64 {
 }
 
 impl PreviewState {
+    pub fn stream() -> Self {
+        Self {
+            max_width: 320,
+            max_height: 180,
+            copy_interval_ms: 167,
+            ..Self::default()
+        }
+    }
+
     pub fn request(&self) -> Option<PreviewFrame> {
         self.request_at(now_ms())
     }
@@ -89,12 +113,12 @@ impl PreviewState {
         if now < self.next_copy.load(Ordering::Relaxed) {
             return;
         }
-        let Some(copy) = copy_frame(frame, now) else {
+        let Some(copy) = copy_frame(frame, now, self.max_width, self.max_height) else {
             return;
         };
         *stored = Some(copy);
         self.next_copy
-            .store(now.saturating_add(COPY_INTERVAL_MS), Ordering::Relaxed);
+            .store(now.saturating_add(self.copy_interval_ms), Ordering::Relaxed);
     }
 
     pub fn clear(&self) {
@@ -106,7 +130,12 @@ impl PreviewState {
     }
 }
 
-fn copy_frame(frame: &CapturedFrame<'_>, now: u64) -> Option<PreviewFrame> {
+fn copy_frame(
+    frame: &CapturedFrame<'_>,
+    now: u64,
+    max_width: u32,
+    max_height: u32,
+) -> Option<PreviewFrame> {
     let source_len = usize::try_from(frame.width)
         .ok()?
         .checked_mul(usize::try_from(frame.height).ok()?)?
@@ -114,20 +143,20 @@ fn copy_frame(frame: &CapturedFrame<'_>, now: u64) -> Option<PreviewFrame> {
     if frame.width == 0 || frame.height == 0 || frame.data.len() < source_len {
         return None;
     }
-    let (width, height) = if frame.width <= MAX_WIDTH && frame.height <= MAX_HEIGHT {
+    let (width, height) = if frame.width <= max_width && frame.height <= max_height {
         (frame.width, frame.height)
-    } else if u64::from(frame.width) * u64::from(MAX_HEIGHT)
-        > u64::from(frame.height) * u64::from(MAX_WIDTH)
+    } else if u64::from(frame.width) * u64::from(max_height)
+        > u64::from(frame.height) * u64::from(max_width)
     {
         (
-            MAX_WIDTH,
-            (u64::from(frame.height) * u64::from(MAX_WIDTH) / u64::from(frame.width)).max(1) as u32,
+            max_width,
+            (u64::from(frame.height) * u64::from(max_width) / u64::from(frame.width)).max(1) as u32,
         )
     } else {
         (
-            (u64::from(frame.width) * u64::from(MAX_HEIGHT) / u64::from(frame.height)).max(1)
+            (u64::from(frame.width) * u64::from(max_height) / u64::from(frame.height)).max(1)
                 as u32,
-            MAX_HEIGHT,
+            max_height,
         )
     };
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
@@ -240,25 +269,64 @@ mod tests {
             height: 180,
             is_bgra: false,
         };
-        let rgb = copy_frame(&source, 1).unwrap();
+        let rgb = copy_frame(&source, 1, MAX_WIDTH, MAX_HEIGHT).unwrap();
         assert_eq!(
             (rgb.width, rgb.height, rgb.rgb.len()),
             (128, 72, 128 * 72 * 3)
         );
         assert_eq!(&rgb.rgb[..3], &[10, 20, 30]);
         source.is_bgra = true;
-        assert_eq!(&copy_frame(&source, 1).unwrap().rgb[..3], &[30, 20, 10]);
+        assert_eq!(
+            &copy_frame(&source, 1, MAX_WIDTH, MAX_HEIGHT).unwrap().rgb[..3],
+            &[30, 20, 10]
+        );
         source.width = 80;
         source.height = 160;
-        let portrait = copy_frame(&source, 1).unwrap();
+        let portrait = copy_frame(&source, 1, MAX_WIDTH, MAX_HEIGHT).unwrap();
         assert_eq!((portrait.width, portrait.height), (36, 72));
         source.data = &[];
-        assert!(copy_frame(&source, 1).is_none());
+        assert!(copy_frame(&source, 1, MAX_WIDTH, MAX_HEIGHT).is_none());
         source.width = u32::MAX;
         source.height = u32::MAX;
-        assert!(copy_frame(&source, 1).is_none());
+        assert!(copy_frame(&source, 1, MAX_WIDTH, MAX_HEIGHT).is_none());
         source.width = 0;
-        assert!(copy_frame(&source, 1).is_none());
+        assert!(copy_frame(&source, 1, MAX_WIDTH, MAX_HEIGHT).is_none());
+    }
+
+    #[test]
+    fn stream_keeps_capture_resolution_with_its_own_bounded_lease() {
+        let stream = PreviewState::stream();
+        let preview = PreviewState::default();
+        let pixels = [10, 20, 30, 255].repeat(640 * 360);
+        let source = CapturedFrame {
+            data: &pixels,
+            width: 640,
+            height: 360,
+            is_bgra: true,
+        };
+        stream.publish_at(&source, 100);
+        assert!(stream.frame.read().unwrap().is_none());
+        stream.request_at(100);
+        stream.publish_at(&source, 101);
+        let frame = stream.request_at(102).unwrap();
+        assert_eq!((frame.width, frame.height), (320, 180));
+        assert_eq!(frame.rgb.len(), 320 * 180 * 3);
+        assert_eq!(&frame.rgb[..3], &[30, 20, 10]);
+        let wide = CapturedFrame {
+            height: 200,
+            ..source
+        };
+        let wide_copy = copy_frame(&wide, 102, 320, 180).unwrap();
+        assert_eq!((wide_copy.width, wide_copy.height), (320, 100));
+        stream.publish_at(&source, 267);
+        assert_eq!(stream.request_at(267).unwrap().captured_unix_ms, 101);
+        stream.publish_at(&source, 268);
+        assert_eq!(stream.request_at(269).unwrap().captured_unix_ms, 268);
+        stream.publish_at(&source, 2_270);
+        assert!(stream.request_at(2_271).is_none());
+        assert!(preview.frame.read().unwrap().is_none());
+        stream.clear();
+        assert_eq!(stream.requested_until.load(Ordering::Relaxed), 0);
     }
 
     #[test]

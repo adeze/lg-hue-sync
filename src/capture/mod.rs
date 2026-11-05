@@ -91,6 +91,10 @@ pub trait ScreenCapture {
     fn is_real_hardware(&self) -> bool {
         false
     }
+    fn supports_nv12_stream(&self) -> bool {
+        false
+    }
+    fn set_nv12_stream(&mut self, _stream: &std::sync::Arc<crate::frame_stream::Nv12Stream>) {}
 }
 
 pub use dile_vt::{detect_source_fps, DileVtCapture, MockCapture};

@@ -2,6 +2,7 @@ mod capture;
 mod capture_source;
 mod color;
 mod config;
+mod frame_stream;
 mod hue;
 mod local_http;
 mod luna;
@@ -1502,10 +1503,15 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
 
         let hardware_frame = capture.is_real_hardware();
+        capture.set_nv12_stream(&shared_state.nv12_stream);
+        shared_state
+            .nv12_supported
+            .store(capture.supports_nv12_stream(), Ordering::Relaxed);
         match capture.acquire_frame() {
             Ok(frame) => {
                 if hardware_frame {
                     shared_state.preview.publish(&frame);
+                    shared_state.stream_frames.publish(&frame);
                     capture_recovery.frame_received(std::time::Instant::now());
                     shared_state.set_sync_state(SyncState::Running, None);
                 }

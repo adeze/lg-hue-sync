@@ -73,6 +73,7 @@ pub struct VtCapture {
     height: u32,
     stride: u32,
     rgb_buffer: Vec<u8>,
+    nv12_stream: Option<std::sync::Arc<crate::frame_stream::Nv12Stream>>,
     is_stopped: bool,
     last_addr0: usize,
     stale_count: u32,
@@ -359,6 +360,7 @@ impl VtCapture {
                 height,
                 stride,
                 rgb_buffer: vec![0; rgb_size],
+                nv12_stream: None,
                 is_stopped: false,
                 last_addr0: 0,
                 stale_count: 0,
@@ -490,6 +492,16 @@ pub(super) fn nv12_lengths(width: u32, height: u32, stride: u32) -> Result<(usiz
 }
 
 impl ScreenCapture for VtCapture {
+    fn supports_nv12_stream(&self) -> bool {
+        true
+    }
+
+    fn set_nv12_stream(&mut self, stream: &std::sync::Arc<crate::frame_stream::Nv12Stream>) {
+        if self.nv12_stream.is_none() {
+            self.nv12_stream = Some(std::sync::Arc::clone(stream));
+        }
+    }
+
     fn acquire_frame(&mut self) -> std::result::Result<CapturedFrame<'_>, CaptureError> {
         self.last_raw_stats = None;
         if self.is_stopped {
@@ -550,6 +562,9 @@ impl ScreenCapture for VtCapture {
         let y_plane = unsafe { std::slice::from_raw_parts(buf_info.start_addr0, y_len) };
         if !buf_info.start_addr1.is_null() {
             let uv_plane = unsafe { std::slice::from_raw_parts(buf_info.start_addr1, uv_len) };
+            if let Some(stream) = &self.nv12_stream {
+                stream.publish(self.width, self.height, self.stride, y_plane, uv_plane);
+            }
             if self.raw_stats_enabled {
                 self.last_raw_stats = Some(central_nv12_stats(
                     self.width,

@@ -1,5 +1,9 @@
 # LG AI, capture and tone mapping
 
+Status (2026-11-05): ZipDepth and depth-AI lighting experiments are shelved at the
+user’s request. No model or depth-AI weighting was enabled in live lighting.
+Retain offline evidence; do not resume integration without new direction.
+
 Observed locally on 2026-11-05. Native tracing establishes available code paths, not their current execution. Proprietary binaries and model weights remain in the private home-theatre archive; none are bundled with QSync.
 
 ## Genre diagnostics

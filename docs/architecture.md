@@ -31,6 +31,17 @@ reporting `paused`. Hardware release still requires on-TV verification. Resume c
 while intentionally paused retains that pause and does not acquire hardware. An explicit
 Start or Restart retries a capture fault. Standby startup does not initialize capture.
 
+`src/tv_events.rs` maintains foreground, power and video-output subscriptions through
+the bounded Luna transport. Latest-value watch channels deduplicate unchanged replies;
+only disconnected/refused streams use bounded query fallback and reconnect attempts.
+Power receipts are timestamped so cached observations cannot overwrite newer display
+commands. MAIN HDMI video events also supply automatic capture cadence and diagnostics.
+A separate five-second transition hold preserves successful output across known
+signal changes, without feeding held colours into sampling history. It ends on a ready,
+non-black frame, timeout, lost feed or policy pause. Expired holds cannot be rearmed by
+further format churn until picture recovery or an explicit reset. Cached Hue packets
+retain their RGB/XY encoding and are cleared for stop, layout refresh and reconfiguration.
+
 `src/hue/reconnect.rs` serializes Hue activation, DTLS connection and cleanup on a dedicated
 worker. Generation checks discard results superseded by stop, disable or area changes; retries
 do not block Nanoleaf or command processing. DTLS handshakes share a five-second deadline;

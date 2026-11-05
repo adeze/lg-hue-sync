@@ -23,8 +23,16 @@ export interface DisplayDiagnostics {
   locked?: boolean | null;
 }
 
+export interface GenreDiagnostics {
+  available: boolean;
+  received_unix_ms: number;
+  scores: [number, number, number, number] | null;
+  selected?: string | null;
+}
+
 export interface DiagnosticSnapshot {
   sampled_unix_ms: number;
+  genre?: GenreDiagnostics;
   display?: DisplayDiagnostics;
   video?: VideoDiagnostics;
   player?: VideoDiagnostics;
@@ -75,4 +83,41 @@ export function snapshotState(snapshot: DiagnosticSnapshot | null | undefined, n
   const age = available ? Math.max(0, now - sampled) : 0;
   const stale = available && (age > 10_000 || sampled > now + 10_000);
   return { available, stale, age };
+}
+
+export const genreLabels = ['Standard', 'Sports', 'Animation', 'Movie'] as const;
+
+export function genreDiagnosticState(
+  snapshot: DiagnosticSnapshot | null | undefined,
+  now: number,
+  online = true,
+) {
+  const genre = snapshot?.genre;
+  const received = genre?.received_unix_ms;
+  const hasReceipt = typeof received === 'number' && Number.isFinite(received) && received > 0;
+  const age = hasReceipt ? Math.max(0, now - received) : null;
+  const validScores =
+    Array.isArray(genre?.scores) &&
+    genre.scores.length === 4 &&
+    genre.scores.every((score) => Number.isInteger(score) && score >= 0 && score <= 0xffff_ffff);
+  const globalFreshness = snapshotState(snapshot, now);
+  const stale =
+    hasReceipt &&
+    (!online ||
+      !globalFreshness.available ||
+      globalFreshness.stale ||
+      age! > 10_000 ||
+      received > now + 10_000);
+  const state =
+    !genre?.available || !hasReceipt || !validScores
+      ? 'Unavailable'
+      : stale
+        ? 'Stale'
+        : 'Available';
+  const scores = state === 'Available' ? genre!.scores : null;
+  const selected =
+    scores?.some((score) => score > 0) && genreLabels.some((label) => label === genre?.selected)
+      ? genre?.selected
+      : null;
+  return { state, age, scores, category: scores ? (selected ?? 'Unclassified') : 'Unavailable' };
 }

@@ -112,6 +112,12 @@ export function mockApi(): Plugin {
     nanoleaf_colors: Array.from({ length: 40 }, (_, i) => color(i)),
     diagnostics: {
       sampled_unix_ms: Date.now(),
+      genre: {
+        available: true,
+        received_unix_ms: Date.now(),
+        scores: [1400, 600, 800, 7200],
+        selected: 'Movie',
+      },
       display: {
         available: true,
         source: 'HDMI',

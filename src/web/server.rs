@@ -356,6 +356,7 @@ impl SyncStatus {
 
 pub struct SharedState {
     display_control: Mutex<()>,
+    display_observed_at: std::sync::Mutex<Option<std::time::Instant>>,
     pub display_off: AtomicBool,
     active_preset: RwLock<Option<String>>,
     saved_presets: RwLock<BTreeMap<String, PresetTuning>>,
@@ -363,6 +364,7 @@ pub struct SharedState {
     preview_render_gate: Arc<Semaphore>,
     preview_render_started: std::sync::Mutex<Option<std::time::Instant>>,
     diagnostics: RwLock<Diagnostics>,
+    pub video_status: RwLock<Option<serde_json::Value>>,
     sync_status: RwLock<SyncStatus>,
     command_tx: mpsc::Sender<ControlCommand>,
     /// Capture polling ceiling, not the media frame rate.
@@ -396,6 +398,7 @@ impl SharedState {
     ) -> Self {
         Self {
             display_control: Mutex::new(()),
+            display_observed_at: std::sync::Mutex::new(None),
             display_off: AtomicBool::new(false),
             active_preset: RwLock::new(None),
             saved_presets: RwLock::new(BTreeMap::new()),
@@ -403,6 +406,7 @@ impl SharedState {
             preview_render_gate: Arc::new(Semaphore::new(1)),
             preview_render_started: std::sync::Mutex::new(None),
             diagnostics: RwLock::new(Diagnostics::default()),
+            video_status: RwLock::new(None),
             sync_status: RwLock::new(SyncStatus {
                 requested_running: true,
                 pipeline_state: SyncState::Starting,
@@ -517,6 +521,19 @@ impl SharedState {
 
     pub fn light_update_fps(&self) -> f32 {
         self.light_updates_x100.load(Ordering::Relaxed) as f32 / 100.0
+    }
+
+    /// Cached events cannot override a newer display command or an in-flight control request.
+    pub fn observe_display_power(&self, enabled: bool, received_at: std::time::Instant) {
+        let Ok(_guard) = self.display_control.try_lock() else {
+            return;
+        };
+        let mut observed_at = self.display_observed_at.lock().unwrap();
+        if observed_at.is_some_and(|previous| received_at <= previous) {
+            return;
+        }
+        self.display_off.store(!enabled, Ordering::Relaxed);
+        *observed_at = Some(received_at);
     }
 
     pub fn set_tv_power_state(&self, active: Option<bool>) {
@@ -700,21 +717,16 @@ pub async fn start_web_server(
     let diagnostics_shutdown = shutdown.clone();
     tracker.spawn(async move {
         loop {
+            let video = shared.video_status.read().unwrap().clone();
             let snapshot = if shared.tv_power_state.load(Ordering::Relaxed) == 2 {
                 Diagnostics::default()
             } else {
                 tokio::select! {
                     _ = diagnostics_shutdown.cancelled() => break,
-                    snapshot = diagnostics::collect() => snapshot,
+                    snapshot = diagnostics::collect(video) => snapshot,
                 }
             };
             *shared.diagnostics.write().unwrap() = snapshot;
-            {
-                let _guard = shared.display_control.lock().await;
-                if let Ok(Some(enabled)) = crate::tv_power::display_enabled().await {
-                    shared.display_off.store(!enabled, Ordering::Relaxed);
-                }
-            }
             tokio::select! {
                 _ = diagnostics_shutdown.cancelled() => break,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
@@ -1065,6 +1077,7 @@ async fn display_status(State(state): State<AppState>) -> Result<Json<DisplaySta
         .map_err(|error| ApiError::SetupFailed(error.to_string()))?;
     if let Some(enabled) = enabled {
         state.shared.display_off.store(!enabled, Ordering::Relaxed);
+        *state.shared.display_observed_at.lock().unwrap() = Some(std::time::Instant::now());
     }
     Ok(Json(DisplayState { enabled }))
 }
@@ -1106,6 +1119,7 @@ async fn display_control(
     };
     if let Some(enabled) = actual {
         state.shared.display_off.store(!enabled, Ordering::Relaxed);
+        *state.shared.display_observed_at.lock().unwrap() = Some(std::time::Instant::now());
     }
     Ok(Json(DisplayState { enabled: actual }))
 }
@@ -2110,6 +2124,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let (sender, _receiver) = mpsc::channel(1);
+        let shared = SharedState::new(
+            settings(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            sender,
+        );
+        let original = std::time::Instant::now();
+        shared.observe_display_power(true, original);
+        assert!(!shared.display_off.load(Ordering::Relaxed));
+        let command_received_at = original + std::time::Duration::from_millis(2);
+        let newer_event = command_received_at + std::time::Duration::from_millis(1);
+        {
+            let _guard = shared.display_control.lock().await;
+            shared.display_off.store(true, Ordering::Relaxed);
+            *shared.display_observed_at.lock().unwrap() = Some(command_received_at);
+            shared.observe_display_power(true, newer_event);
+            assert!(shared.display_off.load(Ordering::Relaxed));
+            assert_eq!(
+                *shared.display_observed_at.lock().unwrap(),
+                Some(command_received_at)
+            );
+        }
+        // Replaying a cached Active observation cannot undo the newer display-off command.
+        shared.observe_display_power(true, original);
+        shared.observe_display_power(true, command_received_at);
+        assert!(shared.display_off.load(Ordering::Relaxed));
+        shared.observe_display_power(true, newer_event);
+        assert!(!shared.display_off.load(Ordering::Relaxed));
+        assert_eq!(
+            *shared.display_observed_at.lock().unwrap(),
+            Some(newer_event)
+        );
     }
 
     #[tokio::test]

@@ -60,8 +60,8 @@ The dashboard's `/capture-patterns` page shows nominal SDR patches. Load it in t
 
 ## Compatible inputs and automatic pause
 
-The supported capture policy is HDMI-only. A bounded foreground-app observation
-checks the standard Luna `getForegroundAppInfo` interface every two seconds.
+The supported capture policy is HDMI-only. Persistent Luna subscriptions observe
+`getForegroundAppInfo`, `tvpower/power/getPowerState` and `videooutput/getStatus`.
 Known HDMI app IDs 1–4 permit capture; built-in apps (including Netflix) and Home
 release capture/output sessions and report `pipeline_state: unsupported_source`.
 The dashboard explains that it is waiting for HDMI rather than retrying the
@@ -77,10 +77,24 @@ not been canonically mapped to a DRM condition. PicCap documents limitations for
 This release does not attempt to bypass those restrictions.
 
 Source, power, dynamic-range and frame-rate observations use `src/luna.rs`:
-1.5-second deadline, 64 KiB reply limit and killed/reaped failed children. It
+1.5-second query/initial subscription deadline, 64 KiB per-reply limit and killed/reaped failed children. It
 retains piped stdin until the reply because this firmware's `luna-send` otherwise
-silently exits at EOF. Frame-rate polling is capped at once every two seconds.
+silently exits at EOF. Healthy subscriptions stay open while unchanged and do not
+poll. Failed feeds use bounded one-shot fallback and two-second reconnect delays.
+Startup and explicit display-control requests still use bounded one-shot queries.
+Automatic capture cadence uses the connected MAIN HDMI plane's reported frame rate;
+the dashboard's video snapshot shares the cached video subscription. Audio-driver,
+ARC and cached genre diagnostics retain their independent two-second collection cycle.
 No foreground-app identifiers, titles or reply bodies are exposed in error logs.
+
+A known MAIN HDMI disconnect/mute or change in port, dimensions or frame rate
+arms a separate transition hold. The daemon replays the last successful output
+without updating sampling history until a ready signal supplies a non-black frame,
+for at most five seconds. Further format notifications cannot extend the same hold.
+The ordinary pixel-black hold/fade remains active outside that window. Stop, standby,
+unsupported apps, output disable and terminal capture faults retain priority; a
+lost event feed cancels the transition hold. Capture errors retain their existing
+recovery limits and status. No hardware frame or cached output is fabricated.
 
 For TV validation, observe HDMI → app/Home → HDMI, verify capture release and
 automatic recovery, then repeat after manual Stop to confirm it stays stopped.
@@ -327,6 +341,10 @@ Save and Reset live in Advanced tuning. Ambient presets remain selected while tu
 The dashboard's Diagnostics tab shows display-driver output refresh/state, scaled video-plane size, HDMI video timing, internal decoder video, eARC/output routing and QSync capture/output rates. Output refresh is separate from content frame rate; plane size is not a panel-resolution measurement. Internal video requires a connected MAIN VDEC plane. HDMI transport and decoder details remain omitted from the dashboard pending further validation. `GET /api/status` includes a cached `diagnostics` snapshot and `sampled_unix_ms`; hardware queries run in the background at most once per two-second cycle, independent of browser refresh. Known standby clears diagnostics instead of polling hardware. Missing or stale fields remain unavailable.
 
 Video and ARC state use the shared bounded Luna query transport. Driver reads are restricted to the HDMI, decoder, sound-output and VBE status files, each limited to 64 KiB. These are read-only observations; no routing, format, capture or receiver settings are changed. Active decoder state is required before trusting audio metadata. A MAT carrier rate is not the source content's sample rate; PCM output channel counts are not the receiver's speaker layout. Atmos is labelled as TV-reported. Bit depth remains unavailable without a validated field.
+
+The **LG genre analysis** card reads `luna://com.webos.service.nnproxy/picture/get` with `{"type":"GENRE","command":"data"}` through the same bounded transport and background cycle. It displays LG's reported selection and raw Standard, Sports, Animation and Movie scores. Scores may exceed 10000 because LG combines other inputs; they are not confidence percentages. The receipt timestamp only dates the cache read: the service exposes no verified inference timestamp, so even recent replies may contain old classifications while LG AI is disabled. All-zero scores have no displayed classification. Missing or malformed replies clear the card; stale or disconnected snapshots suppress its selection and scores. Standby clears it with other diagnostics.
+
+This observation does not enable LG AI, register its native genre-change callback, start inference or change lighting. Cached polling is deliberate: the native subscription path registers a callback whose ownership has not been qualified. No separate capture or model runtime is added. See [LG AI and tone-mapping research boundaries](lg-ai-research.md) for shared-capture, LUT and custom-inference considerations.
 
 ## Bonjour discovery (off by default)
 

@@ -2,6 +2,21 @@ use std::time::{Duration, Instant};
 
 use super::zones::FloatColor;
 
+pub(crate) fn is_black_frame(data: &[u8], width: u32, height: u32) -> bool {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|length| data.get(..length))
+        .filter(|pixels| !pixels.is_empty())
+        .is_some_and(|pixels| {
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[..3].iter().all(|component| *component <= 3))
+        })
+}
+
 /// Preserve the last colours across short, whole-screen black interruptions.
 #[derive(Default)]
 pub(crate) struct BlackFrameGuard {
@@ -37,19 +52,7 @@ impl BlackFrameGuard {
         colors: &mut [FloatColor],
         now: Instant,
     ) -> bool {
-        let length = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4));
-        let black = length
-            .and_then(|length| data.get(..length))
-            .filter(|pixels| !pixels.is_empty())
-            .is_some_and(|pixels| {
-                pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|pixel| pixel[..3].iter().all(|component| *component <= 3))
-            });
+        let black = is_black_frame(data, width, height);
         if (self.hold.is_zero() && self.fade.is_zero()) || !black {
             self.reset();
             return false;

@@ -3,6 +3,22 @@ use serde_json::Value;
 
 const POWER_STATE_URI: &str = "luna://com.webos.service.tvpower/power/getPowerState";
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PowerObservation {
+    pub active: Option<bool>,
+    pub display_enabled: Option<bool>,
+}
+
+pub fn parse_observation(response: &Value) -> PowerObservation {
+    if response["returnValue"] != true {
+        return PowerObservation::default();
+    }
+    PowerObservation {
+        active: response["state"].as_str().and_then(parse_state),
+        display_enabled: parse_display_state(response),
+    }
+}
+
 /// Panel state is unavailable in standby or for an unknown power state.
 pub async fn display_enabled() -> Result<Option<bool>> {
     let response = crate::luna::query(POWER_STATE_URI, "{}").await?;

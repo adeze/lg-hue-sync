@@ -19,6 +19,17 @@ pub(super) struct Diagnostics {
     pub transport: TransportDiagnostics,
     pub decoder: DecoderDiagnostics,
     pub output: OutputDiagnostics,
+    pub genre: GenreDiagnostics,
+}
+
+#[derive(Debug, Clone, Default, Serialize, ToSchema)]
+pub(super) struct GenreDiagnostics {
+    pub available: bool,
+    /// Time of the cached read, not the model's inference time.
+    pub received_unix_ms: u64,
+    /// Standard, Sports, Animation, Movie. Native priors can exceed 10000.
+    pub scores: Option<[u32; 4]>,
+    pub selected: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, ToSchema)]
@@ -83,17 +94,61 @@ struct DriverFiles {
     vbe: Option<String>,
 }
 
-pub(super) async fn collect() -> Diagnostics {
-    let (video, arc, drivers) = tokio::join!(
-        crate::luna::query("luna://com.webos.service.videooutput/getStatus", "{}"),
+pub(super) async fn collect(video: Option<Value>) -> Diagnostics {
+    let (arc, drivers, genre) = tokio::join!(
         crate::luna::query("luna://com.webos.service.arccontroller/getARCState", "{}"),
         tokio::task::spawn_blocking(read_driver_files),
+        // The native subscription registers a change callback. This GET only reads
+        // the service cache and does not enable LG AI or acquire capture hardware.
+        crate::luna::query(
+            "luna://com.webos.service.nnproxy/picture/get",
+            r#"{"type":"GENRE","command":"data"}"#,
+        ),
     );
-    snapshot(
-        video.as_ref().ok(),
+    let mut result = snapshot(
+        video.as_ref(),
         arc.as_ref().ok(),
         &drivers.unwrap_or_default(),
-    )
+    );
+    result.genre = genre_snapshot(genre.as_ref().ok(), result.sampled_unix_ms);
+    result
+}
+
+fn genre_snapshot(reply: Option<&Value>, received_unix_ms: u64) -> GenreDiagnostics {
+    let Some(reply) = reply.filter(|reply| reply["returnValue"] == true) else {
+        return GenreDiagnostics::default();
+    };
+    let Some(data) = reply["GENRE"].as_array().filter(|data| data.len() == 4) else {
+        return GenreDiagnostics::default();
+    };
+    let mut scores = [0; 4];
+    for (index, key) in ["data1", "data2", "data3", "data4"].iter().enumerate() {
+        let Some(score) = data[index][key]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return GenreDiagnostics::default();
+        };
+        scores[index] = score;
+    }
+    let selected = if scores.iter().any(|score| *score > 0) {
+        match reply["selected"].as_str() {
+            Some("data1") => Some("Standard"),
+            Some("data2") => Some("Sports"),
+            Some("data3") => Some("Animation"),
+            Some("data4") => Some("Movie"),
+            _ => None,
+        }
+        .map(str::to_owned)
+    } else {
+        None
+    };
+    GenreDiagnostics {
+        available: true,
+        received_unix_ms,
+        scores: Some(scores),
+        selected,
+    }
 }
 
 fn read_driver_files() -> DriverFiles {
@@ -339,6 +394,7 @@ fn snapshot(
         transport,
         decoder,
         output,
+        genre: GenreDiagnostics::default(),
     }
 }
 
@@ -346,6 +402,58 @@ fn snapshot(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn genre_preserves_native_scores_and_reported_selection_without_normalizing() {
+        let reply = json!({"returnValue":true,"GENRE":[{"data1":1853},{"data2":1000},
+            {"data3":10140},{"data4":5}],"selected":"data2"});
+        let genre = genre_snapshot(Some(&reply), 123);
+        assert!(genre.available);
+        assert_eq!(genre.received_unix_ms, 123);
+        assert_eq!(genre.scores, Some([1853, 1000, 10140, 5]));
+        // Report the service decision even when it differs from the largest score.
+        assert_eq!(genre.selected.as_deref(), Some("Sports"));
+    }
+
+    #[test]
+    fn genre_rejects_missing_refused_partial_and_invalid_scores() {
+        assert!(!genre_snapshot(None, 123).available);
+        let valid = json!({"returnValue":true,"GENRE":[{"data1":1},{"data2":2},
+            {"data3":3},{"data4":4}],"selected":"data4"});
+        for invalid in [
+            Value::Null,
+            json!(-1),
+            json!(1.5),
+            json!("2"),
+            json!(4294967296_u64),
+        ] {
+            let mut reply = valid.clone();
+            reply["GENRE"][2]["data3"] = invalid;
+            let genre = genre_snapshot(Some(&reply), 123);
+            assert!(!genre.available);
+            assert_eq!(genre.received_unix_ms, 0);
+            assert!(genre.scores.is_none() && genre.selected.is_none());
+        }
+        for reply in [
+            json!({"returnValue":false,"GENRE":valid["GENRE"]}),
+            json!({"GENRE":valid["GENRE"]}),
+            json!({"returnValue":true,"GENRE":[]}),
+            json!({"returnValue":true,"GENRE":[{"data1":1},{"data2":2},{"data4":4}]}),
+        ] {
+            assert!(!genre_snapshot(Some(&reply), 123).available);
+        }
+    }
+
+    #[test]
+    fn genre_zero_or_unknown_selection_never_invents_a_category() {
+        for (scores, selected) in [([0, 0, 0, 0], "data1"), ([1, 2, 3, 4], "unknown")] {
+            let reply = json!({"returnValue":true,"GENRE":[{"data1":scores[0]},
+                {"data2":scores[1]},{"data3":scores[2]},{"data4":scores[3]}],"selected":selected});
+            let genre = genre_snapshot(Some(&reply), 123);
+            assert!(genre.available);
+            assert!(genre.selected.is_none());
+        }
+    }
 
     fn main_video() -> Value {
         json!({"returnValue": true, "video": [{"sink": "MAIN", "connected": true, "connectedSource": "HDMI",

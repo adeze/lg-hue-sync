@@ -27,7 +27,7 @@ impl CaptureSource {
     }
 }
 
-fn parse_source(value: &Value) -> CaptureSource {
+pub(crate) fn parse_source(value: &Value) -> CaptureSource {
     if value["returnValue"] != true {
         return CaptureSource::Unknown;
     }

@@ -3,6 +3,8 @@
   import {
     diagnosticRate,
     diagnosticValue,
+    genreDiagnosticState,
+    genreLabels,
     snapshotState,
     type DiagnosticStatus,
   } from './diagnostics-types';
@@ -33,6 +35,7 @@
   let video = $derived(snapshotFresh && snapshot?.video?.available ? snapshot.video : undefined);
   let player = $derived(snapshotFresh && snapshot?.player?.available ? snapshot.player : undefined);
   let output = $derived(snapshotFresh && snapshot?.output?.available ? snapshot.output : undefined);
+  let genre = $derived(genreDiagnosticState(snapshot, now, online));
   let freshnessMessage = $derived(
     !freshness.available
       ? 'Signal information unavailable.'
@@ -44,6 +47,20 @@
   const sectionState = (available: boolean) =>
     freshness.stale ? 'Stale' : available ? 'Available' : unavailable;
   let cards = $derived([
+    {
+      id: 'genre',
+      title: 'LG genre analysis',
+      state: genre.state,
+      rows: [
+        ['LG selection', genre.category],
+        ...genreLabels.map((label, index) => [label, diagnosticValue(genre.scores?.[index])]),
+        [
+          'Last reply received',
+          genre.age === null ? unavailable : `${Math.floor(genre.age / 1000)} seconds ago`,
+        ],
+      ],
+      note: 'Read-only LG cached scores, not confidence percentages. Inference freshness is unknown. This panel does not enable LG AI or adjust lighting.',
+    },
     {
       id: 'display',
       title: 'Display output',

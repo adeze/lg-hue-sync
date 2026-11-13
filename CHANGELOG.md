@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.2.0] - 2026-11-13
+## [1.4.0] - 2026-11-13
+
+- Align the QSync daemon, webOS launcher, and Home Assistant integration versions.
+- Bundle the theme-aware QSync dashboard card, visualization controls, and diagnostics for Home Assistant.
 
 - Publish dashboard and Home Assistant status over server-sent events. Collect extended diagnostics on demand.
 - Add an opt-in live HDMI thumbnail preview.
 - Reuse cached video event data across capture ticks and log native capture initialization and release timings.
+- Update the TV daemon before updating in HACS if the installed daemon does not yet expose `/api/status/events`. The QSync 1.2.0 TV trial already supports this endpoint.
 
 ## [1.1.0] - 2026-11-03
 

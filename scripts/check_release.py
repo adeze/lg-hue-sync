@@ -22,6 +22,8 @@ def load_versions() -> dict[str, str]:
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
     app = json.loads((ROOT / "webos-app/appinfo.json").read_text(encoding="utf-8"))
+    integration_path = "custom_components/lg_hue_sync/manifest.json"
+    integration = json.loads((ROOT / integration_path).read_text(encoding="utf-8"))
     package = next(
         item for item in lock["package"] if item["name"] == cargo["package"]["name"]
     )
@@ -29,6 +31,7 @@ def load_versions() -> dict[str, str]:
         "Cargo.toml": cargo["package"]["version"],
         "Cargo.lock": package["version"],
         "webos-app/appinfo.json": app["version"],
+        integration_path: integration["version"],
     }
 
 

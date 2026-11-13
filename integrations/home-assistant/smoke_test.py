@@ -179,6 +179,7 @@ async def main() -> None:
             devices = device_registry.async_get(hass)
             targets = {}
             tv_mac = (device_registry.CONNECTION_NETWORK_MAC, "02:00:00:00:00:01")
+            hue_mac = (device_registry.CONNECTION_NETWORK_MAC, "02:00:00:00:00:02")
             for key, integration in (
                 ("tv_device", "webostv"),
                 ("hue_device", "hue"),
@@ -192,7 +193,7 @@ async def main() -> None:
                     version=1,
                     minor_version=1,
                     source=config_entries.SOURCE_USER,
-                    unique_id=integration,
+                    unique_id="020000000002" if key == "hue_device" else integration,
                     discovery_keys=MappingProxyType({}),
                     subentries_data=None,
                     disabled_by=config_entries.ConfigEntryDisabler.USER,
@@ -200,8 +201,13 @@ async def main() -> None:
                 await hass.config_entries.async_add(target_entry)
                 targets[key] = devices.async_get_or_create(
                     config_entry_id=target_entry.entry_id,
-                    identifiers={(integration, integration)},
-                    connections={tv_mac} if key == "tv_device" else set(),
+                    identifiers={
+                        (integration, "020000fffe000002" if key == "hue_device" else integration)
+                    },
+                    connections={
+                        "tv_device": {tv_mac},
+                        "hue_device": {hue_mac},
+                    }.get(key, set()),
                 ).id
 
             reconfigure = await hass.config_entries.flow.async_init(

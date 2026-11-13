@@ -49,7 +49,9 @@ def configured_device(
     entry = hass.config_entries.async_get_entry(device.config_entry_id)
     if entry is None or entry.domain != DEVICE_DOMAINS[key]:
         return None
-    if key == "hue_device" and (entry.domain, entry.unique_id) not in device.identifiers:
+    if key == "hue_device" and not any(
+        kind == dr.CONNECTION_NETWORK_MAC for kind, _ in device.connections
+    ):
         return None
     return device
 

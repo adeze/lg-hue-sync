@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import NotRequired, TypedDict
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
-from homeassistant.components import frontend
+from homeassistant.components import frontend, websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
@@ -237,6 +237,9 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Serve and load the card once per Home Assistant process."""
+    from .preview import subscribe_preview
+
+    websocket_api.async_register_command(hass, subscribe_preview)
     if "frontend" in hass.config.components:
         await hass.http.async_register_static_paths(
             [

@@ -1,6 +1,6 @@
 {
   "id": "org.webosbrew.lg-hue-sync",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "vendor": "Adeze",
   "type": "web",
   "main": "index.html",

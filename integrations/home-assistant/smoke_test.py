@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
+from unittest.mock import Mock
 
 from aiohttp import web
 from homeassistant import bootstrap, config_entries, data_entry_flow, loader
@@ -38,6 +39,9 @@ async def main() -> None:
     command_failure = False
     status_failure = False
     subscribers = set()
+    preview_frames = asyncio.Queue()
+    preview_requests = 0
+    preview_closed = asyncio.Event()
 
     def publish():
         payload = json.dumps(status)
@@ -88,9 +92,24 @@ async def main() -> None:
             subscribers.remove(subscriber)
         return response
 
-    server = web.Application()
+    async def preview_events(request):
+        nonlocal preview_requests
+        preview_requests += 1
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        try:
+            while True:
+                payload = await preview_frames.get()
+                await response.write(f"data: {json.dumps(payload)}\n\n".encode())
+        except ConnectionError:
+            return response
+        finally:
+            preview_closed.set()
+
+    server = web.Application(handler_args={"handler_cancellation": True})
     server.router.add_get("/api/status", get_status)
     server.router.add_get("/api/status/events", events)
+    server.router.add_get("/api/preview/events", preview_events)
     server.router.add_post("/api/start", command)
     server.router.add_post("/api/stop", command)
     server.router.add_post("/api/display/{action}", command)
@@ -152,6 +171,39 @@ async def main() -> None:
             )
             assert hass.states.get(switch).state == "on"
             assert hass.states.get(sensor).state == "unsupported_source"
+
+            from custom_components.lg_hue_sync.preview import subscribe_preview
+
+            connection = Mock(subscriptions={})
+            msg = {"id": 1, "entity_id": sensor}
+            connection.user.permissions.check_entity.return_value = False
+            subscribe_preview(hass, connection, msg)
+            assert connection.send_error.call_args.args[:2] == (1, "unauthorized")
+            assert not connection.subscriptions and preview_requests == 0
+            connection.user.permissions.check_entity.return_value = True
+            subscribe_preview(hass, connection, {**msg, "entity_id": switch})
+            assert connection.send_error.call_args.args[:2] == (1, "not_found")
+            assert not connection.subscriptions
+            subscribe_preview(hass, connection, msg)
+            frame = {"width": 1, "height": 1, "rgb": [10, 20, 30]}
+            preview_frames.put_nowait({**frame, "captured_unix_ms": 1})
+            await wait_for(lambda: connection.send_event.call_count == 1)
+            connection.send_result.assert_called_once_with(1)
+            connection.send_event.assert_called_with(1, frame)
+            preview_frames.put_nowait(None)
+            await wait_for(lambda: connection.send_event.call_count == 2)
+            connection.send_event.assert_called_with(1, None)
+            connection.subscriptions.pop(1)()
+            async with asyncio.timeout(5):
+                await preview_closed.wait()
+            assert preview_requests == 1
+
+            subscribe_preview(hass, connection, msg)
+            preview_frames.put_nowait({**frame, "rgb": [999, 20, 30]})
+            await wait_for(lambda: connection.send_event.call_count == 3)
+            connection.send_event.assert_called_with(1, None)
+            connection.subscriptions.pop(1)()
+            assert preview_requests == 2
 
             async def set_switch(service):
                 await hass.services.async_call(

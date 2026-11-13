@@ -86,6 +86,45 @@ class QSyncCard extends HTMLElement {
   #helpers;
   #card;
   #signature;
+  #pipeline;
+  #preview = document.createElement("details");
+  #canvas = document.createElement("canvas");
+  #message = document.createElement("div");
+  #inView = false;
+  #subscription;
+  #observer = new IntersectionObserver(([entry]) => {
+    this.#inView = entry.isIntersecting;
+    this.#updatePreview();
+  });
+
+  constructor() {
+    super();
+    const summary = document.createElement("summary");
+    summary.textContent = "Live HDMI preview";
+    summary.style.cursor = "pointer";
+    this.#canvas.style.cssText = "display:block;width:100%;height:auto";
+    this.#canvas.setAttribute("role", "img");
+    this.#canvas.setAttribute("aria-label", "Live HDMI thumbnail");
+    this.#message.setAttribute("role", "status");
+    const panel = document.createElement("ha-card");
+    panel.style.cssText = "margin-top:8px;padding:12px 16px";
+    this.#preview.append(summary, this.#message, this.#canvas);
+    panel.append(this.#preview);
+    this.#preview.addEventListener("toggle", this.#updatePreview);
+    this.#draw(null, "Waiting for HDMI capture…");
+  }
+
+  connectedCallback() {
+    document.addEventListener("visibilitychange", this.#updatePreview);
+    this.#observer.observe(this.#preview);
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener("visibilitychange", this.#updatePreview);
+    this.#observer.disconnect();
+    this.#inView = false;
+    this.#updatePreview();
+  }
 
   static getStubConfig() {
     return {};
@@ -109,6 +148,59 @@ class QSyncCard extends HTMLElement {
     return this.#card?.getGridOptions?.() ?? { columns: 12, min_columns: 6 };
   }
 
+  #draw(frame, message = "Waiting for active HDMI capture…") {
+    this.#canvas.hidden = !frame;
+    this.#canvas.style.display = frame ? "block" : "none";
+    this.#message.textContent = frame ? "" : message;
+    if (!frame) {
+      this.#canvas.width = 0;
+      return;
+    }
+    const { width, height, rgb } = frame;
+    if (this.#canvas.width !== width) this.#canvas.width = width;
+    if (this.#canvas.height !== height) this.#canvas.height = height;
+    const context = this.#canvas.getContext("2d");
+    const image = context.createImageData(width, height);
+    for (let pixel = 0; pixel < width * height; pixel++) {
+      const src = pixel * 3;
+      const dst = pixel * 4;
+      image.data[dst] = rgb[src];
+      image.data[dst + 1] = rgb[src + 1];
+      image.data[dst + 2] = rgb[src + 2];
+      image.data[dst + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+  }
+
+  #updatePreview = () => {
+    const connection = this.#hass?.connection;
+    const entityId = this.#pipeline;
+    const pipeline = this.#hass?.states[entityId];
+    const active = this.isConnected && this.#inView && !document.hidden &&
+      this.#preview.open && pipeline && pipeline.state !== "unavailable" &&
+      connection && this.#hass.connected !== false;
+    const current = this.#subscription;
+    if (active && current?.entityId === entityId && current.connection === connection) return;
+    if (!active && !current) return;
+    this.#subscription = undefined;
+    current?.unsubscribe?.()?.catch(() => {});
+    this.#draw(null);
+    if (!active) return;
+
+    const subscription = { entityId, connection };
+    this.#subscription = subscription;
+    connection.subscribeMessage((frame) => {
+      if (this.#subscription === subscription) this.#draw(frame);
+    }, { type: "lg_hue_sync/preview", entity_id: entityId }).then((unsubscribe) => {
+      if (this.#subscription === subscription) subscription.unsubscribe = unsubscribe;
+      else return unsubscribe();
+    }).catch(() => {
+      if (this.#subscription === subscription) {
+        this.#draw(null, "Could not subscribe to QSync preview. Close and reopen to retry.");
+      }
+    });
+  };
+
   #update() {
     if (!this.#config || !this.#hass) return;
     this.#helpers ??= Promise.resolve().then(() => window.loadCardHelpers());
@@ -118,9 +210,11 @@ class QSyncCard extends HTMLElement {
       if (signature !== this.#signature) {
         this.#card = createCardElement(config);
         this.#signature = signature;
-        this.replaceChildren(this.#card);
+        this.#pipeline = config.entities?.find((row) => row.name === "Pipeline")?.entity;
+        this.replaceChildren(this.#card, ...(this.#pipeline ? [this.#preview.parentElement] : []));
       }
       this.#card.hass = this.#hass;
+      this.#updatePreview();
     }).catch((error) => {
       this.textContent = `Unable to load the QSync card: ${error.message}`;
     });

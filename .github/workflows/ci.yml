@@ -78,4 +78,8 @@ jobs:
             found { print }
           ' CHANGELOG.md > release-notes.md
           test -s release-notes.md
-          gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --title "LG Hue Sync ${GITHUB_REF_NAME}" --notes-file release-notes.md
+          release_flags=()
+          if [[ "${GITHUB_REF_NAME%%+*}" == *-* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+          gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --title "LG Hue Sync ${GITHUB_REF_NAME}" --notes-file release-notes.md "${release_flags[@]}"

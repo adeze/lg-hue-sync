@@ -24,3 +24,5 @@ CI, asset SHA-256 and release notes before claiming publication complete.
 Do not call a release device-validated without matching binary digests, service/dashboard health, and a physical capture-to-light check. Homebrew Channel publication additionally needs a complete lifecycle and a release manifest matching `webosbrew/apps-repo`.
 
 HACS installs the integration source from the same GitHub release tag. Run the [Home Assistant smoke test](../integrations/home-assistant/smoke_test.py) before publishing and call out any daemon upgrade required by the integration in the release notes.
+
+Use a SemVer prerelease suffix such as `-beta.1` in the tag, Cargo version and integration manifest for HACS testing. The webOS launcher requires the numeric version without the suffix. CI marks suffixed prerelease tags as GitHub prereleases.

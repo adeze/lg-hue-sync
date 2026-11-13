@@ -41,7 +41,8 @@ def main() -> None:
     args = parser.parse_args()
 
     versions = load_versions()
-    unique = set(versions.values())
+    launcher_version = versions["webos-app/appinfo.json"]
+    unique = {version for path, version in versions.items() if path != "webos-app/appinfo.json"}
     if len(unique) != 1:
         raise SystemExit(
             "release versions differ: "
@@ -51,6 +52,8 @@ def main() -> None:
     version = unique.pop()
     if not SEMVER.fullmatch(version):
         raise SystemExit(f"invalid semantic version: {version}")
+    if launcher_version != re.split(r"[-+]", version, maxsplit=1)[0]:
+        raise SystemExit(f"webOS launcher version {launcher_version} does not match {version}")
 
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     if f"## [{version}]" not in changelog:

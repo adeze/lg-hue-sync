@@ -59,6 +59,8 @@ Home Assistant exposes **Screen sync**, **Display** (panel on/off), **Color pres
 
 Keep the TV's unauthenticated port 8088 on a trusted LAN. The [manual YAML package](integrations/home-assistant/README.md) remains available as an alternative. Remove it if you switch to HACS to avoid duplicate controls.
 
+Home Assistant also exposes Hue and Nanoleaf connection sensors, TV power state, and capture resolution when reported. The **Response** and **Spatial blending** selectors require a TV build with `visualization_modes` in `GET /api/status`. Each selector applies one live mode. For custom dashboard values, the selector has no selected option until a named mode is chosen.
+
 ## Install and update
 
 The dashboard includes a web app manifest and QSync icons. In **Devices → QSync app**, find installation guidance or an install button when supported. On iPhone/iPad, use Safari **Share → Add to Home Screen**; on Mac, **File → Add to Dock**. Automatic PWA install prompts require HTTPS (or localhost during development); the TV's plain HTTP LAN address may only support manual installation or a shortcut, depending on the browser. The app requires a reachable TV and does not cache controls or frames offline. No service worker or additional TV process is installed.

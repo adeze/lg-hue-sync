@@ -1,6 +1,7 @@
 """Connect Home Assistant to the LG Hue Sync daemon on a TV."""
 
 import logging
+import re
 from datetime import timedelta
 from typing import NotRequired, TypedDict
 
@@ -15,7 +16,13 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from yarl import URL
 
 DOMAIN = "lg_hue_sync"
-PLATFORMS = [Platform.SWITCH, Platform.SENSOR, Platform.SELECT, Platform.BUTTON]
+PLATFORMS = [
+    Platform.SWITCH,
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.SELECT,
+    Platform.BUTTON,
+]
 LOGGER = logging.getLogger(__name__)
 TIMEOUT = ClientTimeout(total=3)
 
@@ -32,6 +39,10 @@ class SyncStatus(TypedDict):
     hue_connected: NotRequired[bool]
     nanoleaf_connected: NotRequired[bool]
     capture_hardware: NotRequired[bool]
+    capture_resolution: NotRequired[str]
+    tv_power_state: NotRequired[str]
+    preset_modified: NotRequired[bool]
+    visualization_modes: NotRequired[dict[str, str | None]]
     signal: NotRequired[dict[str, dict[str, bool | int | float]]]
 
 
@@ -42,6 +53,10 @@ SIGNAL_FIELDS = {
     "decoder": ("available", "source_channels", "output_channels", "atmos_reported"),
     "output": ("available", "passthrough"),
 }
+VISUALIZATION_OPTIONS = {
+    "response": {"Slow": "slow", "Default": "default", "Fast": "fast"},
+    "spatial_blend": {"Local": "local", "Balanced": "balanced", "Soft": "soft"},
+}
 
 
 def api_url(host: str, operation: str) -> URL:
@@ -50,7 +65,7 @@ def api_url(host: str, operation: str) -> URL:
 
 
 async def read_status(session: ClientSession, host: str) -> SyncStatus:
-    """Read and validate the two status fields used by the entities."""
+    """Read and validate the status fields used by the entities."""
     async with session.get(
         api_url(host, "status"), timeout=TIMEOUT, allow_redirects=False
     ) as response:
@@ -72,6 +87,19 @@ async def read_status(session: ClientSession, host: str) -> SyncStatus:
     }
     if isinstance(preset := data.get("active_preset"), str) and len(preset) <= 64:
         status["active_preset"] = preset
+    if (power := data.get("tv_power_state")) in ("active", "standby", "unknown"):
+        status["tv_power_state"] = power
+    if isinstance(resolution := data.get("capture_resolution"), str) and re.fullmatch(
+        r"[0-9]{1,5}\s*[x×]\s*[0-9]{1,5}", resolution
+    ):
+        status["capture_resolution"] = resolution
+    if isinstance(modes := data.get("visualization_modes"), dict):
+        status["visualization_modes"] = {
+            axis: mode if mode in options.values() else None
+            for axis, options in VISUALIZATION_OPTIONS.items()
+            if axis in modes
+            and ((mode := modes[axis]) is None or isinstance(mode, str))
+        }
     diagnostics = data.get("diagnostics")
     if isinstance(diagnostics, dict):
         status["signal"] = {
@@ -83,7 +111,12 @@ async def read_status(session: ClientSession, host: str) -> SyncStatus:
             for section, fields in SIGNAL_FIELDS.items()
             if isinstance(sample := diagnostics.get(section), dict)
         }
-    for key in ("hue_connected", "nanoleaf_connected", "capture_hardware"):
+    for key in (
+        "hue_connected",
+        "nanoleaf_connected",
+        "capture_hardware",
+        "preset_modified",
+    ):
         if isinstance(value := data.get(key), bool):
             status[key] = value
     for api_key, key in (
@@ -100,7 +133,7 @@ type HueSyncConfigEntry = ConfigEntry[HueSyncCoordinator]
 
 
 class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
-    """Share one polling request across the switch and sensor."""
+    """Share TV polling across the entities."""
 
     def __init__(self, hass: HomeAssistant, entry: HueSyncConfigEntry) -> None:
         super().__init__(
@@ -155,7 +188,7 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> bool:
-    """Verify the TV and forward the entry to the two platforms."""
+    """Verify the TV and set up the entities."""
     coordinator = HueSyncCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
@@ -164,5 +197,5 @@ async def async_setup_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> b
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> bool:
-    """Unload both platforms."""
+    """Unload all entity platforms."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

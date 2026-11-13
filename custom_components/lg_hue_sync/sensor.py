@@ -43,5 +43,9 @@ class PipelineSensor(CoordinatorEntity[HueSyncCoordinator], SensorEntity):
                 "hue_connected",
                 "nanoleaf_connected",
                 "capture_hardware",
+                "capture_resolution",
+                "tv_power_state",
+                "preset_modified",
+                "visualization_modes",
             )
         }

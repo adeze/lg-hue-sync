@@ -640,10 +640,45 @@ struct StatusResponse {
     capture_hardware: bool,
     capture_resolution: String,
     settings: LiveSettings,
+    visualization_modes: VisualizationModes,
     nanoleaf_colors: Vec<RgbColor>,
     hue_colors: Vec<(u8, RgbColor)>,
     hue_zones: Vec<LightZone>,
     calibration_pattern: Option<&'static str>,
+}
+
+type ResponseTuning = (f32, f32, f32, u8);
+const RESPONSE_MODES: [(&str, ResponseTuning); 3] = [
+    ("slow", (0.2, 0.18, 0.22, 6)),
+    ("default", (0.35, 0.35, 0.35, 12)),
+    ("fast", (0.65, 0.65, 0.7, 14)),
+];
+const BLEND_MODES: [(&str, f32); 3] = [("local", 0.0), ("balanced", 0.15), ("soft", 0.3)];
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+struct VisualizationModes {
+    response: Option<&'static str>,
+    spatial_blend: Option<&'static str>,
+}
+
+impl VisualizationModes {
+    fn from_settings(settings: &LiveSettings) -> Self {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.00001;
+        Self {
+            response: RESPONSE_MODES
+                .iter()
+                .find_map(|&(name, (smooth, rise, fall, step))| {
+                    (near(settings.smoothing_factor, smooth)
+                        && near(settings.rise_smoothing_factor, rise)
+                        && near(settings.fall_smoothing_factor, fall)
+                        && settings.max_color_step == step)
+                        .then_some(name)
+                }),
+            spatial_blend: BLEND_MODES
+                .iter()
+                .find_map(|&(name, blend)| near(settings.spatial_blend, blend).then_some(name)),
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -774,6 +809,7 @@ fn build_router(state: AppState) -> anyhow::Result<Router> {
         .routes(routes!(stop))
         .routes(routes!(toggle))
         .routes(routes!(settings))
+        .routes(routes!(set_visualization_mode))
         .routes(routes!(apply_preset))
         .routes(routes!(reset_preset))
         .routes(routes!(update_nanoleaf_alignment))
@@ -1132,6 +1168,7 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let bonjour_enabled = *state.bonjour.lock().await.borrow();
     let active_preset = shared.active_preset.read().unwrap().clone();
     let preset_modified = shared.preset_modified();
+    let settings = shared.current_settings.read().unwrap().clone();
     Json(StatusResponse {
         active_preset,
         preset_modified,
@@ -1152,7 +1189,8 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         nanoleaf_ip: shared.nanoleaf_ip.read().unwrap().clone(),
         capture_hardware: shared.capture_hardware.load(Ordering::Relaxed),
         capture_resolution: shared.capture_resolution.read().unwrap().clone(),
-        settings: shared.current_settings.read().unwrap().clone(),
+        visualization_modes: VisualizationModes::from_settings(&settings),
+        settings,
         nanoleaf_colors: shared.live_nanoleaf_colors.read().unwrap().clone(),
         hue_colors: shared.live_hue_colors.read().unwrap().clone(),
         hue_zones: shared.hue_zones.read().unwrap().clone(),
@@ -1335,6 +1373,55 @@ async fn settings(
 ) -> Result<Json<StatusMessage>, ApiError> {
     settings.validate()?;
     state.shared.apply_settings(settings).await?;
+    Ok(Json(StatusMessage { status: "ok" }))
+}
+
+/// Change one visualization mode without replacing other live settings.
+#[utoipa::path(
+    post, path = "/api/visualization/{axis}/{mode}", tag = "LG Hue Sync",
+    params(
+        ("axis" = String, Path, description = "response or spatial_blend"),
+        ("mode" = String, Path, description = "slow, default, fast for response; local, balanced, soft for spatial_blend")
+    ),
+    responses(
+        (status = 200, body = StatusMessage),
+        (status = 400, body = ErrorResponse),
+        (status = 502, body = ErrorResponse)
+    )
+)]
+async fn set_visualization_mode(
+    State(state): State<AppState>,
+    Path((axis, mode)): Path<(String, String)>,
+) -> Result<Json<StatusMessage>, ApiError> {
+    let invalid = || ApiError::BadRequest("Unknown visualization axis or mode".to_string());
+    match axis.as_str() {
+        "response" => {
+            let &(_, (smooth, rise, fall, step)) = RESPONSE_MODES
+                .iter()
+                .find(|(name, _)| *name == mode)
+                .ok_or_else(invalid)?;
+            state
+                .shared
+                .update_settings(|settings| {
+                    settings.smoothing_factor = smooth;
+                    settings.rise_smoothing_factor = rise;
+                    settings.fall_smoothing_factor = fall;
+                    settings.max_color_step = step;
+                })
+                .await?;
+        }
+        "spatial_blend" => {
+            let &(_, blend) = BLEND_MODES
+                .iter()
+                .find(|(name, _)| *name == mode)
+                .ok_or_else(invalid)?;
+            state
+                .shared
+                .update_settings(|settings| settings.spatial_blend = blend)
+                .await?;
+        }
+        _ => return Err(invalid()),
+    }
     Ok(Json(StatusMessage { status: "ok" }))
 }
 
@@ -2330,7 +2417,7 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(document["info"]["version"], env!("CARGO_PKG_VERSION"));
         let paths = document["paths"].as_object().unwrap();
-        assert_eq!(paths.len(), 23);
+        assert_eq!(paths.len(), 24);
         for (path, method) in [
             ("/api/status", "get"),
             ("/api/display", "get"),
@@ -2344,6 +2431,7 @@ mod tests {
             ("/api/stop", "post"),
             ("/api/toggle", "post"),
             ("/api/settings", "post"),
+            ("/api/visualization/{axis}/{mode}", "post"),
             ("/api/presets/{name}", "post"),
             ("/api/presets/{name}/reset", "post"),
             ("/api/nanoleaf/alignment", "post"),
@@ -2431,6 +2519,61 @@ mod tests {
         assert!(settings.validate().is_ok());
         settings.saturation_boost = 0.49;
         assert!(settings.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn visualization_modes_patch_independent_settings_and_report_custom_values() {
+        use tower::ServiceExt;
+        let (app, mut commands) = test_router();
+        let post = |path| {
+            axum::http::Request::post(path)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(post("/api/visualization/response/soft"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(commands.try_recv().is_err());
+        assert_eq!(
+            app.clone()
+                .oneshot(post("/api/visualization/response/slow"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let Some(ControlCommand::ApplySettings(slow)) = commands.recv().await else {
+            panic!("expected response update");
+        };
+        assert_eq!(slow.max_color_step, 6);
+        assert_eq!(slow.spatial_blend, settings().spatial_blend);
+        assert_eq!(
+            app.oneshot(post("/api/visualization/spatial_blend/soft"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let Some(ControlCommand::ApplySettings(mut combined)) = commands.recv().await else {
+            panic!("expected spatial blend update");
+        };
+        assert_eq!(combined.brightness_multiplier, slow.brightness_multiplier);
+        assert_eq!(combined.spatial_blend, 0.3);
+        assert_eq!(
+            VisualizationModes::from_settings(&combined).response,
+            Some("slow")
+        );
+        assert_eq!(
+            VisualizationModes::from_settings(&combined).spatial_blend,
+            Some("soft")
+        );
+        combined.max_color_step = 19;
+        assert_eq!(VisualizationModes::from_settings(&combined).response, None);
     }
 
     #[tokio::test]

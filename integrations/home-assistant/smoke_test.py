@@ -25,6 +25,9 @@ async def main() -> None:
         "active_preset": "neutral",
         "fps": 30.0,
         "hue_connected": True,
+        "nanoleaf_connected": False,
+        "tv_power_state": "active",
+        "capture_resolution": "3840x2160",
         "hue_bridge_ip": "192.0.2.1",
         "diagnostics": {"video": {"width": 3840, "input": "private input"}},
     }
@@ -49,6 +52,10 @@ async def main() -> None:
             display_enabled = request.path.endswith("/on")
         elif request.path.startswith("/api/presets/"):
             status["active_preset"] = request.match_info["preset"]
+        elif request.path.startswith("/api/visualization/"):
+            status["visualization_modes"][request.match_info["axis"]] = (
+                request.match_info["mode"]
+            )
         return web.json_response({"status": "queued"})
 
     async def get_display(request):
@@ -62,6 +69,7 @@ async def main() -> None:
     server.router.add_post("/api/display/{action}", command)
     server.router.add_post("/api/presets/{preset}", command)
     server.router.add_post("/api/restart", command)
+    server.router.add_post("/api/visualization/{axis}/{mode}", command)
 
     with TemporaryDirectory() as config_dir:
         root = Path(__file__).resolve().parents[2]
@@ -194,6 +202,42 @@ async def main() -> None:
             assert report["last_known_status"]["signal"] == {"video": {"width": 3840}}
             assert report["last_known_status"]["display_enabled"] is False
             assert "192.0.2.1" not in str(report) and "localhost" not in str(report)
+
+            response = registry.async_get_entity_id(
+                "select", domain, f"{entry.entry_id}_response"
+            )
+            blend = registry.async_get_entity_id(
+                "select", domain, f"{entry.entry_id}_spatial_blend"
+            )
+            hue = registry.async_get_entity_id(
+                "binary_sensor", domain, f"{entry.entry_id}_hue_connected"
+            )
+            assert hass.states.get(hue).state == "on"
+            assert (
+                hass.states.get(sensor).attributes["capture_resolution"] == "3840x2160"
+            )
+            assert hass.states.get(response).state == STATE_UNAVAILABLE
+            status["visualization_modes"] = {
+                "response": "default",
+                "spatial_blend": None,
+            }
+            await entry.runtime_data.async_refresh()
+            assert hass.states.get(response).state == "Default"
+            assert hass.states.get(blend).state == "unknown"
+            for entity_id, option in ((response, "Fast"), (blend, "Soft")):
+                await hass.services.async_call(
+                    "select",
+                    "select_option",
+                    {"entity_id": entity_id, "option": option},
+                    blocking=True,
+                )
+            await entry.runtime_data.async_refresh()
+            assert calls[-2:] == [
+                "/api/visualization/response/fast",
+                "/api/visualization/spatial_blend/soft",
+            ]
+            assert hass.states.get(response).state == "Fast"
+            assert hass.states.get(blend).state == "Soft"
 
             status_failure = True
             await entry.runtime_data.async_refresh()

@@ -1,0 +1,34 @@
+rest:
+  - resource: !secret lg_hue_sync_status_url
+    scan_interval: 10
+    timeout: 3
+    sensor:
+      - name: LG Hue Sync Pipeline
+        unique_id: lg_hue_sync_pipeline
+        value_template: "{{ value_json.pipeline_state | default(none) }}"
+        json_attributes:
+          - requested_running
+          - is_syncing
+
+rest_command:
+  lg_hue_sync_start:
+    url: !secret lg_hue_sync_start_url
+    method: post
+    timeout: 3
+  lg_hue_sync_stop:
+    url: !secret lg_hue_sync_stop_url
+    method: post
+    timeout: 3
+
+template:
+  - switch:
+      - name: LG Hue Sync
+        unique_id: lg_hue_sync_requested
+        availability: >-
+          {{ has_value('sensor.lg_hue_sync_pipeline') and
+             state_attr('sensor.lg_hue_sync_pipeline', 'requested_running') is boolean }}
+        state: "{{ state_attr('sensor.lg_hue_sync_pipeline', 'requested_running') is true }}"
+        turn_on:
+          action: rest_command.lg_hue_sync_start
+        turn_off:
+          action: rest_command.lg_hue_sync_stop

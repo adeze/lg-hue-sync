@@ -22,3 +22,5 @@ current launcher-only IPK or its manifest. Verify the remote tag/commit, success
 CI, asset SHA-256 and release notes before claiming publication complete.
 
 Do not call a release device-validated without matching binary digests, service/dashboard health, and a physical capture-to-light check. Homebrew Channel publication additionally needs a complete lifecycle and a release manifest matching `webosbrew/apps-repo`.
+
+HACS validates custom repositories against the first non-prerelease in GitHub's release list. For an integration-only release, use a SemVer tag with a `-hacs.N` suffix and no leading `v` (for example, `1.1.1-hacs.1`). Publish it as a regular GitHub release with `--latest=false`: HACS can install its source while GitHub's Latest badge and link still point to the verified TV binary. Do not attach TV binaries to the HACS-only release. Run the [Home Assistant smoke test](../integrations/home-assistant/smoke_test.py) before publishing.

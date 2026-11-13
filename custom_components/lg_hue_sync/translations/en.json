@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to LG Hue Sync",
+        "description": "Enter the TV's LAN address. LG Hue Sync must be running on the TV.",
+        "data": {
+          "host": "TV IP address or hostname"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not read LG Hue Sync status. Check the address and that the dashboard is reachable on port 8088.",
+      "invalid_host": "Enter a bare IPv4 address or hostname, without a URL or port."
+    },
+    "abort": {
+      "already_configured": "This TV address is already configured."
+    }
+  }
+}

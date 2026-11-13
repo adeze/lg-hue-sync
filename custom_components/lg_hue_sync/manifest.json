@@ -1,0 +1,11 @@
+{
+  "domain": "lg_hue_sync",
+  "name": "LG Hue Sync",
+  "codeowners": ["@adeze"],
+  "config_flow": true,
+  "documentation": "https://github.com/adeze/lg-hue-sync#home-assistant",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/adeze/lg-hue-sync/issues",
+  "version": "1.0.0"
+}

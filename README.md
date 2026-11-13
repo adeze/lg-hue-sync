@@ -47,7 +47,13 @@ Run `make native-setup` once using the installed [webosbrew/native-toolchain](ht
 
 Apple Shortcuts can apply a dashboard preset over the trusted LAN with a `POST` request to `http://<tv-ip>:8088/api/presets/<name>`; see [docs/operations.md](docs/operations.md#apple-shortcuts-and-presets). Preset changes are live until saved. The generated OpenAPI description for all HTTP API routes is available at `http://<tv-ip>:8088/openapi.json`; see [API discovery](docs/operations.md#http-api-description).
 
-The [Home Assistant package](integrations/home-assistant/README.md) adds a sync switch and a pipeline status sensor over the same LAN API.
+### Home Assistant
+
+1. In [HACS → Custom repositories](https://www.hacs.xyz/docs/faq/custom_repositories/), add `https://github.com/adeze/lg-hue-sync` as an **Integration**.
+2. Download **LG Hue Sync** and restart Home Assistant.
+3. In **Settings → Devices & services → Add integration**, select **LG Hue Sync** and enter the TV's LAN IPv4 address or hostname. Use a DHCP reservation or stable hostname.
+
+**Screen sync** starts and stops sync. **Pipeline** reports actual capture state, such as `running`, `paused`, or `unsupported_source`. Keep the TV's unauthenticated port 8088 on a trusted LAN. The [manual YAML package](integrations/home-assistant/README.md) remains available as an alternative; remove it if you switch to HACS to avoid duplicate controls.
 
 ## Install and update
 

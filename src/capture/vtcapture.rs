@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use libloading::{Library, Symbol};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::Path;
+use std::time::Instant;
 use tracing::{error, info, warn};
 
 use super::{CaptureError, CapturedFrame, NativeCaptureError, ScreenCapture};
@@ -176,8 +177,13 @@ impl VtCapture {
             "Loading webOS libvtcapture driver from {}...",
             LIBVTCAPTURE_PATH
         );
+        let started = Instant::now();
         let lib = unsafe { Library::new(LIBVTCAPTURE_PATH) }
             .map_err(|e| anyhow!("Failed to dlopen {}: {}", LIBVTCAPTURE_PATH, e))?;
+        info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Loaded webOS capture library"
+        );
 
         unsafe {
             let fn_create: Symbol<FnVtCaptureCreate> = lib
@@ -212,7 +218,13 @@ impl VtCapture {
                 .map_err(|e| anyhow!("Symbol vtCapture_release not found: {}", e))?;
 
             // 1. Create driver instance
+            info!("Calling vtCapture_create");
+            let started = Instant::now();
             let driver = fn_create();
+            info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "vtCapture_create returned"
+            );
             if driver.is_null() {
                 return Err(anyhow!("vtCapture_create returned NULL"));
             }
@@ -223,10 +235,17 @@ impl VtCapture {
             client_id[1] = b'0';
             let caller_id = CString::new("org.webosbrew.lg-hue-sync")?;
 
+            info!("Calling vtCapture_init");
+            let started = Instant::now();
             let ret_init = fn_init(
                 driver,
                 caller_id.as_ptr(),
                 client_id.as_mut_ptr() as *mut c_char,
+            );
+            info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                code = ret_init,
+                "vtCapture_init returned"
             );
             if ret_init != 0 {
                 fn_release(driver);
@@ -617,6 +636,8 @@ impl Drop for VtCapture {
     fn drop(&mut self) {
         unsafe {
             if !self.driver.is_null() {
+                let started = Instant::now();
+                info!("Releasing webOS capture driver");
                 let client_ptr = self.client_id.as_ptr() as *const c_char;
                 if !self.is_stopped {
                     (self.fn_stop)(self.driver, client_ptr);
@@ -625,6 +646,10 @@ impl Drop for VtCapture {
                 }
                 (self.fn_release)(self.driver);
                 self.driver = std::ptr::null_mut();
+                info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Released webOS capture driver"
+                );
             }
         }
     }

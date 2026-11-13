@@ -10,6 +10,7 @@
     orientationDescription,
     orientationPath,
     rgbCss,
+    validatePreviewFrame,
   } from './preview';
   import type { PreviewSettings, PreviewState, PreviewStatus } from './preview-types';
 
@@ -20,6 +21,8 @@
   }: { status: PreviewStatus | null; settings: PreviewSettings | null; active: boolean } = $props();
   let visible = $state(true);
   let regions = $state(true);
+  let live = $state(false);
+  let liveFrame = $state.raw<PreviewState['frame']>(null);
   let preview = $state.raw<PreviewState>({
     busy: false,
     frame: null,
@@ -54,7 +57,29 @@
     },
   ]);
   $effect(() => {
-    controller.update(settings, active && visible, supported);
+    controller.update(settings, active && visible && !live, supported);
+  });
+  $effect(() => {
+    if (!live || !active || !visible || !supported) return;
+    const stream = new EventSource('/api/preview/events');
+    stream.onmessage = ({ data }) => {
+      try {
+        const frame = JSON.parse(data);
+        if (frame === null) {
+          liveFrame = null;
+          return;
+        }
+        validatePreviewFrame(frame);
+        liveFrame = frame;
+      } catch {
+        liveFrame = null;
+      }
+    };
+    stream.onerror = () => (liveFrame = null);
+    return () => {
+      stream.close();
+      liveFrame = null;
+    };
   });
   onDestroy(() => controller.cancel());
 </script>
@@ -77,7 +102,10 @@
       </p>
     </details>
   </div>
-  <p class="preview-message" role="status" aria-live="polite">{preview.message}</p>
+  <label><input type="checkbox" bind:checked={live} /> Live HDMI preview</label>
+  <p class="preview-message" role="status" aria-live="polite">
+    {live ? (liveFrame ? 'Live captured image' : 'Waiting for active HDMI capture…') : preview.message}
+  </p>
   <div
     class="screen"
     style:aspect-ratio={preview.rendered
@@ -91,7 +119,9 @@
         aria-hidden="true"
         {@attach (canvas) => {
           $effect(() => {
-            if (preview.rendered) drawPreview(canvas, preview.rendered);
+            const frame = live ? liveFrame : preview.rendered;
+            if (frame) drawPreview(canvas, frame);
+            else canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
           });
         }}
       ></canvas>
@@ -140,7 +170,7 @@
   <div class="preview-actions">
     <Button
       onclick={() => controller.capture()}
-      disabled={!active || !visible || !supported || !settings || preview.busy}
+      disabled={live || !active || !visible || !supported || !settings || preview.busy}
     >
       <svg
         width="18"

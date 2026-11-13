@@ -348,7 +348,7 @@
     aria-labelledby="tab-diagnostics"
     hidden={tab !== 'diagnostics'}
   >
-    <Diagnostics status={model.status} receivedAt={model.receivedAt} online={model.online} {now} />
+    <Diagnostics status={model.status} receivedAt={model.receivedAt} online={model.online} active={tab === 'diagnostics'} {now} />
   </div>
   <div
     id="panel-streaming"

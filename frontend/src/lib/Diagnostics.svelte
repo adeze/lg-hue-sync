@@ -1,5 +1,6 @@
 <script lang="ts">
   import CaptureLightingGauge from './CaptureLightingGauge.svelte';
+  import { request } from './api';
   import {
     diagnosticRate,
     diagnosticValue,
@@ -14,14 +15,28 @@
     receivedAt = 0,
     now = Date.now(),
     online = true,
+    active = false,
   }: {
     status: DiagnosticStatus | null;
     receivedAt?: number;
     now?: number;
     online?: boolean;
+    active?: boolean;
   } = $props();
 
   const unavailable = 'Unavailable';
+  let sampleError = $state('');
+  async function sample() {
+    try {
+      await request('/api/diagnostics/sample', undefined, 'POST');
+      sampleError = '';
+    } catch (error) {
+      sampleError = String(error);
+    }
+  }
+  $effect(() => {
+    if (active && online) void sample();
+  });
   const size = (width?: number | null, height?: number | null) =>
     width != null && height != null ? `${width} × ${height}` : unavailable;
   const dynamicRange = (hdr?: string | null) => (hdr === 'none' ? 'SDR' : diagnosticValue(hdr));
@@ -117,6 +132,8 @@
 </script>
 
 <CaptureLightingGauge {status} {receivedAt} {now} {online} />
+<button type="button" onclick={sample} disabled={!online}>Refresh diagnostics</button>
+{#if sampleError}<p role="alert">{sampleError}</p>{/if}
 <div class="diagnostics-heading">
   <h2>Input &amp; output diagnostics</h2>
   <p>{freshnessMessage}</p>

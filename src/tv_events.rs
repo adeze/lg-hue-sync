@@ -1,6 +1,6 @@
 use crate::{capture_source::CaptureSource, tv_power::PowerObservation};
 use serde_json::Value;
-use std::{future::pending, time::Duration};
+use std::{future::pending, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -172,12 +172,12 @@ pub struct Snapshot {
     pub source: CaptureSource,
     pub power: PowerObservation,
     pub power_received_at: Option<std::time::Instant>,
-    pub video: Option<Value>,
+    pub video: Option<Arc<Value>>,
 }
 
 #[derive(Clone)]
 struct EventValue {
-    value: Value,
+    value: Arc<Value>,
     received_at: std::time::Instant,
 }
 
@@ -261,10 +261,13 @@ fn start_feed(
 fn publish(sender: &watch::Sender<Option<EventValue>>, value: Option<Value>) {
     let received_at = std::time::Instant::now();
     sender.send_if_modified(|current| {
-        if current.as_ref().map(|event| &event.value) == value.as_ref() {
+        if current.as_ref().map(|event| event.value.as_ref()) == value.as_ref() {
             return false;
         }
-        *current = value.map(|value| EventValue { value, received_at });
+        *current = value.map(|value| EventValue {
+            value: Arc::new(value),
+            received_at,
+        });
         true
     });
 }

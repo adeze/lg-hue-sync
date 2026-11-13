@@ -1,8 +1,9 @@
 """Connect Home Assistant to the LG Hue Sync daemon on a TV."""
 
+import asyncio
+import json
 import logging
 import re
-from datetime import timedelta
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
@@ -77,6 +78,10 @@ async def read_status(session: ClientSession, host: str) -> SyncStatus:
         if response.status != 200:
             raise ValueError("Unexpected status response")
         data = await response.json()
+    return parse_status(data)
+
+
+def parse_status(data: object) -> SyncStatus:
     if (
         not isinstance(data, dict)
         or not isinstance(data.get("requested_running"), bool)
@@ -91,6 +96,8 @@ async def read_status(session: ClientSession, host: str) -> SyncStatus:
     }
     if isinstance(preset := data.get("active_preset"), str) and len(preset) <= 64:
         status["active_preset"] = preset
+    if isinstance(enabled := data.get("display_enabled"), bool):
+        status["display_enabled"] = enabled
     if (power := data.get("tv_power_state")) in ("active", "standby", "unknown"):
         status["tv_power_state"] = power
     if isinstance(resolution := data.get("capture_resolution"), str) and re.fullmatch(
@@ -137,7 +144,7 @@ type HueSyncConfigEntry = ConfigEntry[HueSyncCoordinator]
 
 
 class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
-    """Share TV polling across the entities."""
+    """Share one TV subscription across the entities."""
 
     def __init__(self, hass: HomeAssistant, entry: HueSyncConfigEntry) -> None:
         super().__init__(
@@ -145,7 +152,6 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
             LOGGER,
             config_entry=entry,
             name=DOMAIN,
-            update_interval=timedelta(seconds=10),
             always_update=False,
         )
         self.host = entry.data[CONF_HOST]
@@ -161,22 +167,37 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
             status = await read_status(self.session, self.host)
         except (ClientError, TimeoutError, ValueError) as err:
             raise UpdateFailed("Could not read LG Hue Sync status") from err
-        try:
-            async with self.session.get(
-                api_url(self.host, "display"), timeout=TIMEOUT, allow_redirects=False
-            ) as response:
-                if response.status == 200:
-                    display = await response.json()
-                    if isinstance(display, dict) and isinstance(
-                        enabled := display.get("enabled"), bool
-                    ):
-                        status["display_enabled"] = enabled
-        except (ClientError, TimeoutError, ValueError):
-            LOGGER.debug("Could not read LG Hue Sync display state")
         return status
 
+    async def async_listen(self) -> None:
+        """Reconnect when the TV restarts and mark stale entities unavailable."""
+        delay = 1
+        while True:
+            try:
+                async with self.session.get(
+                    api_url(self.host, "status/events"),
+                    timeout=ClientTimeout(sock_connect=3, sock_read=35),
+                    allow_redirects=False,
+                ) as response:
+                    response.raise_for_status()
+                    if response.content_type != "text/event-stream":
+                        raise ValueError("Expected an LG Hue Sync status stream")
+                    async for line in response.content:
+                        if line.startswith(b"data:"):
+                            data = parse_status(json.loads(line[5:]))
+                            delay = 1
+                            if data != self.data or not self.last_update_success:
+                                self.async_set_updated_data(data)
+                raise UpdateFailed("LG Hue Sync status stream closed")
+            except (ClientError, TimeoutError, ValueError, UpdateFailed):
+                self.async_set_update_error(
+                    UpdateFailed("LG Hue Sync status stream unavailable")
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+
     async def async_command(self, command: str) -> None:
-        """Send an explicit dashboard command and refresh observed state."""
+        """Send an explicit dashboard command. The status stream reports its result."""
         try:
             async with self.session.post(
                 api_url(self.host, command), timeout=TIMEOUT, allow_redirects=False
@@ -188,7 +209,6 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
             raise HomeAssistantError(
                 "LG Hue Sync did not acknowledge the command"
             ) from err
-        await self.async_request_refresh()
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -211,6 +231,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> b
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_create_background_task(
+        hass, coordinator.async_listen(), "LG Hue Sync status"
+    )
     return True
 
 

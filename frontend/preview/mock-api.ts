@@ -93,6 +93,7 @@ export function mockApi(): Plugin {
     bonjour_enabled: bonjour,
     pipeline_state: running && display ? 'running' : display ? 'paused' : 'paused',
     requested_running: running,
+    display_enabled: display,
     is_syncing: running && display,
     capture_hardware: running && display,
     hue_connected: running && display,
@@ -160,6 +161,14 @@ export function mockApi(): Plugin {
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         const path = req.url?.split('?')[0] || '';
+        if (path === '/api/status/events' || path === '/api/preview/events') {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' });
+          const send = () => res.write(`data: ${JSON.stringify(path === '/api/status/events' ? status() : frame())}\n\n`);
+          send();
+          const timer = setInterval(send, 1000);
+          res.on('close', () => clearInterval(timer));
+          return;
+        }
         if (!path.startsWith('/api/')) {
           if (path === '/capture-patterns') {
             res.setHeader('Content-Type', 'text/html');

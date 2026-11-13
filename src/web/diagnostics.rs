@@ -94,7 +94,7 @@ struct DriverFiles {
     vbe: Option<String>,
 }
 
-pub(super) async fn collect(video: Option<Value>) -> Diagnostics {
+pub(super) async fn collect(video: Option<std::sync::Arc<Value>>) -> Diagnostics {
     let (arc, drivers, genre) = tokio::join!(
         crate::luna::query("luna://com.webos.service.arccontroller/getARCState", "{}"),
         tokio::task::spawn_blocking(read_driver_files),
@@ -106,7 +106,7 @@ pub(super) async fn collect(video: Option<Value>) -> Diagnostics {
         ),
     );
     let mut result = snapshot(
-        video.as_ref(),
+        video.as_deref(),
         arc.as_ref().ok(),
         &drivers.unwrap_or_default(),
     );

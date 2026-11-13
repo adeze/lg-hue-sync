@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-13
+
+- Publish dashboard and Home Assistant status over server-sent events. Collect extended diagnostics on demand.
+- Add an opt-in live HDMI thumbnail preview.
+- Reuse cached video event data across capture ticks and log native capture initialization and release timings.
+
 ## [1.1.0] - 2026-11-03
 
 ### Changed

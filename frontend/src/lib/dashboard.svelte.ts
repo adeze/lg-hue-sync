@@ -4,6 +4,7 @@ import type { PreviewStatus } from './preview-types';
 import type { DiagnosticStatus } from './diagnostics-types';
 export interface Status extends PreviewStatus, DiagnosticStatus {
   settings: LiveSettings;
+  display_enabled?: boolean | null;
   active_preset: string | null;
   preset_modified: boolean;
   bonjour_enabled: boolean;
@@ -22,7 +23,7 @@ export class Dashboard {
   notice = $state('');
   dirty = $state(false);
   online = $state(false);
-  private timer: ReturnType<typeof setTimeout> | undefined;
+  private events: EventSource | undefined;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private polling = false;
@@ -39,6 +40,7 @@ export class Dashboard {
       if (!status.settings || typeof status.pipeline_state !== 'string')
         throw new Error('Invalid status response');
       this.status = status;
+      this.display = status.display_enabled ?? null;
       this.receivedAt = Date.now();
       this.online = true;
       if (!this.writer.pending && !this.busy && !this.dirty && revision === this.revision)
@@ -50,27 +52,28 @@ export class Dashboard {
       this.polling = false;
     }
   }
-  async refreshDisplay() {
-    try {
-      const data = await request<{ enabled: unknown }>('/api/display');
-      this.display = typeof data.enabled === 'boolean' ? data.enabled : null;
-    } catch {
-      this.display = null;
-    }
-  }
   start() {
     this.stopped = false;
-    void this.loop();
+    const events = new EventSource('/api/status/events');
+    this.events = events;
+    events.onmessage = ({ data }) => {
+      const status: Status = JSON.parse(data);
+      if (!status.settings || typeof status.pipeline_state !== 'string') return;
+      this.status = status;
+      this.display = status.display_enabled ?? null;
+      this.receivedAt = Date.now();
+      this.online = true;
+      if (!this.writer.pending && !this.busy && !this.dirty) this.settings = status.settings;
+    };
+    events.onerror = () => {
+      this.online = false;
+      this.display = null;
+    };
     return () => this.stop();
-  }
-  private async loop() {
-    if (this.stopped) return;
-    if (!document.hidden) await Promise.all([this.refresh(), this.refreshDisplay()]);
-    if (!this.stopped) this.timer = setTimeout(() => void this.loop(), 1500);
   }
   stop() {
     this.stopped = true;
-    clearTimeout(this.timer);
+    this.events?.close();
     clearTimeout(this.saveTimer);
   }
   patch(patch: Partial<LiveSettings>) {
@@ -154,7 +157,7 @@ export class Dashboard {
       throw error;
     } finally {
       this.busy = false;
-      await Promise.all([this.refresh(), this.refreshDisplay()]);
+      await this.refresh();
     }
   }
   get requested() {

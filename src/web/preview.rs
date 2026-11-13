@@ -32,7 +32,8 @@ pub struct PreviewFrame {
 pub struct PreviewState {
     requested_until: AtomicU64,
     next_copy: AtomicU64,
-    frame: RwLock<Option<PreviewFrame>>,
+    frame: RwLock<Option<std::sync::Arc<PreviewFrame>>>,
+    updates: tokio::sync::watch::Sender<Option<std::sync::Arc<PreviewFrame>>>,
     max_width: u32,
     max_height: u32,
     copy_interval_ms: u64,
@@ -44,6 +45,7 @@ impl Default for PreviewState {
             requested_until: AtomicU64::new(0),
             next_copy: AtomicU64::new(0),
             frame: RwLock::new(None),
+            updates: tokio::sync::watch::channel(None).0,
             max_width: MAX_WIDTH,
             max_height: MAX_HEIGHT,
             copy_interval_ms: COPY_INTERVAL_MS,
@@ -60,6 +62,10 @@ fn now_ms() -> u64 {
 }
 
 impl PreviewState {
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<std::sync::Arc<PreviewFrame>>> {
+        self.updates.subscribe()
+    }
+
     pub fn stream() -> Self {
         Self {
             max_width: 320,
@@ -83,11 +89,11 @@ impl PreviewState {
             .filter(|frame| {
                 frame.captured_unix_ms <= now && now - frame.captured_unix_ms <= LEASE_MS
             })
-            .cloned()
+            .map(|frame| (**frame).clone())
     }
 
     pub fn publish(&self, frame: &CapturedFrame<'_>) {
-        if self.requested_until.load(Ordering::Relaxed) != 0 {
+        if self.requested_until.load(Ordering::Relaxed) != 0 || self.updates.receiver_count() > 0 {
             self.publish_at(frame, now_ms());
         }
     }
@@ -101,7 +107,9 @@ impl PreviewState {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             );
-            return;
+            if self.updates.receiver_count() == 0 {
+                return;
+            }
         }
         if now < self.next_copy.load(Ordering::Relaxed) {
             return;
@@ -116,6 +124,10 @@ impl PreviewState {
         let Some(copy) = copy_frame(frame, now, self.max_width, self.max_height) else {
             return;
         };
+        let copy = std::sync::Arc::new(copy);
+        if self.updates.receiver_count() > 0 {
+            self.updates.send_replace(Some(copy.clone()));
+        }
         *stored = Some(copy);
         self.next_copy
             .store(now.saturating_add(self.copy_interval_ms), Ordering::Relaxed);
@@ -126,6 +138,8 @@ impl PreviewState {
         self.next_copy.store(0, Ordering::Relaxed);
         if let Ok(mut frame) = self.frame.write() {
             *frame = None;
+            self.updates
+                .send_if_modified(|current| current.take().is_some());
         }
     }
 }

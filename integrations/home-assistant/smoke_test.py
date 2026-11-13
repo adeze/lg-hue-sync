@@ -5,6 +5,7 @@ uv run --no-project --python 3.14 --with homeassistant==2026.11.1 python integra
 """
 
 import asyncio
+import json
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,6 +22,7 @@ async def main() -> None:
     domain = "lg_hue_sync"
     status = {
         "requested_running": True,
+        "display_enabled": True,
         "pipeline_state": "unsupported_source",
         "active_preset": "neutral",
         "fps": 30.0,
@@ -34,7 +36,17 @@ async def main() -> None:
     calls = []
     command_failure = False
     status_failure = False
-    display_enabled = True
+    subscribers = set()
+
+    def publish():
+        payload = json.dumps(status)
+        for subscriber in subscribers:
+            subscriber.put_nowait(payload)
+
+    async def wait_for(predicate):
+        async with asyncio.timeout(5):
+            while not predicate():
+                await asyncio.sleep(0.01)
 
     async def get_status(request):
         if status_failure:
@@ -42,30 +54,44 @@ async def main() -> None:
         return web.json_response(status)
 
     async def command(request):
-        nonlocal display_enabled
         calls.append(request.path)
         if command_failure:
             raise web.HTTPBadGateway()
         if request.path in ("/api/start", "/api/stop"):
             status["requested_running"] = request.path == "/api/start"
         elif request.path.startswith("/api/display/"):
-            display_enabled = request.path.endswith("/on")
+            status["display_enabled"] = request.path.endswith("/on")
         elif request.path.startswith("/api/presets/"):
             status["active_preset"] = request.match_info["preset"]
         elif request.path.startswith("/api/visualization/"):
             status["visualization_modes"][request.match_info["axis"]] = (
                 request.match_info["mode"]
             )
+        publish()
         return web.json_response({"status": "queued"})
 
-    async def get_display(request):
-        return web.json_response({"enabled": display_enabled})
+    async def events(request):
+        if status_failure:
+            raise web.HTTPServiceUnavailable()
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        subscriber = asyncio.Queue()
+        subscribers.add(subscriber)
+        try:
+            await response.write(f"data: {json.dumps(status)}\n\n".encode())
+            while (payload := await subscriber.get()) is not None:
+                await response.write(f"data: {payload}\n\n".encode())
+        except ConnectionError:
+            pass
+        finally:
+            subscribers.remove(subscriber)
+        return response
 
     server = web.Application()
     server.router.add_get("/api/status", get_status)
+    server.router.add_get("/api/status/events", events)
     server.router.add_post("/api/start", command)
     server.router.add_post("/api/stop", command)
-    server.router.add_get("/api/display", get_display)
     server.router.add_post("/api/display/{action}", command)
     server.router.add_post("/api/presets/{preset}", command)
     server.router.add_post("/api/restart", command)
@@ -130,7 +156,8 @@ async def main() -> None:
                 await hass.services.async_call(
                     "switch", service, {"entity_id": switch}, blocking=True
                 )
-                await entry.runtime_data.async_refresh()
+                expected = "on" if service == "turn_on" else "off"
+                await wait_for(lambda: hass.states.get(switch).state == expected)
 
             await set_switch("turn_off")
             assert hass.states.get(switch).state == "off"
@@ -188,7 +215,9 @@ async def main() -> None:
                 await hass.services.async_call(
                     platform, service, {"entity_id": entity_id, **extra}, blocking=True
                 )
-            await entry.runtime_data.async_refresh()
+            await wait_for(
+                lambda: entry.runtime_data.data.get("display_enabled") is False
+            )
             assert calls[-3:] == [
                 "/api/display/off",
                 "/api/presets/vividColor",
@@ -221,7 +250,8 @@ async def main() -> None:
                 "response": "default",
                 "spatial_blend": None,
             }
-            await entry.runtime_data.async_refresh()
+            publish()
+            await wait_for(lambda: hass.states.get(response).state == "Default")
             assert hass.states.get(response).state == "Default"
             assert hass.states.get(blend).state == "unknown"
             for entity_id, option in ((response, "Fast"), (blend, "Soft")):
@@ -231,7 +261,7 @@ async def main() -> None:
                     {"entity_id": entity_id, "option": option},
                     blocking=True,
                 )
-            await entry.runtime_data.async_refresh()
+            await wait_for(lambda: hass.states.get(blend).state == "Soft")
             assert calls[-2:] == [
                 "/api/visualization/response/fast",
                 "/api/visualization/spatial_blend/soft",
@@ -240,11 +270,13 @@ async def main() -> None:
             assert hass.states.get(blend).state == "Soft"
 
             status_failure = True
-            await entry.runtime_data.async_refresh()
+            for subscriber in subscribers:
+                subscriber.put_nowait(None)
+            await wait_for(lambda: hass.states.get(switch).state == STATE_UNAVAILABLE)
             assert hass.states.get(switch).state == STATE_UNAVAILABLE
             assert hass.states.get(sensor).state == STATE_UNAVAILABLE
             status_failure = False
-            await entry.runtime_data.async_refresh()
+            await wait_for(lambda: hass.states.get(switch).state == "on")
             assert hass.states.get(switch).state == "on"
             assert await hass.config_entries.async_unload(entry.entry_id)
             assert entry.state is config_entries.ConfigEntryState.NOT_LOADED
@@ -253,6 +285,8 @@ async def main() -> None:
                 assert entity_state is None or entity_state.state == STATE_UNAVAILABLE
         finally:
             await hass.async_stop(force=True)
+            for subscriber in subscribers:
+                subscriber.put_nowait(None)
             await runner.cleanup()
     print(
         "Home Assistant setup, reconfigure, controls, diagnostics, recovery, and unload passed"

@@ -8,7 +8,10 @@ use crate::{
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Html, IntoResponse, Response,
+    },
     routing::get,
     serve::ListenerExt,
     Json, Router,
@@ -338,7 +341,7 @@ pub enum SyncState {
     UnsupportedSource,
 }
 
-#[derive(Debug, Clone, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 struct SyncStatus {
     requested_running: bool,
     pipeline_state: SyncState,
@@ -368,7 +371,10 @@ pub struct SharedState {
     preview_render_gate: Arc<Semaphore>,
     preview_render_started: std::sync::Mutex<Option<std::time::Instant>>,
     diagnostics: RwLock<Diagnostics>,
-    pub video_status: RwLock<Option<serde_json::Value>>,
+    diagnostics_sample: Mutex<()>,
+    pub video_status: RwLock<Option<Arc<serde_json::Value>>>,
+    status_changed: watch::Sender<()>,
+    status_shutdown: CancellationToken,
     sync_status: RwLock<SyncStatus>,
     command_tx: mpsc::Sender<ControlCommand>,
     /// Capture polling ceiling, not the media frame rate.
@@ -413,7 +419,10 @@ impl SharedState {
             preview_render_gate: Arc::new(Semaphore::new(1)),
             preview_render_started: std::sync::Mutex::new(None),
             diagnostics: RwLock::new(Diagnostics::default()),
+            diagnostics_sample: Mutex::new(()),
             video_status: RwLock::new(None),
+            status_changed: watch::channel(()).0,
+            status_shutdown: CancellationToken::new(),
             sync_status: RwLock::new(SyncStatus {
                 requested_running: true,
                 pipeline_state: SyncState::Starting,
@@ -479,6 +488,7 @@ impl SharedState {
 
     pub fn mark_presets_saved(&self, saved: BTreeMap<String, PresetTuning>) {
         *self.saved_presets.write().unwrap() = saved;
+        self.publish_status();
     }
 
     fn preset_modified(&self) -> bool {
@@ -510,11 +520,15 @@ impl SharedState {
         }
         self.apply_settings_locked(settings).await?;
         *self.active_preset.write().unwrap() = Some(name);
+        self.publish_status();
         Ok(())
     }
 
     pub fn set_fps(&self, fps: f32) {
-        self.fps_x100.store((fps * 100.0) as u32, Ordering::Relaxed);
+        let value = (fps * 100.0) as u32;
+        if self.fps_x100.swap(value, Ordering::Relaxed) != value {
+            self.publish_status();
+        }
     }
 
     pub fn get_fps(&self) -> f32 {
@@ -524,6 +538,13 @@ impl SharedState {
     pub fn set_light_update_fps(&self, fps: f32) {
         self.light_updates_x100
             .store((fps * 100.0) as u32, Ordering::Relaxed);
+        self.publish_status();
+    }
+
+    fn publish_status(&self) {
+        if self.status_changed.receiver_count() > 0 {
+            self.status_changed.send_replace(());
+        }
     }
 
     pub fn light_update_fps(&self) -> f32 {
@@ -541,17 +562,18 @@ impl SharedState {
         }
         self.display_off.store(!enabled, Ordering::Relaxed);
         *observed_at = Some(received_at);
+        self.publish_status();
     }
 
     pub fn set_tv_power_state(&self, active: Option<bool>) {
-        self.tv_power_state.store(
-            match active {
-                Some(true) => 1,
-                Some(false) => 2,
-                None => 0,
-            },
-            Ordering::Relaxed,
-        );
+        let value = match active {
+            Some(true) => 1,
+            Some(false) => 2,
+            None => 0,
+        };
+        if self.tv_power_state.swap(value, Ordering::Relaxed) != value {
+            self.publish_status();
+        }
     }
 
     pub fn set_sync_state(&self, state: SyncState, error: Option<String>) {
@@ -561,12 +583,18 @@ impl SharedState {
             self.nv12_stream.clear();
         }
         let mut status = self.sync_status.write().unwrap();
+        if status.pipeline_state == state && status.last_error == error {
+            return;
+        }
         status.pipeline_state = state;
         status.last_error = error;
+        drop(status);
+        self.publish_status();
     }
 
     pub fn set_requested_running(&self, requested: bool) {
         self.sync_status.write().unwrap().requested_running = requested;
+        self.publish_status();
     }
 
     async fn send_command(&self, command: ControlCommand) -> Result<(), ApiError> {
@@ -582,6 +610,8 @@ impl SharedState {
             _ => {}
         }
         permit.send(command);
+        drop(status);
+        self.publish_status();
         Ok(())
     }
 
@@ -608,6 +638,7 @@ impl SharedState {
             .map_err(|_| ApiError::SetupFailed("sync controller is unavailable".to_string()))?;
         *self.current_settings.write().unwrap() = settings.clone();
         permit.send(ControlCommand::ApplySettings(settings));
+        self.publish_status();
         Ok(())
     }
 }
@@ -640,6 +671,7 @@ struct StatusResponse {
     capture_hardware: bool,
     capture_resolution: String,
     settings: LiveSettings,
+    display_enabled: Option<bool>,
     visualization_modes: VisualizationModes,
     nanoleaf_colors: Vec<RgbColor>,
     hue_colors: Vec<(u8, RgbColor)>,
@@ -753,30 +785,12 @@ pub async fn start_web_server(
     };
     let app = build_router(app_state)?;
     let tracker = TaskTracker::new();
+    let status_shutdown = shared.status_shutdown.clone();
     tracker.spawn(super::bonjour::manage(
         listener.local_addr()?.port(),
         bonjour_rx,
         shutdown.clone(),
     ));
-    let diagnostics_shutdown = shutdown.clone();
-    tracker.spawn(async move {
-        loop {
-            let video = shared.video_status.read().unwrap().clone();
-            let snapshot = if shared.tv_power_state.load(Ordering::Relaxed) == 2 {
-                Diagnostics::default()
-            } else {
-                tokio::select! {
-                    _ = diagnostics_shutdown.cancelled() => break,
-                    snapshot = diagnostics::collect(video) => snapshot,
-                }
-            };
-            *shared.diagnostics.write().unwrap() = snapshot;
-            tokio::select! {
-                _ = diagnostics_shutdown.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-            }
-        }
-    });
     tracker.spawn(async move {
         let listener = listener.tap_io(|socket| {
             // Deliver interactive replies and frame boundaries without Nagle batching.
@@ -785,7 +799,10 @@ pub async fn start_web_server(
             }
         });
         if let Err(error) = axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .with_graceful_shutdown(async move {
+                shutdown.cancelled().await;
+                status_shutdown.cancel();
+            })
             .await
         {
             error!("Web control server failed: {}", error);
@@ -798,9 +815,12 @@ pub async fn start_web_server(
 fn build_router(state: AppState) -> anyhow::Result<Router> {
     let (router, mut document) = OpenApiRouter::<AppState>::new()
         .routes(routes!(status))
+        .routes(routes!(status_events))
+        .routes(routes!(sample_diagnostics))
         .routes(routes!(display_status))
         .routes(routes!(display_control))
         .routes(routes!(preview_frame))
+        .routes(routes!(preview_events))
         .routes(routes!(stream_frame))
         .routes(routes!(nv12_stream))
         .routes(routes!(preview_render))
@@ -964,6 +984,26 @@ async fn preview_frame(State(state): State<AppState>) -> Response {
             },
         ),
     }
+}
+
+/// Publish small HDMI thumbnails while a preview subscriber is connected.
+#[utoipa::path(get, path = "/api/preview/events", tag = "LG Hue Sync",
+    responses((status = 200, description = "Server-sent preview thumbnails", content_type = "text/event-stream")))]
+async fn preview_events(State(state): State<AppState>) -> impl IntoResponse {
+    let receiver = state.shared.preview.subscribe();
+    let shutdown = state.shared.status_shutdown.clone();
+    let stream =
+        futures_util::stream::unfold((receiver, shutdown), |(mut frames, shutdown)| async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => None,
+                result = frames.changed() => {
+                    result.ok()?;
+                    let frame = frames.borrow_and_update().clone();
+                    Some((Event::default().json_data(frame.as_deref()), (frames, shutdown)))
+                }
+            }
+        });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// Export RGB pixels from the existing capture; encode on the companion host.
@@ -1172,7 +1212,11 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     Json(StatusResponse {
         active_preset,
         preset_modified,
-        diagnostics: shared.diagnostics.read().unwrap().clone(),
+        diagnostics: if shared.tv_power_state.load(Ordering::Relaxed) == 2 {
+            Diagnostics::default()
+        } else {
+            shared.diagnostics.read().unwrap().clone()
+        },
         bonjour_enabled,
         is_syncing: sync.pipeline_state == SyncState::Running,
         sync,
@@ -1191,6 +1235,15 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         capture_resolution: shared.capture_resolution.read().unwrap().clone(),
         visualization_modes: VisualizationModes::from_settings(&settings),
         settings,
+        display_enabled: if shared.tv_power_state.load(Ordering::Relaxed) == 2 {
+            None
+        } else {
+            shared
+                .display_observed_at
+                .lock()
+                .unwrap()
+                .map(|_| !shared.display_off.load(Ordering::Relaxed))
+        },
         nanoleaf_colors: shared.live_nanoleaf_colors.read().unwrap().clone(),
         hue_colors: shared.live_hue_colors.read().unwrap().clone(),
         hue_zones: shared.hue_zones.read().unwrap().clone(),
@@ -1200,6 +1253,52 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
             .unwrap()
             .map(CalibrationPattern::name),
     })
+}
+
+/// Send the current status and subsequent changes over one LAN connection.
+#[utoipa::path(get, path = "/api/status/events", tag = "LG Hue Sync",
+    responses((status = 200, description = "Server-sent status snapshots", content_type = "text/event-stream")))]
+async fn status_events(State(state): State<AppState>) -> impl IntoResponse {
+    let changes = state.shared.status_changed.subscribe();
+    let stream = futures_util::stream::unfold(
+        (state, changes, true),
+        |(state, mut changes, first)| async move {
+            if state.shared.status_shutdown.is_cancelled() {
+                return None;
+            }
+            if !first {
+                tokio::select! {
+                    _ = state.shared.status_shutdown.cancelled() => return None,
+                    result = changes.changed() => result.ok()?,
+                };
+            }
+            let Json(snapshot) = status(State(state.clone())).await;
+            Some((
+                Event::default().json_data(snapshot),
+                (state, changes, false),
+            ))
+        },
+    );
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Sample extended diagnostics on request and publish the result to subscribers.
+#[utoipa::path(post, path = "/api/diagnostics/sample", tag = "LG Hue Sync",
+    responses((status = 200, body = Diagnostics)))]
+async fn sample_diagnostics(State(state): State<AppState>) -> Json<Diagnostics> {
+    let shared = &state.shared;
+    let Ok(_sample) = shared.diagnostics_sample.try_lock() else {
+        return Json(shared.diagnostics.read().unwrap().clone());
+    };
+    let video = shared.video_status.read().unwrap().clone();
+    let snapshot = if shared.tv_power_state.load(Ordering::Relaxed) == 2 {
+        Diagnostics::default()
+    } else {
+        diagnostics::collect(video).await
+    };
+    *shared.diagnostics.write().unwrap() = snapshot.clone();
+    shared.publish_status();
+    Json(snapshot)
 }
 
 /// Save and apply the Bonjour discovery preference without restarting the daemon.
@@ -1240,6 +1339,7 @@ async fn set_bonjour(
     sender.send(enabled).map_err(|_| {
         ApiError::SetupFailed("discovery controller stopped after saving".to_string())
     })?;
+    state.shared.publish_status();
     Ok(Json(request))
 }
 
@@ -1260,6 +1360,7 @@ async fn display_status(State(state): State<AppState>) -> Result<Json<DisplaySta
     if let Some(enabled) = enabled {
         state.shared.display_off.store(!enabled, Ordering::Relaxed);
         *state.shared.display_observed_at.lock().unwrap() = Some(std::time::Instant::now());
+        state.shared.publish_status();
     }
     Ok(Json(DisplayState { enabled }))
 }
@@ -1302,6 +1403,7 @@ async fn display_control(
     if let Some(enabled) = actual {
         state.shared.display_off.store(!enabled, Ordering::Relaxed);
         *state.shared.display_observed_at.lock().unwrap() = Some(std::time::Instant::now());
+        state.shared.publish_status();
     }
     Ok(Json(DisplayState { enabled: actual }))
 }
@@ -1676,6 +1778,7 @@ async fn test_pattern(
     let pattern = CalibrationPattern::parse(&pattern)
         .ok_or_else(|| ApiError::BadRequest("unknown test pattern".to_string()))?;
     *state.shared.calibration_pattern.write().unwrap() = pattern;
+    state.shared.publish_status();
     Ok(Json(StatusMessage { status: "ok" }))
 }
 
@@ -2310,7 +2413,7 @@ mod tests {
         let tasks = start_web_server(0, false, shared, PathBuf::new(), shutdown.clone())
             .await
             .unwrap();
-        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks.len(), 2);
         tasks.close();
         shutdown.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(1), tasks.wait())
@@ -2417,12 +2520,15 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(document["info"]["version"], env!("CARGO_PKG_VERSION"));
         let paths = document["paths"].as_object().unwrap();
-        assert_eq!(paths.len(), 24);
+        assert_eq!(paths.len(), 27);
         for (path, method) in [
             ("/api/status", "get"),
+            ("/api/status/events", "get"),
+            ("/api/diagnostics/sample", "post"),
             ("/api/display", "get"),
             ("/api/display/{action}", "post"),
             ("/api/preview/frame", "get"),
+            ("/api/preview/events", "get"),
             ("/api/stream/frame", "get"),
             ("/api/stream/nv12", "get"),
             ("/api/preview/render", "post"),
@@ -2519,6 +2625,46 @@ mod tests {
         assert!(settings.validate().is_ok());
         settings.saturation_boost = 0.49;
         assert!(settings.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn status_subscription_sends_initial_and_command_state() {
+        use tower::ServiceExt;
+        let (app, mut commands) = test_router();
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/api/status/events")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let mut body = response.into_body().into_data_stream();
+        use futures_util::StreamExt;
+        let initial = body.next().await.unwrap().unwrap();
+        assert!(std::str::from_utf8(&initial)
+            .unwrap()
+            .contains("\"requested_running\":true"));
+        let result = app
+            .oneshot(
+                axum::http::Request::post("/api/stop")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+        assert!(matches!(commands.recv().await, Some(ControlCommand::Stop)));
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(std::str::from_utf8(&changed)
+            .unwrap()
+            .contains("\"requested_running\":false"));
     }
 
     #[tokio::test]

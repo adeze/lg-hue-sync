@@ -789,7 +789,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         watchdog.tick();
 
         let observation = update_tv_observation(&mut tv_events, &shared_state);
-        signal_hold.observe(observation.video.as_ref(), std::time::Instant::now());
+        signal_hold.observe(observation.video.as_deref(), std::time::Instant::now());
         source_policy.observe(observation.source.compatible());
         source_policy.observe_display(shared_state.display_off.load(Ordering::Relaxed));
         if auto_tv_power {
@@ -1467,7 +1467,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
         // In auto FPS mode, dynamically update cadence if TV source rate changed (e.g. film started)
         if config.fps == 0 {
-            if let Some(new_fps) = tv_events::frame_rate(observation.video.as_ref()) {
+            if let Some(new_fps) = tv_events::frame_rate(observation.video.as_deref()) {
                 let clamped = new_fps.clamp(20.0, 60.0);
                 if (clamped - target_fps).abs() > 0.5 {
                     target_fps = clamped;
@@ -1854,7 +1854,7 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     if let Some(new_fps) = tv_events::frame_rate(
                         update_tv_observation(&mut tv_events, &shared_state)
                             .video
-                            .as_ref(),
+                            .as_deref(),
                     ) {
                         let clamped = new_fps.clamp(20.0, 60.0);
                         if (clamped - target_fps).abs() > 0.5 {
@@ -1933,7 +1933,14 @@ fn update_tv_observation(
     {
         shared.observe_display_power(enabled, received_at);
     }
-    *shared.video_status.write().unwrap() = snapshot.video.clone();
+    let mut video = shared.video_status.write().unwrap();
+    if match (&*video, &snapshot.video) {
+        (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+        (None, None) => false,
+        _ => true,
+    } {
+        *video = snapshot.video.clone();
+    }
     snapshot
 }
 

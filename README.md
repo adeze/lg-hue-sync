@@ -61,6 +61,8 @@ Home Assistant exposes **Screen sync**, **Display** (panel on/off), **Color pres
 
 Keep the TV's unauthenticated port 8088 on a trusted LAN. The [manual YAML package](integrations/home-assistant/README.md) remains available as an alternative. Remove it if you switch to HACS to avoid duplicate controls.
 
+The subscription-based integration requires a TV build that exposes `/api/status/events`. It reconnects when the TV returns to the network.
+
 Home Assistant also exposes Hue and Nanoleaf connection sensors, TV power state, and capture resolution when reported. The **Response** and **Spatial blending** selectors require a TV build with `visualization_modes` in `GET /api/status`. Each selector applies one live mode. For custom dashboard values, the selector has no selected option until a named mode is chosen.
 
 ## Install and update

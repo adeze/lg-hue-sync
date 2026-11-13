@@ -49,6 +49,8 @@ Apple Shortcuts can apply a dashboard preset over the trusted LAN with a `POST` 
 
 ### Home Assistant
 
+Add the [QSync dashboard card](integrations/home-assistant/dashboard-card.md) to bring the main controls and status into a card that follows your Home Assistant theme.
+
 1. In [HACS → Custom repositories](https://www.hacs.xyz/docs/faq/custom_repositories/), add `https://github.com/adeze/lg-hue-sync` as an **Integration**.
 2. Download **LG Hue Sync** and restart Home Assistant.
 3. In **Settings → Devices & services → Add integration**, select **LG Hue Sync** and enter the TV's LAN IPv4 address or hostname. Use a DHCP reservation or stable hostname.

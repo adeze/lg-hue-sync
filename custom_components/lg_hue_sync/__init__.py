@@ -3,9 +3,12 @@
 import logging
 import re
 from datetime import timedelta
+from pathlib import Path
 from typing import NotRequired, TypedDict
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
+from homeassistant.components import frontend
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
@@ -25,6 +28,7 @@ PLATFORMS = [
 ]
 LOGGER = logging.getLogger(__name__)
 TIMEOUT = ClientTimeout(total=3)
+CARD_URL = "/lg_hue_sync/qsync-card.js"
 
 
 class SyncStatus(TypedDict):
@@ -185,6 +189,20 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
                 "LG Hue Sync did not acknowledge the command"
             ) from err
         await self.async_request_refresh()
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Serve and load the card once per Home Assistant process."""
+    if "frontend" in hass.config.components:
+        await hass.http.async_register_static_paths(
+            [
+                StaticPathConfig(
+                    CARD_URL, str(Path(__file__).with_name("qsync-card.js")), False
+                )
+            ]
+        )
+        frontend.add_extra_js_url(hass, CARD_URL)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> bool:

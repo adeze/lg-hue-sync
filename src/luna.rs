@@ -209,8 +209,11 @@ mod tests {
 [ "$1" = '-i' ] && [ "$2" = 'luna://test/get' ] && [ "$3" = '{"subscribe":true}' ] || exit 99
 echo $$ > "$0.pid"
 # An EOF marker would appear immediately if the parent closed its pipe writer.
-(read -r ignored; : > "$0.eof") <&0 &
+# POSIX shells may replace a background job's stdin with /dev/null.
+exec 3<&0
+(read -r ignored; : > "$0.eof") <&3 3<&- &
 reader=$!
+exec 3<&-
 sleep 0.05
 kill "$reader" 2>/dev/null
 wait "$reader" 2>/dev/null

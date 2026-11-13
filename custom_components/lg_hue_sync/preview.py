@@ -82,6 +82,7 @@ def subscribe_preview(
                 async with coordinator.session.get(
                     api_url(coordinator.host, "preview/events"),
                     timeout=ClientTimeout(sock_connect=3, sock_read=35),
+                    read_bufsize=128 * 1024,
                     allow_redirects=False,
                 ) as response:
                     if (
@@ -94,6 +95,8 @@ def subscribe_preview(
                             return
                         if line.startswith(b"data:"):
                             frame = parse_frame(line[5:])
+                            if frame is not None:
+                                frame.update(coordinator.data.get("preview_regions", {}))
                             connection.send_event(subscription, frame)
                             delay = 1
             except (ClientError, TimeoutError, ValueError):

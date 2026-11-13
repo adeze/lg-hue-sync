@@ -67,6 +67,7 @@ class SyncStatus(TypedDict):
     light_update_fps: NotRequired[float]
     hue_connected: NotRequired[bool]
     nanoleaf_connected: NotRequired[bool]
+    preview_regions: NotRequired[dict]
     capture_hardware: NotRequired[bool]
     capture_resolution: NotRequired[str]
     tv_power_state: NotRequired[str]
@@ -161,6 +162,32 @@ def parse_status(data: object) -> SyncStatus:
         value = data.get(api_key)
         if type(value) in (int, float) and 0 <= value <= 1000:
             status[key] = value
+    regions = {}
+    if isinstance(zones := data.get("hue_zones"), list):
+        regions["hue"] = []
+        for zone in zones[:256]:
+            if not isinstance(zone, dict):
+                continue
+            bounds = [zone.get(key) for key in ("x_min", "y_min", "x_max", "y_max")]
+            if (
+                all(type(value) in (int, float) and 0 <= value <= 1 for value in bounds)
+                and bounds[0] < bounds[2] and bounds[1] < bounds[3]
+            ):
+                name = zone.get("name")
+                regions["hue"].append({
+                    "bounds": bounds,
+                    "name": name[:80] if isinstance(name, str) else "Hue",
+                })
+    if isinstance(colors := data.get("nanoleaf_colors"), list):
+        regions["nanoleaf"] = [
+            [color["r"], color["g"], color["b"]]
+            if isinstance(color, dict) and all(
+                type(color.get(key)) is int and 0 <= color[key] <= 255 for key in "rgb"
+            ) else None
+            for color in colors[:50]
+        ]
+    if regions:
+        status["preview_regions"] = regions
     return status
 
 

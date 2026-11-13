@@ -3,6 +3,7 @@
 The card uses native Home Assistant controls and follows your active theme. It shows screen sync, display power, color preset, response, spatial blending, pipeline state, and output connections. It also offers a pipeline restart and a link to QSync for pairing, calibration, and detailed tuning.
 
 Open **Live HDMI preview** to see a thumbnail updated up to once per second while HDMI sync is running. Home Assistant relays the TV's existing preview stream only while the panel is open and visible.
+Use **Light regions** to show or hide the Hue sampling boxes and Nanoleaf perimeter segments.
 
 1. Install or update LG Hue Sync to 1.3.0 or later through HACS and configure the TV if needed.
 2. Restart Home Assistant, then refresh the browser. The integration serves and loads the card automatically. If you previously registered the standalone card, remove its `/local/qsync-card.js` resource.

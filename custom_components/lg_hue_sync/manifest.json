@@ -9,5 +9,5 @@
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/adeze/lg-hue-sync/issues",
-  "version": "1.4.3-beta.1"
+  "version": "1.4.3-beta.2"
 }

@@ -33,6 +33,11 @@ async def main() -> None:
         "tv_power_state": "active",
         "capture_resolution": "3840x2160",
         "hue_bridge_ip": "192.0.2.1",
+        "hue_zones": [
+            {"x_min": 0, "y_min": 0.2, "x_max": 0.5, "y_max": 0.8, "name": "Left lamp"},
+            {"x_min": -1, "y_min": 0, "x_max": 1, "y_max": 1, "name": "Invalid"},
+        ],
+        "nanoleaf_colors": [{"r": 1, "g": 2, "b": 3}],
         "diagnostics": {"video": {"width": 3840, "input": "private input"}},
     }
     calls = []
@@ -185,11 +190,15 @@ async def main() -> None:
             assert connection.send_error.call_args.args[:2] == (1, "not_found")
             assert not connection.subscriptions
             subscribe_preview(hass, connection, msg)
-            frame = {"width": 1, "height": 1, "rgb": [10, 20, 30]}
+            frame = {"width": 128, "height": 72, "rgb": [255] * (128 * 72 * 3)}
             preview_frames.put_nowait({**frame, "captured_unix_ms": 1})
             await wait_for(lambda: connection.send_event.call_count == 1)
             connection.send_result.assert_called_once_with(1)
-            connection.send_event.assert_called_with(1, frame)
+            connection.send_event.assert_called_with(1, {
+                **frame,
+                "hue": [{"bounds": [0, 0.2, 0.5, 0.8], "name": "Left lamp"}],
+                "nanoleaf": [[1, 2, 3]],
+            })
             preview_frames.put_nowait(None)
             await wait_for(lambda: connection.send_event.call_count == 2)
             connection.send_event.assert_called_with(1, None)

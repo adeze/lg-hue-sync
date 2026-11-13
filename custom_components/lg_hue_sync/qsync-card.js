@@ -90,6 +90,8 @@ class QSyncCard extends HTMLElement {
   #preview = document.createElement("details");
   #canvas = document.createElement("canvas");
   #message = document.createElement("div");
+  #regions = document.createElement("div");
+  #showRegions = document.createElement("input");
   #inView = false;
   #subscription;
   #observer = new IntersectionObserver(([entry]) => {
@@ -106,9 +108,21 @@ class QSyncCard extends HTMLElement {
     this.#canvas.setAttribute("role", "img");
     this.#canvas.setAttribute("aria-label", "Live HDMI thumbnail");
     this.#message.setAttribute("role", "status");
+    const screen = document.createElement("div");
+    screen.style.position = "relative";
+    this.#regions.style.cssText = "position:absolute;inset:0;pointer-events:none";
+    this.#regions.setAttribute("aria-label", "Hue and Nanoleaf screen sampling regions");
+    screen.append(this.#canvas, this.#regions);
+    const regionToggle = document.createElement("label");
+    this.#showRegions.type = "checkbox";
+    this.#showRegions.checked = true;
+    this.#showRegions.addEventListener("change", () => {
+      this.#regions.hidden = !this.#showRegions.checked;
+    });
+    regionToggle.append(this.#showRegions, " Light regions");
     const panel = document.createElement("ha-card");
     panel.style.cssText = "margin-top:8px;padding:12px 16px";
-    this.#preview.append(summary, this.#message, this.#canvas);
+    this.#preview.append(summary, this.#message, regionToggle, screen);
     panel.append(this.#preview);
     this.#preview.addEventListener("toggle", this.#updatePreview);
     this.#draw(null, "Waiting for HDMI capture…");
@@ -154,6 +168,7 @@ class QSyncCard extends HTMLElement {
     this.#message.textContent = frame ? "" : message;
     if (!frame) {
       this.#canvas.width = 0;
+      this.#regions.replaceChildren();
       return;
     }
     const { width, height, rgb } = frame;
@@ -170,6 +185,50 @@ class QSyncCard extends HTMLElement {
       image.data[dst + 3] = 255;
     }
     context.putImageData(image, 0, 0);
+    this.#drawRegions(frame);
+  }
+
+  #drawRegions({ hue = [], nanoleaf = [] }) {
+    const regions = hue.map(({ bounds: [left, top, right, bottom], name }) => {
+      const region = document.createElement("div");
+      region.style.cssText = "position:absolute;box-sizing:border-box;border:1px solid white;" +
+        "background:#ffffff20;overflow:hidden";
+      region.style.left = `${left * 100}%`;
+      region.style.top = `${top * 100}%`;
+      region.style.width = `${(right - left) * 100}%`;
+      region.style.height = `${(bottom - top) * 100}%`;
+      const label = document.createElement("span");
+      label.style.cssText = "background:#000b;color:white;font-size:0.7rem;padding:1px 3px";
+      label.textContent = name;
+      region.append(label);
+      return region;
+    });
+    // Same perimeter order as the QSync admin preview.
+    const edges = {
+      top: Array.from({ length: 13 }, (_, index) => 16 + index),
+      right: Array.from({ length: 7 }, (_, index) => 29 + index),
+      bottom: Array.from({ length: 13 }, (_, index) => index < 7 ? 7 - index : 46 - index),
+      left: Array.from({ length: 7 }, (_, index) => 15 - index),
+    };
+    if (nanoleaf.length) {
+      for (const [side, indexes] of Object.entries(edges)) {
+        const horizontal = side === "top" || side === "bottom";
+        const edge = document.createElement("div");
+        edge.style.cssText = horizontal
+          ? "position:absolute;inset-inline:0;height:5px;display:flex"
+          : "position:absolute;inset-block:0;width:5px;display:flex;flex-direction:column";
+        edge.style[side] = "0";
+        for (const index of indexes) {
+          const segment = document.createElement("span");
+          segment.style.flex = "1";
+          const rgb = nanoleaf[index];
+          if (rgb) segment.style.background = `rgb(${rgb.join(",")})`;
+          edge.append(segment);
+        }
+        regions.push(edge);
+      }
+    }
+    this.#regions.replaceChildren(...regions);
   }
 
   #updatePreview = () => {
@@ -211,7 +270,7 @@ class QSyncCard extends HTMLElement {
         this.#card = createCardElement(config);
         this.#signature = signature;
         this.#pipeline = config.entities?.find((row) => row.name === "Pipeline")?.entity;
-        this.replaceChildren(this.#card, ...(this.#pipeline ? [this.#preview.parentElement] : []));
+        this.replaceChildren(...(this.#pipeline ? [this.#preview.parentElement] : []), this.#card);
       }
       this.#card.hass = this.#hass;
       this.#updatePreview();

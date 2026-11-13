@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3-beta.2] - 2026-11-13
+
+- Show Hue sampling boxes and Nanoleaf perimeter segments over the Home Assistant HDMI preview.
+- Size the Home Assistant relay buffer for full preview frames.
+
 ## [1.4.3-beta.1] - 2026-11-13
 
 - Add an opt-in live HDMI thumbnail to the Home Assistant QSync card using the existing TV preview stream.

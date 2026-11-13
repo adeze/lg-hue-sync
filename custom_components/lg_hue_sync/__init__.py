@@ -2,19 +2,20 @@
 
 import logging
 from datetime import timedelta
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from yarl import URL
 
 DOMAIN = "lg_hue_sync"
-PLATFORMS = [Platform.SWITCH, Platform.SENSOR]
+PLATFORMS = [Platform.SWITCH, Platform.SENSOR, Platform.SELECT, Platform.BUTTON]
 LOGGER = logging.getLogger(__name__)
 TIMEOUT = ClientTimeout(total=3)
 
@@ -24,6 +25,23 @@ class SyncStatus(TypedDict):
 
     requested_running: bool
     pipeline_state: str
+    display_enabled: NotRequired[bool]
+    active_preset: NotRequired[str]
+    capture_fps: NotRequired[float]
+    light_update_fps: NotRequired[float]
+    hue_connected: NotRequired[bool]
+    nanoleaf_connected: NotRequired[bool]
+    capture_hardware: NotRequired[bool]
+    signal: NotRequired[dict[str, dict[str, bool | int | float]]]
+
+
+SIGNAL_FIELDS = {
+    "video": ("available", "width", "height", "frame_rate", "bit_depth"),
+    "display": ("available", "width", "height", "refresh_rate", "muted", "locked"),
+    "transport": ("available", "sample_rate_hz", "channels", "bit_depth"),
+    "decoder": ("available", "source_channels", "output_channels", "atmos_reported"),
+    "output": ("available", "passthrough"),
+}
 
 
 def api_url(host: str, operation: str) -> URL:
@@ -48,10 +66,34 @@ async def read_status(session: ClientSession, host: str) -> SyncStatus:
         or len(data["pipeline_state"]) > 255
     ):
         raise ValueError("Unexpected LG Hue Sync status format")
-    return {
+    status: SyncStatus = {
         "requested_running": data["requested_running"],
         "pipeline_state": data["pipeline_state"],
     }
+    if isinstance(preset := data.get("active_preset"), str) and len(preset) <= 64:
+        status["active_preset"] = preset
+    diagnostics = data.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        status["signal"] = {
+            section: {
+                field: sample[field]
+                for field in fields
+                if type(sample.get(field)) in (bool, int, float)
+            }
+            for section, fields in SIGNAL_FIELDS.items()
+            if isinstance(sample := diagnostics.get(section), dict)
+        }
+    for key in ("hue_connected", "nanoleaf_connected", "capture_hardware"):
+        if isinstance(value := data.get(key), bool):
+            status[key] = value
+    for api_key, key in (
+        ("fps", "capture_fps"),
+        ("light_update_fps", "light_update_fps"),
+    ):
+        value = data.get(api_key)
+        if type(value) in (int, float) and 0 <= value <= 1000:
+            status[key] = value
+    return status
 
 
 type HueSyncConfigEntry = ConfigEntry[HueSyncCoordinator]
@@ -79,9 +121,37 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
 
     async def _async_update_data(self) -> SyncStatus:
         try:
-            return await read_status(self.session, self.host)
+            status = await read_status(self.session, self.host)
         except (ClientError, TimeoutError, ValueError) as err:
             raise UpdateFailed("Could not read LG Hue Sync status") from err
+        try:
+            async with self.session.get(
+                api_url(self.host, "display"), timeout=TIMEOUT, allow_redirects=False
+            ) as response:
+                if response.status == 200:
+                    display = await response.json()
+                    if isinstance(display, dict) and isinstance(
+                        enabled := display.get("enabled"), bool
+                    ):
+                        status["display_enabled"] = enabled
+        except (ClientError, TimeoutError, ValueError):
+            LOGGER.debug("Could not read LG Hue Sync display state")
+        return status
+
+    async def async_command(self, command: str) -> None:
+        """Send an explicit dashboard command and refresh observed state."""
+        try:
+            async with self.session.post(
+                api_url(self.host, command), timeout=TIMEOUT, allow_redirects=False
+            ) as response:
+                response.raise_for_status()
+                if response.status != 200:
+                    raise ValueError("Unexpected command response")
+        except (ClientError, TimeoutError, ValueError) as err:
+            raise HomeAssistantError(
+                "LG Hue Sync did not acknowledge the command"
+            ) from err
+        await self.async_request_refresh()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> bool:

@@ -7,9 +7,16 @@
         "data": {
           "host": "TV IP address or hostname"
         }
+      },
+      "reconfigure": {
+        "title": "Change the LG Hue Sync TV address",
+        "data": {
+          "host": "TV IP address or hostname"
+        }
       }
     },
     "error": {
+      "already_configured": "This TV address is already used by another LG Hue Sync entry.",
       "cannot_connect": "Could not read LG Hue Sync status. Check the address and that the dashboard is reachable on port 8088.",
       "invalid_host": "Enter a bare IPv4 address or hostname, without a URL or port."
     },

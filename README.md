@@ -53,7 +53,11 @@ Apple Shortcuts can apply a dashboard preset over the trusted LAN with a `POST` 
 2. Download **LG Hue Sync** and restart Home Assistant.
 3. In **Settings → Devices & services → Add integration**, select **LG Hue Sync** and enter the TV's LAN IPv4 address or hostname. Use a DHCP reservation or stable hostname.
 
-**Screen sync** starts and stops sync. **Pipeline** reports actual capture state, such as `running`, `paused`, or `unsupported_source`. Keep the TV's unauthenticated port 8088 on a trusted LAN. The [manual YAML package](integrations/home-assistant/README.md) remains available as an alternative; remove it if you switch to HACS to avoid duplicate controls.
+To change the TV address, open the LG Hue Sync entry's **⋮ → Reconfigure** menu. Home Assistant checks the new address before saving and keeps the same entities and automations.
+
+Home Assistant exposes **Screen sync**, **Display** (panel on/off), **Color preset**, and **Restart pipeline**. **Pipeline** shows actual capture state and includes frame rates and output connection flags. **Download diagnostics** on the integration entry exports the last known status and signal measurements. Use the QSync dashboard for pairing, calibration, and detailed tuning.
+
+Keep the TV's unauthenticated port 8088 on a trusted LAN. The [manual YAML package](integrations/home-assistant/README.md) remains available as an alternative. Remove it if you switch to HACS to avoid duplicate controls.
 
 ## Install and update
 

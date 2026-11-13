@@ -30,3 +30,18 @@ class PipelineSensor(CoordinatorEntity[HueSyncCoordinator], SensorEntity):
     @property
     def native_value(self) -> str:
         return self.coordinator.data["pipeline_state"]
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            key: value
+            for key, value in self.coordinator.data.items()
+            if key
+            in (
+                "capture_fps",
+                "light_update_fps",
+                "hue_connected",
+                "nanoleaf_connected",
+                "capture_hardware",
+            )
+        }

@@ -262,3 +262,19 @@
     >
   </div>
 </details>
+<details class="card accordion">
+  <summary>Home Assistant</summary>
+  <div class="section-body">
+    <p>Open QSync directly on the TV address, then use that address in LG Hue Sync setup.</p>
+    <p>Address in this browser: <code>{window.location.hostname}</code></p>
+    <a
+      class="text-link"
+      href="https://my.home-assistant.io/redirect/hacs_repository/?owner=adeze&repository=lg-hue-sync&category=integration"
+      target="_blank"
+      rel="noopener noreferrer">Open LG Hue Sync in HACS ↗</a
+    >
+    <a class="text-link" href="/api/status" target="_blank" rel="noopener"
+      >Check local API status ↗</a
+    >
+  </div>
+</details>

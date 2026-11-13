@@ -19,10 +19,19 @@ from homeassistant.helpers import entity_registry
 
 async def main() -> None:
     domain = "lg_hue_sync"
-    status = {"requested_running": True, "pipeline_state": "unsupported_source"}
+    status = {
+        "requested_running": True,
+        "pipeline_state": "unsupported_source",
+        "active_preset": "neutral",
+        "fps": 30.0,
+        "hue_connected": True,
+        "hue_bridge_ip": "192.0.2.1",
+        "diagnostics": {"video": {"width": 3840, "input": "private input"}},
+    }
     calls = []
     command_failure = False
     status_failure = False
+    display_enabled = True
 
     async def get_status(request):
         if status_failure:
@@ -30,16 +39,29 @@ async def main() -> None:
         return web.json_response(status)
 
     async def command(request):
+        nonlocal display_enabled
         calls.append(request.path)
         if command_failure:
             raise web.HTTPBadGateway()
-        status["requested_running"] = request.path == "/api/start"
+        if request.path in ("/api/start", "/api/stop"):
+            status["requested_running"] = request.path == "/api/start"
+        elif request.path.startswith("/api/display/"):
+            display_enabled = request.path.endswith("/on")
+        elif request.path.startswith("/api/presets/"):
+            status["active_preset"] = request.match_info["preset"]
         return web.json_response({"status": "queued"})
+
+    async def get_display(request):
+        return web.json_response({"enabled": display_enabled})
 
     server = web.Application()
     server.router.add_get("/api/status", get_status)
     server.router.add_post("/api/start", command)
     server.router.add_post("/api/stop", command)
+    server.router.add_get("/api/display", get_display)
+    server.router.add_post("/api/display/{action}", command)
+    server.router.add_post("/api/presets/{preset}", command)
+    server.router.add_post("/api/restart", command)
 
     with TemporaryDirectory() as config_dir:
         root = Path(__file__).resolve().parents[2]
@@ -118,6 +140,61 @@ async def main() -> None:
             assert hass.states.get(switch).state == "on"
             assert hass.states.get(sensor).state == "running"
 
+            reconfigure = await hass.config_entries.flow.async_init(
+                domain,
+                context={
+                    "source": config_entries.SOURCE_RECONFIGURE,
+                    "entry_id": entry.entry_id,
+                },
+            )
+            assert reconfigure["step_id"] == "reconfigure", reconfigure
+            reconfigure_id = reconfigure["flow_id"]
+            rejected = await hass.config_entries.flow.async_configure(
+                reconfigure_id, {"host": "127.0.0.2"}
+            )
+            assert rejected["errors"] == {"base": "cannot_connect"}, rejected
+            assert entry.data["host"] == "127.0.0.1"
+            result = await hass.config_entries.flow.async_configure(
+                reconfigure_id, {"host": " LOCALHOST. "}
+            )
+            assert result["reason"] == "reconfigure_successful", result
+            await hass.async_block_till_done()
+            assert (
+                entry.unique_id
+                == entry.data["host"]
+                == entry.runtime_data.host
+                == "localhost"
+            )
+            assert hass.states.get(switch).state == "on"
+            assert hass.states.get(sensor).attributes["capture_fps"] == 30.0
+            assert hass.states.get(sensor).attributes["hue_connected"] is True
+
+            for platform, suffix, service, extra in (
+                ("switch", "display", "turn_off", {}),
+                ("select", "color_preset", "select_option", {"option": "Vivid color"}),
+                ("button", "restart_pipeline", "press", {}),
+            ):
+                entity_id = registry.async_get_entity_id(
+                    platform, domain, f"{entry.entry_id}_{suffix}"
+                )
+                await hass.services.async_call(
+                    platform, service, {"entity_id": entity_id, **extra}, blocking=True
+                )
+            await entry.runtime_data.async_refresh()
+            assert calls[-3:] == [
+                "/api/display/off",
+                "/api/presets/vividColor",
+                "/api/restart",
+            ]
+            from custom_components.lg_hue_sync.diagnostics import (
+                async_get_config_entry_diagnostics,
+            )
+
+            report = await async_get_config_entry_diagnostics(hass, entry)
+            assert report["last_known_status"]["signal"] == {"video": {"width": 3840}}
+            assert report["last_known_status"]["display_enabled"] is False
+            assert "192.0.2.1" not in str(report) and "localhost" not in str(report)
+
             status_failure = True
             await entry.runtime_data.async_refresh()
             assert hass.states.get(switch).state == STATE_UNAVAILABLE
@@ -133,7 +210,9 @@ async def main() -> None:
         finally:
             await hass.async_stop(force=True)
             await runner.cleanup()
-    print("Home Assistant setup, start/stop, failure, recovery, and unload passed")
+    print(
+        "Home Assistant setup, reconfigure, controls, diagnostics, recovery, and unload passed"
+    )
 
 
 if __name__ == "__main__":

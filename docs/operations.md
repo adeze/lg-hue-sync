@@ -257,6 +257,12 @@ checks and supervised TV validation. No candidate is copied, deployed or
 published by this command. The native build remains the default and the cached
 Docker build remains the validated fallback.
 
+## Optional MQTT output
+
+Add an `mqtt` object to the TV's local QSync configuration and restart the daemon to enable publishing. Set `host` to the broker address and `client_id` to a unique ID using letters, digits, underscores, or hyphens. Set `port` as needed. It defaults to 1883. For TLS, set `tls` to true and use your broker's TLS port and a certificate trusted by the TV. The optional `username` and `password` must be supplied together over TLS. Omit the object to disable MQTT.
+
+QSync publishes retained JSON at `qsync/<client_id>/status` and retained `online` or `offline` at `qsync/<client_id>/availability`. The payload includes pipeline state, output connections, daemon version, and the most recently sampled signal diagnostics. Configure Home Assistant MQTT sensors against these topics if you want MQTT consumers. The QSync integration already exposes its native entities through the existing status stream. Bonjour advertises the web dashboard independently.
+
 ## First install
 
 Root SSH must already work; rooting is a separate owner action.

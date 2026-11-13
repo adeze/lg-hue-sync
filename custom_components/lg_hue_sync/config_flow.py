@@ -84,8 +84,10 @@ class HueSyncConfigFlow(ConfigFlow, domain=DOMAIN):
         schema = vol.Schema({
             vol.Required(CONF_HOST): str,
             **{
-                vol.Optional(key): DeviceSelector({"filter": {"integration": domain}})
-                for key, domain in DEVICE_DOMAINS.items()
+                vol.Optional(key): DeviceSelector({
+                    "filter": [{"integration": domain} for domain in domains],
+                })
+                for key, domains in DEVICE_DOMAINS.items()
             },
         })
         return self.async_show_form(

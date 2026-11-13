@@ -202,6 +202,8 @@ pub struct Config {
     /// Advertise the dashboard and OpenAPI URL over Bonjour.
     #[serde(default)]
     pub bonjour_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mqtt: Option<crate::web::mqtt::MqttConfig>,
     /// Automatically pause/resume outputs with the TV's active/standby state.
     #[serde(default = "default_true")]
     pub auto_tv_power: bool,
@@ -452,6 +454,7 @@ impl Config {
             active_preset: Some("neutral".into()),
             preset_overrides: BTreeMap::new(),
             bonjour_enabled: false,
+            mqtt: None,
             auto_tv_power: true,
             hue_enabled: true,
             hue_sync_enabled: true,

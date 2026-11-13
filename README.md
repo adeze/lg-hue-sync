@@ -51,7 +51,7 @@ Apple Shortcuts can apply a dashboard preset over the trusted LAN with a `POST` 
 
 [![Open LG Hue Sync in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=adeze&repository=lg-hue-sync&category=integration)
 
-Add the [QSync dashboard card](integrations/home-assistant/dashboard-card.md) to bring the main controls and status into a card that follows your Home Assistant theme.
+Use the [QSync dashboard preset](integrations/home-assistant/qsync-dashboard.yaml) for a full-width Sections view, or add the [QSync card](integrations/home-assistant/dashboard-card.md) to an existing dashboard. Both use your Home Assistant theme.
 
 1. Open LG Hue Sync with the button above, or add `https://github.com/adeze/lg-hue-sync` as an **Integration** in [HACS → Custom repositories](https://www.hacs.xyz/docs/faq/custom_repositories/).
 2. Download **LG Hue Sync** and restart Home Assistant.
@@ -59,11 +59,13 @@ Add the [QSync dashboard card](integrations/home-assistant/dashboard-card.md) to
 
 To change the TV address, open the LG Hue Sync entry's **⋮ → Reconfigure** menu. Home Assistant checks the new address before saving and keeps the same entities and automations.
 
-Home Assistant exposes **Screen sync**, **Display** (panel on/off), **Color preset**, and **Restart pipeline**. **Pipeline** shows actual capture state and includes frame rates and output connection flags. **Download diagnostics** on the integration entry exports the last known status and signal measurements. Use the QSync dashboard for pairing, calibration, and detailed tuning.
+The card groups **Colour**, **Response**, and **Spatial blending** in **Ambient style** and puts the live HDMI preview and sampling regions above it. **Advanced tuning** exposes QSync's brightness, colour, timing, and output controls on TV builds that support partial settings updates. These controls are Home Assistant entities and can also be used in scripts and automations.
+
+**Refresh diagnostics** takes a fresh HDMI, display, and audio sample. **Pipeline activity** records capture transitions and connection changes. **Download diagnostics** exports the last known measurements. Reconfigure can link the TV from the built-in LG webOS or bscpylgtv integration for the media player controls. Use the Hue and Nanoleaf integrations for everyday lighting controls and the QSync admin page for Entertainment pairing and layout calibration.
 
 Keep the TV's unauthenticated port 8088 on a trusted LAN. The [manual YAML package](integrations/home-assistant/README.md) remains available as an alternative. Remove it if you switch to HACS to avoid duplicate controls.
 
-The subscription-based integration requires a TV build that exposes `/api/status/events`. It reconnects when the TV returns to the network.
+The integration uses local push through `/api/status/events` and reconnects when the TV returns to the network. The optional [MQTT publisher](docs/operations.md#optional-mqtt-output) can also send status and diagnostics to a broker. HACS installs the Home Assistant integration. The [TV daemon installer](docs/operations.md#first-install) runs separately.
 
 Home Assistant also exposes Hue and Nanoleaf connection sensors, TV power state, and capture resolution when reported. The **Response** and **Spatial blending** selectors require a TV build with `visualization_modes` in `GET /api/status`. Each selector applies one live mode. For custom dashboard values, the selector has no selected option until a named mode is chosen.
 

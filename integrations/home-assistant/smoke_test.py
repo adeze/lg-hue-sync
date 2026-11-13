@@ -39,6 +39,8 @@ async def main() -> None:
         ],
         "nanoleaf_colors": [{"r": 1, "g": 2, "b": 3}],
         "diagnostics": {"video": {"width": 3840, "input": "private input"}},
+        "settings_patch_supported": True,
+        "settings": {"brightness_multiplier": 1.0, "use_xy_gamut": True},
     }
     calls = []
     command_failure = False
@@ -80,6 +82,11 @@ async def main() -> None:
         publish()
         return web.json_response({"status": "queued"})
 
+    async def patch_tuning(request):
+        status["settings"].update(await request.json())
+        publish()
+        return web.json_response({"status": "ok"})
+
     async def events(request):
         if status_failure:
             raise web.HTTPServiceUnavailable()
@@ -120,6 +127,8 @@ async def main() -> None:
     server.router.add_post("/api/display/{action}", command)
     server.router.add_post("/api/presets/{preset}", command)
     server.router.add_post("/api/restart", command)
+    server.router.add_patch("/api/settings", patch_tuning)
+    server.router.add_post("/api/save-config", command)
     server.router.add_post("/api/visualization/{axis}/{mode}", command)
 
     with TemporaryDirectory() as config_dir:
@@ -376,15 +385,38 @@ async def main() -> None:
             assert hass.states.get(response).state == "Fast"
             assert hass.states.get(blend).state == "Soft"
 
+            brightness = registry.async_get_entity_id(
+                "number", domain, f"{entry.entry_id}_brightness_multiplier"
+            )
+            await hass.services.async_call(
+                "number", "set_value", {"entity_id": brightness, "value": 1.5},
+                blocking=True,
+            )
+            await wait_for(lambda: hass.states.get(brightness).state == "1.5")
+            assert status["settings"]["use_xy_gamut"] is True
+            assert calls[-1] == "/api/save-config"
+
+            hdmi_rate = registry.async_get_entity_id(
+                "sensor", domain, f"{entry.entry_id}_video_frame_rate"
+            )
+            status["diagnostics"]["video"].update(available=True, frame_rate=24)
+            publish()
+            await wait_for(lambda: hass.states.get(hdmi_rate).state == "24")
+
             status_failure = True
             for subscriber in subscribers:
                 subscriber.put_nowait(None)
             await wait_for(lambda: hass.states.get(switch).state == STATE_UNAVAILABLE)
             assert hass.states.get(switch).state == STATE_UNAVAILABLE
             assert hass.states.get(sensor).state == STATE_UNAVAILABLE
+            activity = registry.async_get_entity_id(
+                "event", domain, f"{entry.entry_id}_pipeline_activity"
+            )
+            assert hass.states.get(activity).attributes["event_type"] == "disconnected"
             status_failure = False
             await wait_for(lambda: hass.states.get(switch).state == "on")
             assert hass.states.get(switch).state == "on"
+            assert hass.states.get(activity).attributes["event_type"] == "reconnected"
 
             cleared = await hass.config_entries.flow.async_init(
                 domain,

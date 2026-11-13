@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
@@ -16,8 +17,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from yarl import URL
+
+from .tuning import parse_tuning
 
 DOMAIN = "lg_hue_sync"
 PLATFORMS = [
@@ -26,14 +30,16 @@ PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.SELECT,
     Platform.BUTTON,
+    Platform.NUMBER,
+    Platform.EVENT,
 ]
 LOGGER = logging.getLogger(__name__)
 TIMEOUT = ClientTimeout(total=3)
 CARD_URL = "/lg_hue_sync/qsync-card.js"
 DEVICE_DOMAINS = {
-    "tv_device": "webostv",
-    "hue_device": "hue",
-    "nanoleaf_device": "nanoleaf",
+    "tv_device": ("webostv", "bscpylgtv"),
+    "hue_device": ("hue",),
+    "nanoleaf_device": ("nanoleaf",),
 }
 
 
@@ -47,7 +53,7 @@ def configured_device(
     if not isinstance(device, dr.DeviceEntry):
         return None
     entry = hass.config_entries.async_get_entry(device.config_entry_id)
-    if entry is None or entry.domain != DEVICE_DOMAINS[key]:
+    if entry is None or entry.domain not in DEVICE_DOMAINS[key]:
         return None
     if key == "hue_device" and not any(
         kind == dr.CONNECTION_NETWORK_MAC for kind, _ in device.connections
@@ -58,6 +64,9 @@ def configured_device(
 
 class SyncStatus(TypedDict):
     """Separate requested sync from actual capture state."""
+
+    tuning: NotRequired[dict[str, bool | int | float]]
+    daemon_version: NotRequired[str]
 
     requested_running: bool
     pipeline_state: str
@@ -73,16 +82,18 @@ class SyncStatus(TypedDict):
     tv_power_state: NotRequired[str]
     preset_modified: NotRequired[bool]
     visualization_modes: NotRequired[dict[str, str | None]]
-    signal: NotRequired[dict[str, dict[str, bool | int | float]]]
+    signal: NotRequired[dict[str, dict[str, bool | int | float | str]]]
+    diagnostics_sampled_at: NotRequired[str]
 
 
 SIGNAL_FIELDS = {
-    "video": ("available", "width", "height", "frame_rate", "bit_depth"),
-    "display": ("available", "width", "height", "refresh_rate", "muted", "locked"),
-    "transport": ("available", "sample_rate_hz", "channels", "bit_depth"),
-    "decoder": ("available", "source_channels", "output_channels", "atmos_reported"),
-    "output": ("available", "passthrough"),
+    "video": ("available", "width", "height", "frame_rate", "bit_depth", "hdr", "pixel_encoding", "range", "colourimetry"),
+    "display": ("available", "width", "height", "refresh_rate", "muted", "locked", "enabled"),
+    "transport": ("available", "codec", "sample_rate_hz", "channels", "bit_depth"),
+    "decoder": ("available", "codec", "sample_rate_hz", "source_channels", "output_codec", "output_channels", "atmos_reported"),
+    "output": ("available", "arc_state", "passthrough"),
 }
+SIGNAL_TEXT = {"hdr", "pixel_encoding", "range", "colourimetry", "codec", "output_codec", "arc_state"}
 VISUALIZATION_OPTIONS = {
     "response": {"Slow": "slow", "Default": "default", "Fast": "fast"},
     "spatial_blend": {"Local": "local", "Balanced": "balanced", "Soft": "soft"},
@@ -119,6 +130,14 @@ def parse_status(data: object) -> SyncStatus:
         "requested_running": data["requested_running"],
         "pipeline_state": data["pipeline_state"],
     }
+    if isinstance(version := data.get("version"), str) and re.fullmatch(
+        r"[0-9][0-9A-Za-z.+-]{0,63}", version
+    ):
+        status["daemon_version"] = version
+    if data.get("settings_patch_supported") is True and isinstance(
+        raw_settings := data.get("settings"), dict
+    ):
+        status["tuning"] = parse_tuning(raw_settings)
     if isinstance(preset := data.get("active_preset"), str) and len(preset) <= 64:
         status["active_preset"] = preset
     if isinstance(enabled := data.get("display_enabled"), bool):
@@ -138,11 +157,15 @@ def parse_status(data: object) -> SyncStatus:
         }
     diagnostics = data.get("diagnostics")
     if isinstance(diagnostics, dict):
+        if type(sampled := diagnostics.get("sampled_unix_ms")) is int and 0 < sampled < 253402300799000:
+            status["diagnostics_sampled_at"] = datetime.fromtimestamp(sampled / 1000, UTC).isoformat()
         status["signal"] = {
             section: {
                 field: sample[field]
                 for field in fields
                 if type(sample.get(field)) in (bool, int, float)
+                or (field in SIGNAL_TEXT and isinstance(sample.get(field), str)
+                    and len(sample[field]) <= 80)
             }
             for section, fields in SIGNAL_FIELDS.items()
             if isinstance(sample := diagnostics.get(section), dict)
@@ -206,6 +229,7 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
             always_update=False,
         )
         self.host = entry.data[CONF_HOST]
+        self.tuning_lock = asyncio.Lock()
         self.session = async_get_clientsession(hass)
         self.device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -237,6 +261,8 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
                         if line.startswith(b"data:"):
                             data = parse_status(json.loads(line[5:]))
                             delay = 1
+                            if not self.last_update_success:
+                                LOGGER.info("LG Hue Sync status stream restored")
                             if data != self.data or not self.last_update_success:
                                 self.async_set_updated_data(data)
                 raise UpdateFailed("LG Hue Sync status stream closed")
@@ -247,11 +273,28 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
 
-    async def async_command(self, command: str) -> None:
+    async def async_apply_tuning(self, patch: dict[str, bool | int | float]) -> None:
+        """Apply a partial change and save using the same API as the admin dashboard."""
+        async with self.tuning_lock:
+            if not self.last_update_success or not self.data.get("tuning"):
+                raise HomeAssistantError("The TV daemon does not offer live tuning")
+            await self.async_command("settings", method="PATCH", payload=patch)
+            try:
+                await self.async_command("save-config", timeout=ClientTimeout(total=7))
+            except HomeAssistantError as err:
+                raise HomeAssistantError(
+                    "QSync applied the live change but could not confirm it was saved"
+                ) from err
+
+    async def async_command(
+        self, command: str, *, method: str = "POST", payload: dict | None = None,
+        timeout: ClientTimeout = TIMEOUT,
+    ) -> None:
         """Send an explicit dashboard command. The status stream reports its result."""
         try:
-            async with self.session.post(
-                api_url(self.host, command), timeout=TIMEOUT, allow_redirects=False
+            async with self.session.request(
+                method, api_url(self.host, command), json=payload, timeout=timeout,
+                allow_redirects=False,
             ) as response:
                 response.raise_for_status()
                 if response.status != 200:
@@ -285,6 +328,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> b
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    for key in DEVICE_DOMAINS:
+        device_id = entry.data.get(key)
+        issue_id = f"{entry.entry_id}_{key}"
+        if device_id and dr.async_get(hass).async_get(device_id) is None:
+            ir.async_create_issue(
+                hass, DOMAIN, issue_id, is_fixable=False,
+                severity=ir.IssueSeverity.WARNING, translation_key="missing_device",
+                learn_more_url="https://github.com/adeze/lg-hue-sync/blob/main/integrations/home-assistant/dashboard-card.md",
+            )
+        else:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
     registry = dr.async_get(hass)
     if device := registry.async_get_device_by_identifier(
         (DOMAIN, entry.entry_id), entry.entry_id
@@ -307,3 +361,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> b
 async def async_unload_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> bool:
     """Unload all entity platforms."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> None:
+    """Clear device link repairs when the integration entry is removed."""
+    for key in DEVICE_DOMAINS:
+        ir.async_delete_issue(hass, DOMAIN, f"{entry.entry_id}_{key}")

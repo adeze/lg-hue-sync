@@ -652,6 +652,8 @@ struct AppState {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 struct StatusResponse {
+    version: &'static str,
+    settings_patch_supported: bool,
     active_preset: Option<String>,
     preset_modified: bool,
     diagnostics: Diagnostics,
@@ -812,6 +814,33 @@ pub async fn start_web_server(
     Ok(tracker)
 }
 
+impl SharedState {
+    pub(crate) fn start_mqtt(
+        self: &Arc<Self>,
+        config: super::mqtt::MqttConfig,
+        shutdown: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let shared = self.clone();
+        tokio::spawn(super::mqtt::publish(
+            config,
+            self.status_changed.subscribe(),
+            move || {
+                let sync = shared.sync_status.read().unwrap();
+                let diagnostics = shared.diagnostics.read().unwrap();
+                serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "pipeline_state": sync.pipeline_state,
+                    "requested_running": sync.requested_running,
+                    "hue_connected": shared.hue_connected.load(Ordering::Relaxed),
+                    "nanoleaf_connected": shared.nanoleaf_connected.load(Ordering::Relaxed),
+                    "diagnostics": &*diagnostics,
+                })
+            },
+            shutdown,
+        ))
+    }
+}
+
 fn build_router(state: AppState) -> anyhow::Result<Router> {
     let (router, mut document) = OpenApiRouter::<AppState>::new()
         .routes(routes!(status))
@@ -829,6 +858,7 @@ fn build_router(state: AppState) -> anyhow::Result<Router> {
         .routes(routes!(stop))
         .routes(routes!(toggle))
         .routes(routes!(settings))
+        .routes(routes!(patch_settings))
         .routes(routes!(set_visualization_mode))
         .routes(routes!(apply_preset))
         .routes(routes!(reset_preset))
@@ -1210,6 +1240,8 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let preset_modified = shared.preset_modified();
     let settings = shared.current_settings.read().unwrap().clone();
     Json(StatusResponse {
+        version: env!("CARGO_PKG_VERSION"),
+        settings_patch_supported: true,
         active_preset,
         preset_modified,
         diagnostics: if shared.tv_power_state.load(Ordering::Relaxed) == 2 {
@@ -1475,6 +1507,32 @@ async fn settings(
 ) -> Result<Json<StatusMessage>, ApiError> {
     settings.validate()?;
     state.shared.apply_settings(settings).await?;
+    Ok(Json(StatusMessage { status: "ok" }))
+}
+
+/// Apply only the supplied tuning fields against the latest settings.
+#[utoipa::path(
+    patch, path = "/api/settings", tag = "LG Hue Sync",
+    request_body = serde_json::Value,
+    responses((status = 200, body = StatusMessage), (status = 400, body = ErrorResponse))
+)]
+async fn patch_settings(
+    State(state): State<AppState>,
+    Json(patch): Json<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Json<StatusMessage>, ApiError> {
+    let _guard = state.shared.settings_update_lock.lock().await;
+    let mut current = serde_json::to_value(&*state.shared.current_settings.read().unwrap())
+        .map_err(|_| ApiError::SetupFailed("Could not read live settings".into()))?;
+    let fields = current.as_object_mut().expect("LiveSettings is a struct");
+    for (key, value) in patch {
+        let field = fields
+            .get_mut(&key)
+            .ok_or_else(|| ApiError::BadRequest(format!("Unknown live setting: {key}")))?;
+        *field = value;
+    }
+    let settings = serde_json::from_value(current)
+        .map_err(|_| ApiError::BadRequest("Invalid live settings".into()))?;
+    state.shared.apply_settings_locked(settings).await?;
     Ok(Json(StatusMessage { status: "ok" }))
 }
 
@@ -2537,6 +2595,7 @@ mod tests {
             ("/api/stop", "post"),
             ("/api/toggle", "post"),
             ("/api/settings", "post"),
+            ("/api/settings", "patch"),
             ("/api/visualization/{axis}/{mode}", "post"),
             ("/api/presets/{name}", "post"),
             ("/api/presets/{name}/reset", "post"),
@@ -2665,6 +2724,37 @@ mod tests {
         assert!(std::str::from_utf8(&changed)
             .unwrap()
             .contains("\"requested_running\":false"));
+    }
+
+    #[tokio::test]
+    async fn tuning_patch_preserves_other_settings_and_rejects_invalid_values() {
+        use tower::ServiceExt;
+        let (app, mut commands) = test_router();
+        for (body, expected) in [
+            (r#"{"brightness_multiplier":9}"#, StatusCode::BAD_REQUEST),
+            (r#"{"unknown":true}"#, StatusCode::BAD_REQUEST),
+            (r#"{"brightness_multiplier":1.5}"#, StatusCode::OK),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::patch("/api/settings")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected != StatusCode::OK {
+                assert!(commands.try_recv().is_err());
+            }
+        }
+        let Some(ControlCommand::ApplySettings(updated)) = commands.recv().await else {
+            panic!("expected settings update");
+        };
+        assert_eq!(updated.brightness_multiplier, 1.5);
+        assert_eq!(updated.gamma, settings().gamma);
     }
 
     #[tokio::test]

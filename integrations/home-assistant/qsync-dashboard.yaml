@@ -1,0 +1,12 @@
+views:
+  - title: QSync
+    path: sync
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        column_span: 2
+        cards:
+          - type: custom:qsync-card
+            grid_options:
+              columns: full

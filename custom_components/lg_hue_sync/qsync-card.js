@@ -12,6 +12,45 @@ const STATUS = [
   ["binary_sensor", "nanoleaf_connection", "Nanoleaf connection"],
 ];
 const MAINTENANCE = [["button", "restart_pipeline", "Restart pipeline"]];
+const TUNING = [
+  ["number", "brightness", "Brightness"],
+  ["number", "saturation", "Saturation"],
+  ["number", "highlights", "Highlights"],
+  ["number", "blend", "Blend"],
+  ["number", "gamma", "Gamma"],
+  ["number", "response_strength", "Response strength"],
+  ["number", "scene_limit", "Scene limit"],
+  ["number", "black_gate", "Black gate"],
+  ["number", "depth_influence", "Depth influence"],
+  ["number", "black_screen_hold", "Black-screen hold"],
+  ["number", "black_screen_fade", "Black-screen fade"],
+  ["number", "hue_output_brightness", "Hue output brightness"],
+  ["number", "nanoleaf_output_brightness", "Nanoleaf output brightness"],
+  ["switch", "strict_black", "Strict black"],
+  ["switch", "direct_rgb_mode", "Direct RGB mode"],
+  ["switch", "letterbox_compensation", "Letterbox compensation"],
+  ["switch", "midtone_lift_legacy", "Midtone lift (legacy)"],
+  ["switch", "hue_screen_sync", "Hue screen sync"],
+  ["switch", "nanoleaf_screen_sync", "Nanoleaf screen sync"],
+  ["switch", "follow_tv_power", "Follow TV power"],
+  ["button", "reset_colour", "Reset colour"],
+  ["button", "save_settings", "Save settings"],
+];
+const SIGNAL = [
+  ["sensor", "hdmi_frame_rate", "HDMI frame rate"],
+  ["sensor", "hdmi_hdr_format", "HDMI HDR format"],
+  ["sensor", "display_refresh_rate", "Display refresh rate"],
+  ["sensor", "arc_status", "ARC status"],
+  ["sensor", "audio_transport_codec", "Audio transport codec"],
+  ["sensor", "audio_transport_rate", "Audio transport rate"],
+  ["sensor", "audio_output_codec", "Audio output codec"],
+  ["event", "pipeline_activity", "Pipeline activity"],
+  ["button", "refresh_diagnostics", "Refresh diagnostics"],
+];
+const SIGNAL_ENTITIES = new Set([
+  "video_frame_rate", "video_hdr", "display_refresh_rate", "output_arc_state",
+  "transport_codec", "transport_sample_rate_hz", "decoder_output_codec",
+]);
 
 function devices(hass) {
   return [...new Set(Object.values(hass.entities ?? {})
@@ -28,13 +67,33 @@ function cardConfig(config, hass) {
   const rows = (fields) => fields.flatMap(([domain, key, name]) => {
     const entity = config.entities?.[key] ?? entries.find(
       (entry) => entry.entity_id.startsWith(`${domain}.`) &&
-        entry.entity_id.endsWith(`_${key}`) && hass.states[entry.entity_id],
+        (entry.entity_id.endsWith(`_${key}`) || entry.entity_id === `${domain}.${key}`) &&
+        hass.states[entry.entity_id],
     )?.entity_id;
     return entity ? [{ entity, name }] : [];
   });
-  const entities = rows(CONTROLS);
-  for (const [label, fields] of [["Status", STATUS], ["Maintenance", MAINTENANCE]]) {
+  const controls = rows(CONTROLS);
+  const modes = controls.filter(({entity}) => entity.startsWith("select."));
+  const entities = controls.filter(({entity}) => !entity.startsWith("select."));
+  for (const [label, fields] of [["Status", STATUS], ["Diagnostics", SIGNAL], ["Maintenance", MAINTENANCE]]) {
     const section = rows(fields);
+    if (label === "Diagnostics") {
+      const pipeline = rows(STATUS)[0]?.entity;
+      const attributes = hass.states[pipeline]?.attributes ?? {};
+      for (const [key, label] of [["video", "HDMI"], ["display", "Display"], ["transport", "Audio transport"], ["decoder", "Audio decoder"], ["output", "eARC / audio output"]]) {
+        const prefix = `signal_${key}_`;
+        for (const attribute of Object.keys(attributes).filter((name) => name.startsWith(prefix))) {
+          if (SIGNAL_ENTITIES.has(attribute.slice("signal_".length))) continue;
+          const field = attribute.slice(prefix.length);
+          section.push({ type: "attribute", entity: pipeline, attribute,
+            name: `${label} · ${field.replaceAll("_", " ")}` });
+        }
+      }
+      if (attributes.diagnostics_sampled_at) {
+        section.push({ type: "attribute", entity: pipeline, attribute: "diagnostics_sampled_at",
+          name: "Last sample", format: "datetime" });
+      }
+    }
     if (label === "Status") {
       const pipeline = section.find((row) => row.name === "Pipeline")?.entity;
       const attributes = hass.states[pipeline]?.attributes;
@@ -42,11 +101,18 @@ function cardConfig(config, hass) {
         ["capture_fps", "Capture rate", " fps"],
         ["light_update_fps", "Light update rate", " fps"],
         ["capture_resolution", "Capture resolution", ""],
+        ["daemon_version", "TV daemon version", ""],
       ]) {
         if (attributes?.[attribute] != null) {
           section.push({ type: "attribute", entity: pipeline, attribute, name, suffix });
         }
       }
+      const tv = attributes?.tv_device;
+      const player = tv && Object.values(hass.entities ?? {}).find(
+        (entry) => entry.device_id === tv && entry.entity_id.startsWith("media_player.") &&
+          hass.states[entry.entity_id],
+      );
+      if (player) section.push({ entity: player.entity_id, name: "LG TV" });
       for (const [key, name, icon] of [
         ["hue_device", "Open Hue Bridge", "mdi:bridge"],
         ["nanoleaf_device", "Open Nanoleaf controller", "mdi:led-strip-variant"],
@@ -72,7 +138,10 @@ function cardConfig(config, hass) {
         : "Set up LG Hue Sync in Home Assistant, or specify its entity IDs in this card.",
     };
   }
-  return { type: "entities", title: config.title ?? "QSync", show_header_toggle: false, entities };
+  return {
+    type: "entities", title: config.title ?? "QSync", show_header_toggle: false, entities,
+    modes, tuning: rows(TUNING),
+  };
 }
 
 // Extra modules can load before Home Assistant replaces the browser's element registry.
@@ -87,6 +156,10 @@ class QSyncCard extends HTMLElement {
   #card;
   #signature;
   #pipeline;
+  #ambient = document.createElement("ha-card");
+  #advanced = document.createElement("details");
+  #advancedCard;
+  #modeSignature;
   #preview = document.createElement("details");
   #canvas = document.createElement("canvas");
   #message = document.createElement("div");
@@ -125,6 +198,11 @@ class QSyncCard extends HTMLElement {
     this.#preview.append(summary, this.#message, regionToggle, screen);
     panel.append(this.#preview);
     this.#preview.addEventListener("toggle", this.#updatePreview);
+    this.#ambient.style.cssText = "margin-block:8px;padding:16px";
+    this.#advanced.style.cssText = "margin-block:8px;padding:12px 16px";
+    const tuningTitle = document.createElement("summary");
+    tuningTitle.textContent = "Advanced tuning";
+    this.#advanced.append(tuningTitle);
     this.#draw(null, "Waiting for HDMI capture…");
   }
 
@@ -142,6 +220,10 @@ class QSyncCard extends HTMLElement {
 
   static getStubConfig() {
     return {};
+  }
+
+  static async getConfigElement() {
+    return document.createElement("qsync-card-editor");
   }
 
   setConfig(config) {
@@ -264,23 +346,128 @@ class QSyncCard extends HTMLElement {
     if (!this.#config || !this.#hass) return;
     this.#helpers ??= Promise.resolve().then(() => window.loadCardHelpers());
     this.#helpers.then(({ createCardElement }) => {
-      const config = cardConfig(this.#config, this.#hass);
-      const signature = JSON.stringify(config);
+      const { modes = [], tuning = [], ...config } = cardConfig(this.#config, this.#hass);
+      const modeState = modes.map(({entity, name}) => {
+        const state = this.#hass.states[entity];
+        return [entity, name, state?.state, state?.attributes.options];
+      });
+      const modeSignature = JSON.stringify(modeState);
+      if (modeSignature !== this.#modeSignature) {
+        this.#modeSignature = modeSignature;
+        this.#renderModes(modeState);
+      }
+      const signature = JSON.stringify([
+        config, modes.length > 0, tuning, this.#config.show_preview, this.#config.show_tuning,
+      ]);
       if (signature !== this.#signature) {
         this.#card = createCardElement(config);
         this.#signature = signature;
         this.#pipeline = config.entities?.find((row) => row.name === "Pipeline")?.entity;
-        this.replaceChildren(...(this.#pipeline ? [this.#preview.parentElement] : []), this.#card);
+        this.#advancedCard?.remove();
+        this.#advancedCard = tuning.length ? createCardElement({
+          type: "entities", show_header_toggle: false, entities: tuning,
+        }) : undefined;
+        if (this.#advancedCard) this.#advanced.append(this.#advancedCard);
+        this.replaceChildren(
+          ...(this.#pipeline && this.#config.show_preview !== false ? [this.#preview.parentElement] : []),
+          ...(modes.length ? [this.#ambient] : []),
+          this.#card,
+          ...(this.#advancedCard && this.#config.show_tuning !== false ? [this.#advanced] : []),
+        );
       }
       this.#card.hass = this.#hass;
+      if (this.#advancedCard) this.#advancedCard.hass = this.#hass;
       this.#updatePreview();
     }).catch((error) => {
       this.textContent = `Unable to load the QSync card: ${error.message}`;
     });
   }
+
+  #renderModes(modes) {
+    this.#ambient.replaceChildren();
+    const title = document.createElement("h2");
+    title.textContent = "Ambient style";
+    title.style.cssText = "font:inherit;font-size:1.25rem;margin:0 0 12px";
+    this.#ambient.append(title);
+    const message = document.createElement("div");
+    message.setAttribute("role", "status");
+    for (const [entity, name, state, options] of modes) {
+      if (!Array.isArray(options)) continue;
+      const group = document.createElement("fieldset");
+      group.style.cssText = "border:0;padding:0;margin:0 0 12px;display:flex;flex-wrap:wrap;gap:6px";
+      const legend = document.createElement("legend");
+      legend.style.marginBottom = "6px";
+      legend.textContent = name === "Color preset" ? "Colour" : name;
+      group.append(legend);
+      for (const option of options) {
+        const button = document.createElement("button");
+        const selected = state === option;
+        button.type = "button";
+        button.textContent = option;
+        button.disabled = state === "unavailable";
+        button.setAttribute("aria-pressed", String(selected));
+        button.style.cssText = "font:inherit;padding:8px 12px;border-radius:var(--ha-card-border-radius,12px);" +
+          "border:1px solid var(--divider-color);cursor:pointer;color:var(--primary-text-color);" +
+          `background:var(--${selected ? "secondary-background-color" : "card-background-color"});` +
+          (selected ? "border-color:var(--primary-color);font-weight:600;" : "");
+        button.addEventListener("click", async () => {
+          message.textContent = "";
+          button.disabled = true;
+          try {
+            await this.#hass.callService("select", "select_option", { entity_id: entity, option });
+          } catch {
+            message.textContent = `Could not set ${name}.`;
+          } finally {
+            button.disabled = state === "unavailable";
+          }
+        });
+        group.append(button);
+      }
+      this.#ambient.append(group);
+    }
+    this.#ambient.append(message);
+  }
+}
+
+class QSyncCardEditor extends HTMLElement {
+  #form = document.createElement("ha-form");
+  #config;
+
+  constructor() {
+    super();
+    this.#form.schema = [
+      { name: "device_id", selector: { device: { filter: [{ integration: DOMAIN }] } } },
+      { name: "title", selector: { text: {} } },
+      { name: "show_preview", selector: { boolean: {} } },
+      { name: "show_tuning", selector: { boolean: {} } },
+    ];
+    const labels = {
+      device_id: "QSync device", title: "Card title",
+      show_preview: "Show HDMI preview", show_tuning: "Show advanced tuning",
+    };
+    this.#form.computeLabel = (field) => labels[field.name];
+    this.#form.addEventListener("value-changed", (event) => {
+      const config = { ...this.#config, ...event.detail.value };
+      if (!event.detail.value.device_id) delete config.device_id;
+      this.dispatchEvent(new CustomEvent("config-changed", {
+        detail: { config }, bubbles: true, composed: true,
+      }));
+    });
+    this.append(this.#form);
+  }
+
+  setConfig(config) {
+    this.#config = config;
+    this.#form.data = { show_preview: true, show_tuning: true, ...config };
+  }
+
+  set hass(hass) {
+    this.#form.hass = hass;
+  }
 }
 
 if (customElements.get("home-assistant") && !customElements.get("qsync-card")) {
+  customElements.define("qsync-card-editor", QSyncCardEditor);
   customElements.define("qsync-card", QSyncCard);
   (window.customCards ??= []).push({
     type: "qsync-card",

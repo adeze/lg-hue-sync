@@ -1,4 +1,4 @@
-"""Download the latest polled LG Hue Sync diagnostics."""
+"""Download the latest LG Hue Sync diagnostics."""
 
 from homeassistant.core import HomeAssistant
 
@@ -13,6 +13,12 @@ async def async_get_config_entry_diagnostics(
     status = dict(coordinator.data)
     status.pop("active_preset", None)
     status.pop("preview_regions", None)
+    if "signal" in status:
+        # Keep TV-provided strings out of support exports.
+        status["signal"] = {
+            section: {key: value for key, value in sample.items() if not isinstance(value, str)}
+            for section, sample in status["signal"].items()
+        }
     status["pipeline_state"] = (
         pipeline
         if (pipeline := status["pipeline_state"])

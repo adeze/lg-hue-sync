@@ -1,4 +1,10 @@
 {
+  "issues": {
+    "missing_device": {
+      "title": "A QSync dashboard device is missing",
+      "description": "Open LG Hue Sync under Devices & services, select Reconfigure, then select the replacement device or clear the link."
+    }
+  },
   "config": {
     "step": {
       "user": {

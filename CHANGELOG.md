@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3-beta.3] - 2026-11-13
+
+- Add a Home Assistant Sections preset, ambient preset buttons, advanced tuning entities, linked LG TV controls, signal diagnostics and pipeline activity events.
+- Add optional MQTT status and availability publishing, independent of Bonjour.
+
 ## [1.4.3-beta.2] - 2026-11-13
 
 - Show Hue sampling boxes and Nanoleaf perimeter segments over the Home Assistant HDMI preview.

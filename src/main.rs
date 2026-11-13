@@ -731,6 +731,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
 
     let mut tv_events = tv_events::TvEvents::start(shutdown.clone());
     let web_shutdown = CancellationToken::new();
+    let mqtt_task = config
+        .mqtt
+        .clone()
+        .map(|settings| shared_state.start_mqtt(settings, web_shutdown.clone()));
     let web_tasks = match start_web_server(
         8088,
         config.bonjour_enabled,
@@ -1913,6 +1917,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     pending_commands.shutdown(command_rx);
     tv_events.close().await;
     web_shutdown.cancel();
+    if let Some(task) = mqtt_task {
+        let _ = task.await;
+    }
     if let Some(tasks) = web_tasks {
         tasks.close();
         tasks.wait().await;

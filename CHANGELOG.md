@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3-beta.4] - 2026-11-13
+
+- Animate the selection indicator for the three Home Assistant ambient presets and request Companion app selection haptics.
+- Group the existing calibration sliders, processing switches, and save controls in Advanced tuning. The beta 3 TV daemon supports these controls.
+
 ## [1.4.3-beta.3] - 2026-11-13
 
 - Add a Home Assistant Sections preset, ambient preset buttons, advanced tuning entities, linked LG TV controls, signal diagnostics and pipeline activity events.

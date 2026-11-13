@@ -12,6 +12,38 @@ const STATUS = [
   ["binary_sensor", "nanoleaf_connection", "Nanoleaf connection"],
 ];
 const MAINTENANCE = [["button", "restart_pipeline", "Restart pipeline"]];
+const COLOUR_LABELS = { "Soft color": "Soft", Neutral: "Default", "Vivid color": "Vivid" };
+const SEGMENT_STYLES = `
+  qsync-card .qsync-mode { border: 0; padding: 0; margin: 0 0 14px; min-inline-size: 0; }
+  qsync-card .qsync-mode legend { margin-block-end: 6px; color: var(--secondary-text-color); }
+  qsync-card .qsync-segments {
+    position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+    padding: 3px; border: 1px solid var(--divider-color);
+    border-radius: 14px; background: var(--secondary-background-color);
+  }
+  qsync-card .qsync-indicator {
+    position: absolute; inset-block: 3px; inset-inline-start: 3px;
+    inline-size: calc((100% - 6px) / var(--count)); border-radius: 10px;
+    background: var(--primary-color); opacity: 0; pointer-events: none;
+    translate: calc(100% * var(--selected)) 0;
+    transition: translate 180ms ease, opacity 120ms ease;
+  }
+  qsync-card .qsync-segments:dir(rtl) .qsync-indicator { translate: calc(-100% * var(--selected)) 0; }
+  qsync-card .qsync-segments[data-selected] .qsync-indicator { opacity: 1; }
+  qsync-card .qsync-segments button {
+    position: relative; min-inline-size: 0; min-block-size: 44px; padding: 4px;
+    border: 0; border-radius: 10px; background: transparent;
+    color: var(--primary-text-color); font: inherit; cursor: pointer; overflow-wrap: anywhere;
+  }
+  qsync-card .qsync-segments button[aria-pressed="true"] {
+    color: var(--text-primary-color, white); font-weight: 600;
+  }
+  qsync-card .qsync-segments button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
+  qsync-card .qsync-segments button:disabled { cursor: default; color: var(--disabled-text-color); }
+  @media (prefers-reduced-motion: reduce) {
+    qsync-card .qsync-indicator { transition: none; }
+  }
+`;
 const TUNING = [
   ["number", "brightness", "Brightness"],
   ["number", "saturation", "Saturation"],
@@ -160,6 +192,8 @@ class QSyncCard extends HTMLElement {
   #advanced = document.createElement("details");
   #advancedCard;
   #modeSignature;
+  #modeGroups = [];
+  #modeMessage = document.createElement("div");
   #preview = document.createElement("details");
   #canvas = document.createElement("canvas");
   #message = document.createElement("div");
@@ -351,10 +385,20 @@ class QSyncCard extends HTMLElement {
         const state = this.#hass.states[entity];
         return [entity, name, state?.state, state?.attributes.options];
       });
-      const modeSignature = JSON.stringify(modeState);
+      const modeSignature = JSON.stringify(modeState.map(([entity, name, , options]) => [entity, name, options]));
       if (modeSignature !== this.#modeSignature) {
         this.#modeSignature = modeSignature;
         this.#renderModes(modeState);
+      }
+      for (const { entity, track, buttons, options } of this.#modeGroups) {
+        const state = this.#hass.states[entity]?.state;
+        const selected = options.indexOf(state);
+        track.style.setProperty("--selected", String(Math.max(0, selected)));
+        track.toggleAttribute("data-selected", selected >= 0);
+        buttons.forEach((button, index) => {
+          button.disabled = !state || state === "unavailable";
+          button.setAttribute("aria-pressed", String(index === selected));
+        });
       }
       const signature = JSON.stringify([
         config, modes.length > 0, tuning, this.#config.show_preview, this.#config.show_tuning,
@@ -364,8 +408,13 @@ class QSyncCard extends HTMLElement {
         this.#signature = signature;
         this.#pipeline = config.entities?.find((row) => row.name === "Pipeline")?.entity;
         this.#advancedCard?.remove();
-        this.#advancedCard = tuning.length ? createCardElement({
-          type: "entities", show_header_toggle: false, entities: tuning,
+        const tuningRows = [
+          ["Calibration", tuning.filter(({entity}) => entity.startsWith("number."))],
+          ["Processing and outputs", tuning.filter(({entity}) => entity.startsWith("switch."))],
+          ["Save and reset", tuning.filter(({entity}) => entity.startsWith("button."))],
+        ].flatMap(([label, rows]) => rows.length ? [{ type: "section", label }, ...rows] : []);
+        this.#advancedCard = tuningRows.length ? createCardElement({
+          type: "entities", show_header_toggle: false, entities: tuningRows,
         }) : undefined;
         if (this.#advancedCard) this.#advanced.append(this.#advancedCard);
         this.replaceChildren(
@@ -385,47 +434,51 @@ class QSyncCard extends HTMLElement {
 
   #renderModes(modes) {
     this.#ambient.replaceChildren();
+    this.#modeGroups = [];
+    const style = document.createElement("style");
+    style.textContent = SEGMENT_STYLES;
     const title = document.createElement("h2");
     title.textContent = "Ambient style";
     title.style.cssText = "font:inherit;font-size:1.25rem;margin:0 0 12px";
-    this.#ambient.append(title);
-    const message = document.createElement("div");
-    message.setAttribute("role", "status");
-    for (const [entity, name, state, options] of modes) {
-      if (!Array.isArray(options)) continue;
+    this.#ambient.append(style, title);
+    this.#modeMessage.setAttribute("role", "status");
+    for (const [entity, name, , options] of modes) {
+      if (!Array.isArray(options) || !options.length) continue;
       const group = document.createElement("fieldset");
-      group.style.cssText = "border:0;padding:0;margin:0 0 12px;display:flex;flex-wrap:wrap;gap:6px";
+      group.className = "qsync-mode";
       const legend = document.createElement("legend");
-      legend.style.marginBottom = "6px";
       legend.textContent = name === "Color preset" ? "Colour" : name;
-      group.append(legend);
-      for (const option of options) {
+      const track = document.createElement("div");
+      track.className = "qsync-segments";
+      track.style.setProperty("--count", String(options.length));
+      const indicator = document.createElement("span");
+      indicator.className = "qsync-indicator";
+      indicator.setAttribute("aria-hidden", "true");
+      track.append(indicator);
+      const buttons = options.map((option) => {
         const button = document.createElement("button");
-        const selected = state === option;
         button.type = "button";
-        button.textContent = option;
-        button.disabled = state === "unavailable";
-        button.setAttribute("aria-pressed", String(selected));
-        button.style.cssText = "font:inherit;padding:8px 12px;border-radius:var(--ha-card-border-radius,12px);" +
-          "border:1px solid var(--divider-color);cursor:pointer;color:var(--primary-text-color);" +
-          `background:var(--${selected ? "secondary-background-color" : "card-background-color"});` +
-          (selected ? "border-color:var(--primary-color);font-weight:600;" : "");
+        button.textContent = name === "Color preset" ? (COLOUR_LABELS[option] ?? option) : option;
         button.addEventListener("click", async () => {
-          message.textContent = "";
-          button.disabled = true;
+          if (this.#hass.states[entity]?.state === option) return;
+          this.#modeMessage.textContent = "";
+          button.dispatchEvent(new CustomEvent("haptic", {
+            detail: "selection", bubbles: true, composed: true,
+          }));
           try {
             await this.#hass.callService("select", "select_option", { entity_id: entity, option });
           } catch {
-            message.textContent = `Could not set ${name}.`;
-          } finally {
-            button.disabled = state === "unavailable";
+            this.#modeMessage.textContent = `Could not set ${name}.`;
           }
         });
-        group.append(button);
-      }
+        return button;
+      });
+      track.append(...buttons);
+      group.append(legend, track);
       this.#ambient.append(group);
+      this.#modeGroups.push({ entity, options, track, buttons });
     }
-    this.#ambient.append(message);
+    this.#ambient.append(this.#modeMessage);
   }
 }
 

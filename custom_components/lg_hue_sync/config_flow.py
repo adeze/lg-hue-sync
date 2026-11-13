@@ -8,8 +8,9 @@ from aiohttp import ClientError
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import DeviceSelector
 
-from . import DOMAIN, read_status
+from . import DEVICE_DOMAINS, DOMAIN, configured_device, read_status
 
 HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
@@ -59,7 +60,11 @@ class HueSyncConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._abort_if_unique_id_configured()
                 if existing is not None and entry is not None and existing is not entry:
                     errors[CONF_HOST] = "already_configured"
-                else:
+                links = {key: user_input.get(key) or None for key in DEVICE_DOMAINS}
+                for key, device_id in links.items():
+                    if device_id and configured_device(self.hass, key, device_id) is None:
+                        errors[key] = "invalid_device"
+                if not errors:
                     try:
                         await read_status(async_get_clientsession(self.hass), host)
                     except (ClientError, TimeoutError, ValueError):
@@ -70,13 +75,19 @@ class HueSyncConfigFlow(ConfigFlow, domain=DOMAIN):
                                 entry,
                                 unique_id=host,
                                 title=f"LG Hue Sync ({host})",
-                                data_updates={CONF_HOST: host},
+                                data_updates={CONF_HOST: host, **links},
                                 reload_even_if_entry_is_unchanged=False,
                             )
                         return self.async_create_entry(
-                            title=f"LG Hue Sync ({host})", data={CONF_HOST: host}
+                            title=f"LG Hue Sync ({host})", data={CONF_HOST: host, **links}
                         )
-        schema = vol.Schema({vol.Required(CONF_HOST): str})
+        schema = vol.Schema({
+            vol.Required(CONF_HOST): str,
+            **{
+                vol.Optional(key): DeviceSelector({"filter": {"integration": domain}})
+                for key, domain in DEVICE_DOMAINS.items()
+            },
+        })
         return self.async_show_form(
             step_id=step_id,
             data_schema=(

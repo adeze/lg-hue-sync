@@ -9,13 +9,14 @@ import json
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 
 from aiohttp import web
 from homeassistant import bootstrap, config_entries, data_entry_flow, loader
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import entity_registry
+from homeassistant.helpers import device_registry, entity_registry
 
 
 async def main() -> None:
@@ -175,6 +176,34 @@ async def main() -> None:
             assert hass.states.get(switch).state == "on"
             assert hass.states.get(sensor).state == "running"
 
+            devices = device_registry.async_get(hass)
+            targets = {}
+            tv_mac = (device_registry.CONNECTION_NETWORK_MAC, "02:00:00:00:00:01")
+            for key, integration in (
+                ("tv_device", "webostv"),
+                ("hue_device", "hue"),
+                ("nanoleaf_device", "nanoleaf"),
+            ):
+                target_entry = config_entries.ConfigEntry(
+                    domain=integration,
+                    title=integration,
+                    data={},
+                    options={},
+                    version=1,
+                    minor_version=1,
+                    source=config_entries.SOURCE_USER,
+                    unique_id=integration,
+                    discovery_keys=MappingProxyType({}),
+                    subentries_data=None,
+                    disabled_by=config_entries.ConfigEntryDisabler.USER,
+                )
+                await hass.config_entries.async_add(target_entry)
+                targets[key] = devices.async_get_or_create(
+                    config_entry_id=target_entry.entry_id,
+                    identifiers={(integration, integration)},
+                    connections={tv_mac} if key == "tv_device" else set(),
+                ).id
+
             reconfigure = await hass.config_entries.flow.async_init(
                 domain,
                 context={
@@ -189,8 +218,12 @@ async def main() -> None:
             )
             assert rejected["errors"] == {"base": "cannot_connect"}, rejected
             assert entry.data["host"] == "127.0.0.1"
+            rejected = await hass.config_entries.flow.async_configure(
+                reconfigure_id, {"host": "localhost", "hue_device": targets["tv_device"]}
+            )
+            assert rejected["errors"] == {"hue_device": "invalid_device"}, rejected
             result = await hass.config_entries.flow.async_configure(
-                reconfigure_id, {"host": " LOCALHOST. "}
+                reconfigure_id, {"host": " LOCALHOST. ", **targets}
             )
             assert result["reason"] == "reconfigure_successful", result
             await hass.async_block_till_done()
@@ -203,6 +236,12 @@ async def main() -> None:
             assert hass.states.get(switch).state == "on"
             assert hass.states.get(sensor).attributes["capture_fps"] == 30.0
             assert hass.states.get(sensor).attributes["hue_connected"] is True
+            qsync_device_id = registry.async_get(sensor).device_id
+            assert {device.id for device in devices.async_get_devices(connections={tv_mac})} == {
+                qsync_device_id, targets["tv_device"]
+            }
+            for key in ("hue_device", "nanoleaf_device"):
+                assert hass.states.get(sensor).attributes[key] == targets[key]
 
             for platform, suffix, service, extra in (
                 ("switch", "display", "turn_off", {}),
@@ -231,6 +270,7 @@ async def main() -> None:
             assert report["last_known_status"]["signal"] == {"video": {"width": 3840}}
             assert report["last_known_status"]["display_enabled"] is False
             assert "192.0.2.1" not in str(report) and "localhost" not in str(report)
+            assert all(device_id not in str(report) for device_id in targets.values())
 
             response = registry.async_get_entity_id(
                 "select", domain, f"{entry.entry_id}_response"
@@ -278,6 +318,17 @@ async def main() -> None:
             status_failure = False
             await wait_for(lambda: hass.states.get(switch).state == "on")
             assert hass.states.get(switch).state == "on"
+
+            cleared = await hass.config_entries.flow.async_init(
+                domain,
+                context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+                data={"host": "localhost"},
+            )
+            assert cleared["reason"] == "reconfigure_successful", cleared
+            await hass.async_block_till_done()
+            assert devices.async_get(qsync_device_id).connections == set()
+            assert "hue_device" not in hass.states.get(sensor).attributes
+            assert "nanoleaf_device" not in hass.states.get(sensor).attributes
             assert await hass.config_entries.async_unload(entry.entry_id)
             assert entry.state is config_entries.ConfigEntryState.NOT_LOADED
             for entity_id in (switch, sensor):

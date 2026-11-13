@@ -5,20 +5,37 @@
         "title": "Connect to LG Hue Sync",
         "description": "Enter the TV's LAN address. LG Hue Sync must be running on the TV.",
         "data": {
-          "host": "TV IP address or hostname"
+          "host": "TV IP address or hostname",
+          "tv_device": "LG webOS TV",
+          "hue_device": "Philips Hue Bridge",
+          "nanoleaf_device": "Nanoleaf controller"
+        },
+        "data_description": {
+          "tv_device": "Select the same TV at the address above to link its device page.",
+          "hue_device": "Select the bridge paired in QSync to show a dashboard shortcut.",
+          "nanoleaf_device": "Select the controller paired in QSync to show a dashboard shortcut."
         }
       },
       "reconfigure": {
-        "title": "Change the LG Hue Sync TV address",
+        "title": "Reconfigure LG Hue Sync",
         "data": {
-          "host": "TV IP address or hostname"
+          "host": "TV IP address or hostname",
+          "tv_device": "LG webOS TV",
+          "hue_device": "Philips Hue Bridge",
+          "nanoleaf_device": "Nanoleaf controller"
+        },
+        "data_description": {
+          "tv_device": "Select the same TV at the address above to link its device page.",
+          "hue_device": "Select the bridge paired in QSync to show a dashboard shortcut.",
+          "nanoleaf_device": "Select the controller paired in QSync to show a dashboard shortcut."
         }
       }
     },
     "error": {
       "already_configured": "This TV address is already used by another LG Hue Sync entry.",
       "cannot_connect": "Could not read LG Hue Sync status. Check the address and that the dashboard is reachable on port 8088.",
-      "invalid_host": "Enter a bare IPv4 address or hostname, without a URL or port."
+      "invalid_host": "Enter a bare IPv4 address or hostname, without a URL or port.",
+      "invalid_device": "Select a device of this type from its Home Assistant integration."
     },
     "abort": {
       "already_configured": "This TV address is already configured."

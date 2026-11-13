@@ -47,6 +47,15 @@ function cardConfig(config, hass) {
           section.push({ type: "attribute", entity: pipeline, attribute, name, suffix });
         }
       }
+      for (const [key, name, icon] of [
+        ["hue_device", "Open Hue Bridge", "mdi:bridge"],
+        ["nanoleaf_device", "Open Nanoleaf controller", "mdi:led-strip-variant"],
+      ]) {
+        const id = attributes?.[key];
+        if (id && hass.devices?.[id]) {
+          section.push({ type: "weblink", name, icon, url: `/config/devices/device/${encodeURIComponent(id)}` });
+        }
+      }
     }
     if (section.length) entities.push({ type: "section", label }, ...section);
   }

@@ -15,7 +15,7 @@ from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from yarl import URL
 
@@ -30,6 +30,28 @@ PLATFORMS = [
 LOGGER = logging.getLogger(__name__)
 TIMEOUT = ClientTimeout(total=3)
 CARD_URL = "/lg_hue_sync/qsync-card.js"
+DEVICE_DOMAINS = {
+    "tv_device": "webostv",
+    "hue_device": "hue",
+    "nanoleaf_device": "nanoleaf",
+}
+
+
+def configured_device(
+    hass: HomeAssistant, key: str, device_id: str | None
+) -> dr.DeviceEntry | None:
+    """Resolve a selected device in the expected integration."""
+    if not device_id:
+        return None
+    device = dr.async_get(hass).async_get(device_id)
+    if not isinstance(device, dr.DeviceEntry):
+        return None
+    entry = hass.config_entries.async_get_entry(device.config_entry_id)
+    if entry is None or entry.domain != DEVICE_DOMAINS[key]:
+        return None
+    if key == "hue_device" and (entry.domain, entry.unique_id) not in device.identifiers:
+        return None
+    return device
 
 
 class SyncStatus(TypedDict):
@@ -156,7 +178,7 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
         )
         self.host = entry.data[CONF_HOST]
         self.session = async_get_clientsession(hass)
-        self.device_info = DeviceInfo(
+        self.device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
             configuration_url=str(api_url(self.host, "status").origin()),
@@ -231,6 +253,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HueSyncConfigEntry) -> b
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    registry = dr.async_get(hass)
+    if device := registry.async_get_device_by_identifier(
+        (DOMAIN, entry.entry_id), entry.entry_id
+    ):
+        tv = configured_device(hass, "tv_device", entry.data.get("tv_device"))
+        registry.async_update_device(
+            device.id,
+            new_connections={
+                connection
+                for connection in (tv.connections if tv else ())
+                if connection[0] == dr.CONNECTION_NETWORK_MAC
+            },
+        )
     entry.async_create_background_task(
         hass, coordinator.async_listen(), "LG Hue Sync status"
     )

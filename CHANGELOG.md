@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-11-13
+
+- Link QSync to its LG webOS TV in Home Assistant using the TV's registered MAC addresses.
+- Add optional Hue Bridge and Nanoleaf controller shortcuts to the QSync dashboard card. Choose the devices in setup or Reconfigure. This works with the 1.4.1 TV daemon.
+
 ## [1.4.1] - 2026-11-13
 
 - Align the QSync daemon, webOS launcher, and Home Assistant integration versions.

@@ -21,3 +21,5 @@ entities:
 ```
 
 Supported entity override keys are `screen_sync`, `display`, `color_preset`, `response`, `spatial_blending`, `pipeline`, `hue_connection`, `nanoleaf_connection`, and `restart_pipeline`.
+
+In LG Hue Sync's **Reconfigure** screen, select the existing LG webOS TV at the configured address. Home Assistant lists it under **Linked devices** once the LG integration has registered the TV's MAC address. Select your paired Philips Hue Bridge and Nanoleaf controller after adding their own Home Assistant integrations to show shortcuts under **Status**. The selections are optional and can be cleared in **Reconfigure**.

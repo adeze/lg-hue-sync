@@ -619,28 +619,17 @@ impl ZoneSampler {
             }
         }
 
-        // Require symmetry within 6 pixels to avoid false positives from dark shadows
-        let y_min = if top_bar_height >= 4
-            && (top_bar_height as i32 - bottom_bar_height as i32).abs() <= 6
-        {
-            top_bar_height as f32 / height as f32
-        } else {
-            0.0
-        };
-
-        let y_max = if bottom_bar_height >= 4
-            && (top_bar_height as i32 - bottom_bar_height as i32).abs() <= 6
-        {
-            (height - bottom_bar_height) as f32 / height as f32
-        } else {
-            1.0
-        };
+        // Thin bars can differ by a row after downscaling. Crop only paired edges.
+        let thinner_bar = top_bar_height.min(bottom_bar_height);
+        let tolerance = if thinner_bar < 4 { 1 } else { 6 };
+        if thinner_bar < 2 || top_bar_height.abs_diff(bottom_bar_height) > tolerance {
+            return ActiveRect::default();
+        }
 
         ActiveRect {
-            x_min: 0.0,
-            x_max: 1.0,
-            y_min,
-            y_max,
+            y_min: top_bar_height as f32 / height as f32,
+            y_max: (height - bottom_bar_height) as f32 / height as f32,
+            ..ActiveRect::default()
         }
     }
 
@@ -1145,6 +1134,38 @@ mod tests {
         let rect = ZoneSampler::detect_active_rect(&data, width, height, false);
         assert_eq!(rect.y_min, 0.25); // 4 / 16 = 0.25
         assert_eq!(rect.y_max, 0.75); // 12 / 16 = 0.75
+    }
+
+    #[test]
+    fn letterbox_detection_crops_paired_thin_bars() {
+        let (width, height) = (320, 180);
+        for (top, bottom) in [
+            (6, 6),
+            (4, 3),
+            (3, 4),
+            (2, 2),
+            (4, 0),
+            (4, 1),
+            (8, 2),
+            (0, 0),
+        ] {
+            let stride = width as usize * 4;
+            let mut data = vec![0; stride * height as usize];
+            data[top * stride..(height as usize - bottom) * stride].fill(100);
+            let expected = match (top, bottom) {
+                (6, 6) | (4, 3) | (3, 4) | (2, 2) => ActiveRect {
+                    y_min: top as f32 / height as f32,
+                    y_max: (height as usize - bottom) as f32 / height as f32,
+                    ..ActiveRect::default()
+                },
+                _ => ActiveRect::default(),
+            };
+            assert_eq!(
+                ZoneSampler::detect_active_rect(&data, width, height, false),
+                expected,
+                "top={top}, bottom={bottom}"
+            );
+        }
     }
 
     #[test]

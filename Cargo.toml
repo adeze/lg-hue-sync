@@ -6,7 +6,6 @@ description = "Native webOS screen capture with Philips Hue Entertainment and Na
 authors = ["Adam <adam@adeze.com>"]
 license = "MIT"
 repository = "https://github.com/adeze/lg-hue-sync"
-homepage = "https://github.com/adeze/lg-hue-sync"
 keywords = ["webos", "philips-hue", "nanoleaf", "ambilight", "rust"]
 categories = ["multimedia::video", "embedded"]
 

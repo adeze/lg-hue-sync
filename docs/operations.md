@@ -14,7 +14,7 @@ Run only the Rust tests with `make test` or `cargo nextest run --locked`.
 
 ### Optional Nix development environment
 
-`nix develop` supplies Rust 1.99.1 with rustfmt, Clippy and the ARMv7 standard library,
+`nix develop` supplies Rust 1.100.0 with rustfmt, Clippy and the ARMv7 standard library,
 plus nextest, uv/Python, Bun/Node, pkg-config and host build/package utilities. The
 checked-in `flake.lock` pins nixpkgs and rust-overlay. Supported hosts are Apple
 Silicon macOS and ARM64/x86-64 Linux. Nix runs on the build computer, not the TV.

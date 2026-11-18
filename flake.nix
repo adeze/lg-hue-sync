@@ -20,7 +20,7 @@
     in {
       devShells = forEachSystem (pkgs:
         let
-          rust = pkgs.rust-bin.stable."1.99.1".minimal.override {
+          rust = pkgs.rust-bin.stable."1.100.0".minimal.override {
             extensions = [ "clippy" "rustfmt" ];
             targets = [ "armv7-unknown-linux-gnueabi" ];
           };

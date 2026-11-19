@@ -127,6 +127,7 @@ async def main() -> None:
     server.router.add_post("/api/display/{action}", command)
     server.router.add_post("/api/presets/{preset}", command)
     server.router.add_post("/api/restart", command)
+    server.router.add_post("/api/diagnostics/sample", command)
     server.router.add_patch("/api/settings", patch_tuning)
     server.router.add_post("/api/save-config", command)
     server.router.add_post("/api/visualization/{axis}/{mode}", command)
@@ -245,6 +246,11 @@ async def main() -> None:
             assert calls == ["/api/stop", "/api/start", "/api/start"]
             assert hass.states.get(switch).state == "on"
             assert hass.states.get(sensor).state == "running"
+            status["capture_hardware"] = True
+            publish()
+            await wait_for(lambda: calls.count("/api/diagnostics/sample") == 1)
+            await asyncio.sleep(0.05)
+            assert calls.count("/api/diagnostics/sample") == 1
 
             devices = device_registry.async_get(hass)
             targets = {}

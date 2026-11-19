@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-19
+
+- Give Screen sync and Display large switches on the Home Assistant card and remove its LG media player row.
+- Add horizontally draggable calibration dials and collapsible diagnostics that refresh after HDMI capture settles.
+- Include a Home Assistant automation blueprint to pause screen sync after sustained room brightness.
+
 ## [1.4.3-beta.4] - 2026-11-13
 
 - Animate the selection indicator for the three Home Assistant ambient presets and request Companion app selection haptics.

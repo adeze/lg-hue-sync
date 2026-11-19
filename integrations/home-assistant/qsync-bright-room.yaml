@@ -1,0 +1,52 @@
+blueprint:
+  name: QSync bright-room pause
+  description: Stop QSync screen sync when room illuminance stays above a chosen level.
+  domain: automation
+  input:
+    illuminance:
+      name: Room illuminance
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: illuminance
+    screen_sync:
+      name: QSync Screen sync switch
+      selector:
+        entity:
+          filter:
+            - domain: switch
+              integration: lg_hue_sync
+    threshold:
+      name: Bright-room threshold
+      default: 200
+      selector:
+        number:
+          min: 1
+          max: 10000
+          mode: box
+          unit_of_measurement: lx
+    hold_seconds:
+      name: Time above threshold
+      default: 120
+      selector:
+        number:
+          min: 10
+          max: 1800
+          mode: box
+          unit_of_measurement: s
+triggers:
+  - trigger: numeric_state
+    entity_id: !input illuminance
+    above: !input threshold
+    for:
+      seconds: !input hold_seconds
+conditions:
+  - condition: state
+    entity_id: !input screen_sync
+    state: "on"
+actions:
+  - action: switch.turn_off
+    target:
+      entity_id: !input screen_sync
+mode: single

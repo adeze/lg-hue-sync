@@ -248,6 +248,7 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
         """Reconnect when the TV restarts and mark stale entities unavailable."""
         delay = 1
         while True:
+            diagnostics_task = None
             try:
                 async with self.session.get(
                     api_url(self.host, "status/events"),
@@ -265,13 +266,36 @@ class HueSyncCoordinator(DataUpdateCoordinator[SyncStatus]):
                                 LOGGER.info("LG Hue Sync status stream restored")
                             if data != self.data or not self.last_update_success:
                                 self.async_set_updated_data(data)
+                            if (
+                                data["pipeline_state"] == "running"
+                                and data.get("capture_hardware") is True
+                            ):
+                                if diagnostics_task is None and data.get("capture_fps", 0) > 0:
+                                    diagnostics_task = asyncio.create_task(
+                                        self._async_sample_after_capture_settles()
+                                    )
+                            elif diagnostics_task is not None:
+                                diagnostics_task.cancel()
+                                await asyncio.gather(diagnostics_task, return_exceptions=True)
+                                diagnostics_task = None
                 raise UpdateFailed("LG Hue Sync status stream closed")
             except (ClientError, TimeoutError, ValueError, UpdateFailed):
                 self.async_set_update_error(
                     UpdateFailed("LG Hue Sync status stream unavailable")
                 )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 30)
+            finally:
+                if diagnostics_task is not None:
+                    diagnostics_task.cancel()
+                    await asyncio.gather(diagnostics_task, return_exceptions=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+
+    async def _async_sample_after_capture_settles(self) -> None:
+        await asyncio.sleep(3)
+        try:
+            await self.async_command("diagnostics/sample", timeout=ClientTimeout(total=10))
+        except HomeAssistantError:
+            LOGGER.debug("Automatic QSync diagnostics sample failed", exc_info=True)
 
     async def async_apply_tuning(self, patch: dict[str, bool | int | float]) -> None:
         """Apply a partial change and save using the same API as the admin dashboard."""

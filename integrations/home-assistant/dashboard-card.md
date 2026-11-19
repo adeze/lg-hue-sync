@@ -1,6 +1,6 @@
 # QSync dashboard card
 
-The card follows your Home Assistant theme. Use **Ambient style** for Colour, Response and Spatial blending. **Advanced tuning** contains the native number and switch entities for QSync's sliders, processing settings and per-output screen sync. Those entities require a daemon with partial settings support. **Diagnostics** includes the latest HDMI, display and ARC sample and the pipeline activity event entity. Use **Refresh diagnostics** to request a fresh sample.
+The card follows your Home Assistant theme. **Screen sync** starts or stops lighting sync. **Display** controls QSync's TV display switch. Use **Ambient style** for Colour, Response and Spatial blending. In **Advanced tuning**, drag a dial horizontally or use the arrow keys, Home, and End. A drag applies the value when released and requests selection haptics in the Home Assistant Companion app. Tuning requires a daemon with partial settings support. Open **Diagnostics** for HDMI, display and ARC readings and pipeline activity. The integration samples automatically three seconds after hardware capture starts. **Refresh diagnostics** requests another sample.
 
 Open **Live HDMI preview** to see a thumbnail updated up to once per second while HDMI sync is running. Home Assistant relays the TV's existing preview stream only while the panel is open and visible.
 Use **Light regions** to show or hide the Hue sampling boxes and Nanoleaf perimeter segments.
@@ -27,6 +27,8 @@ entities:
 
 Supported entity override keys are `screen_sync`, `display`, `color_preset`, `response`, `spatial_blending`, `pipeline`, `hue_connection`, `nanoleaf_connection`, and `restart_pipeline`.
 
-In LG Hue Sync's **Reconfigure** screen, select the same TV from the built-in LG webOS TV integration or **LG WebOS TV (bscpylgtv)**. The card uses the selected device's media player for TV controls. Home Assistant lists the TV under **Linked devices** when the selected integration has registered the TV's MAC address. Select the Hue Bridge and Nanoleaf controller to show shortcuts under **Status**. Pairing for screen sync and alignment still live in QSync admin.
+In LG Hue Sync's **Reconfigure** screen, select the same TV from the built-in LG webOS TV integration or **LG WebOS TV (bscpylgtv)**. Home Assistant lists the TV under **Linked devices** when the selected integration has registered the TV's MAC address. Select the Hue Bridge and Nanoleaf controller to show shortcuts under **Status**. Pairing for screen sync and alignment live in QSync admin.
+
+Copy [the bright-room blueprint](qsync-bright-room.yaml) into `config/blueprints/automation/qsync/`, then create an automation from it. Choose the TV room's illuminance sensor and the QSync **Screen sync** switch. The default trigger is a crossing above 200 lux sustained for two minutes. It stops sync once per crossing, so you can manually start it again while the room is still bright.
 
 In the automation editor, use the **Pipeline activity** entity as a state trigger to react to a new event. Check its `event_type` attribute in a condition to distinguish `faulted`, `disconnected`, and `reconnected`. For a watching scene, call `select.select_option` on the QSync preset entities and `switch.turn_on` on Screen sync. The linked TV's media player provides its own triggers and actions.

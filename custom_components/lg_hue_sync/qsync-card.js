@@ -40,6 +40,31 @@ const SEGMENT_STYLES = `
   }
   qsync-card .qsync-segments button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
   qsync-card .qsync-segments button:disabled { cursor: default; color: var(--disabled-text-color); }
+  qsync-card .qsync-switches, qsync-card .qsync-dials {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
+    gap: 8px; margin-block: 8px;
+  }
+  qsync-card .qsync-switch, qsync-card .qsync-dial {
+    border: 1px solid var(--divider-color); border-radius: 14px; padding: 10px;
+    background: var(--ha-card-background, var(--card-background-color));
+    color: var(--primary-text-color); font: inherit; text-align: center;
+  }
+  qsync-card .qsync-switch { min-height: 64px; cursor: pointer; font-weight: 600; }
+  qsync-card .qsync-switch[aria-checked="true"] {
+    background: var(--primary-color); color: var(--text-primary-color, white);
+  }
+  qsync-card .qsync-switch:disabled, qsync-card .qsync-dial[aria-disabled="true"] {
+    opacity: .55; cursor: default;
+  }
+  qsync-card .qsync-switch:focus-visible, qsync-card .qsync-dial:focus-visible {
+    outline: 2px solid var(--primary-text-color); outline-offset: -4px;
+  }
+  qsync-card .qsync-dial { touch-action: pan-y; cursor: ew-resize; user-select: none; }
+  qsync-card .qsync-dial-knob {
+    display: grid; place-items: start center; margin: 6px auto; width: 36px; height: 36px;
+    border-radius: 50%; border: 2px solid var(--divider-color);
+    transform: rotate(var(--angle, -135deg)); color: var(--primary-color);
+  }
   @media (prefers-reduced-motion: reduce) {
     qsync-card .qsync-indicator { transition: none; }
   }
@@ -106,7 +131,9 @@ function cardConfig(config, hass) {
   });
   const controls = rows(CONTROLS);
   const modes = controls.filter(({entity}) => entity.startsWith("select."));
-  const entities = controls.filter(({entity}) => !entity.startsWith("select."));
+  const switches = controls.filter(({entity}) => entity.startsWith("switch."));
+  const entities = [];
+  let diagnostics = [];
   for (const [label, fields] of [["Status", STATUS], ["Diagnostics", SIGNAL], ["Maintenance", MAINTENANCE]]) {
     const section = rows(fields);
     if (label === "Diagnostics") {
@@ -139,12 +166,6 @@ function cardConfig(config, hass) {
           section.push({ type: "attribute", entity: pipeline, attribute, name, suffix });
         }
       }
-      const tv = attributes?.tv_device;
-      const player = tv && Object.values(hass.entities ?? {}).find(
-        (entry) => entry.device_id === tv && entry.entity_id.startsWith("media_player.") &&
-          hass.states[entry.entity_id],
-      );
-      if (player) section.push({ entity: player.entity_id, name: "LG TV" });
       for (const [key, name, icon] of [
         ["hue_device", "Open Hue Bridge", "mdi:bridge"],
         ["nanoleaf_device", "Open Nanoleaf controller", "mdi:led-strip-variant"],
@@ -155,13 +176,14 @@ function cardConfig(config, hass) {
         }
       }
     }
-    if (section.length) entities.push({ type: "section", label }, ...section);
+    if (label === "Diagnostics") diagnostics = section;
+    else if (section.length) entities.push({ type: "section", label }, ...section);
   }
   const url = config.dashboard_url ?? hass.devices?.[device]?.configuration_url;
   if (url && /^https?:\/\//i.test(url)) {
     entities.push({ type: "weblink", name: "Open QSync admin", url, icon: "mdi:open-in-new" });
   }
-  if (!entities.some((row) => row.entity)) {
+  if (!switches.length && !entities.some((row) => row.entity) && !modes.length) {
     return {
       type: "markdown",
       title: config.title ?? "QSync",
@@ -172,7 +194,7 @@ function cardConfig(config, hass) {
   }
   return {
     type: "entities", title: config.title ?? "QSync", show_header_toggle: false, entities,
-    modes, tuning: rows(TUNING),
+    modes, switches, diagnostics, tuning: rows(TUNING),
   };
 }
 
@@ -190,6 +212,14 @@ class QSyncCard extends HTMLElement {
   #pipeline;
   #ambient = document.createElement("ha-card");
   #advanced = document.createElement("details");
+  #diagnostics = document.createElement("details");
+  #diagnosticsCard;
+  #styles = document.createElement("style");
+  #switches = document.createElement("div");
+  #dials = document.createElement("div");
+  #controlsSignature;
+  #controlUpdates = [];
+  #controlMessage = document.createElement("div");
   #advancedCard;
   #modeSignature;
   #modeGroups = [];
@@ -237,6 +267,15 @@ class QSyncCard extends HTMLElement {
     const tuningTitle = document.createElement("summary");
     tuningTitle.textContent = "Advanced tuning";
     this.#advanced.append(tuningTitle);
+    this.#diagnostics.style.cssText = "margin-block:8px;padding:12px 16px";
+    const diagnosticsTitle = document.createElement("summary");
+    diagnosticsTitle.textContent = "Diagnostics";
+    this.#diagnostics.append(diagnosticsTitle);
+    this.#advanced.append(this.#dials);
+    this.#switches.className = "qsync-switches";
+    this.#dials.className = "qsync-dials";
+    this.#controlMessage.setAttribute("role", "status");
+    this.#styles.textContent = SEGMENT_STYLES;
     this.#draw(null, "Waiting for HDMI capture…");
   }
 
@@ -380,7 +419,17 @@ class QSyncCard extends HTMLElement {
     if (!this.#config || !this.#hass) return;
     this.#helpers ??= Promise.resolve().then(() => window.loadCardHelpers());
     this.#helpers.then(({ createCardElement }) => {
-      const { modes = [], tuning = [], ...config } = cardConfig(this.#config, this.#hass);
+      const { modes = [], switches = [], diagnostics = [], tuning = [], ...config } =
+        cardConfig(this.#config, this.#hass);
+      const numbers = tuning.filter(({entity}) => entity.startsWith("number."));
+      const controlsSignature = JSON.stringify([switches, numbers]);
+      if (controlsSignature !== this.#controlsSignature) {
+        this.#controlsSignature = controlsSignature;
+        this.#controlUpdates = [];
+        this.#switches.replaceChildren(...switches.map((row) => this.#renderSwitch(row)));
+        this.#dials.replaceChildren(...numbers.map((row) => this.#renderDial(row)));
+      }
+      this.#controlUpdates.forEach((update) => update());
       const modeState = modes.map(({entity, name}) => {
         const state = this.#hass.states[entity];
         return [entity, name, state?.state, state?.attributes.options];
@@ -401,7 +450,8 @@ class QSyncCard extends HTMLElement {
         });
       }
       const signature = JSON.stringify([
-        config, modes.length > 0, tuning, this.#config.show_preview, this.#config.show_tuning,
+        config, modes.length > 0, switches.length, diagnostics, tuning,
+        this.#config.show_preview, this.#config.show_tuning,
       ]);
       if (signature !== this.#signature) {
         this.#card = createCardElement(config);
@@ -409,7 +459,6 @@ class QSyncCard extends HTMLElement {
         this.#pipeline = config.entities?.find((row) => row.name === "Pipeline")?.entity;
         this.#advancedCard?.remove();
         const tuningRows = [
-          ["Calibration", tuning.filter(({entity}) => entity.startsWith("number."))],
           ["Processing and outputs", tuning.filter(({entity}) => entity.startsWith("switch."))],
           ["Save and reset", tuning.filter(({entity}) => entity.startsWith("button."))],
         ].flatMap(([label, rows]) => rows.length ? [{ type: "section", label }, ...rows] : []);
@@ -417,30 +466,157 @@ class QSyncCard extends HTMLElement {
           type: "entities", show_header_toggle: false, entities: tuningRows,
         }) : undefined;
         if (this.#advancedCard) this.#advanced.append(this.#advancedCard);
+        this.#diagnosticsCard?.remove();
+        this.#diagnosticsCard = diagnostics.length ? createCardElement({
+          type: "entities", show_header_toggle: false, entities: diagnostics,
+        }) : undefined;
+        if (this.#diagnosticsCard) this.#diagnostics.append(this.#diagnosticsCard);
         this.replaceChildren(
+          this.#styles,
+          ...(switches.length ? [this.#switches] : []),
+          this.#controlMessage,
           ...(this.#pipeline && this.#config.show_preview !== false ? [this.#preview.parentElement] : []),
           ...(modes.length ? [this.#ambient] : []),
           this.#card,
-          ...(this.#advancedCard && this.#config.show_tuning !== false ? [this.#advanced] : []),
+          ...(this.#diagnosticsCard ? [this.#diagnostics] : []),
+          ...(tuning.length && this.#config.show_tuning !== false ? [this.#advanced] : []),
         );
       }
       this.#card.hass = this.#hass;
       if (this.#advancedCard) this.#advancedCard.hass = this.#hass;
+      if (this.#diagnosticsCard) this.#diagnosticsCard.hass = this.#hass;
       this.#updatePreview();
     }).catch((error) => {
       this.textContent = `Unable to load the QSync card: ${error.message}`;
     });
   }
 
+  async #setControl(domain, service, entity, name, data = {}) {
+    this.#controlMessage.textContent = "";
+    try {
+      await this.#hass.callService(domain, service, { entity_id: entity, ...data });
+    } catch {
+      this.#controlMessage.textContent = "Could not set " + name + ".";
+    }
+  }
+
+  #renderSwitch({ entity, name }) {
+    const button = document.createElement("button");
+    button.className = "qsync-switch";
+    button.type = "button";
+    button.setAttribute("role", "switch");
+    button.setAttribute("aria-label", name);
+    button.addEventListener("click", () => {
+      const state = this.#hass.states[entity]?.state;
+      if (state === "on" || state === "off") {
+        this.#setControl("switch", state === "on" ? "turn_off" : "turn_on", entity, name);
+      }
+    });
+    this.#controlUpdates.push(() => {
+      const state = this.#hass.states[entity]?.state;
+      const on = state === "on";
+      button.disabled = !on && state !== "off";
+      button.setAttribute("aria-checked", String(on));
+      button.textContent = name + (button.disabled ? " unavailable" : on ? " on" : " off");
+    });
+    return button;
+  }
+
+  #renderDial({ entity, name }) {
+    const dial = document.createElement("div");
+    dial.className = "qsync-dial";
+    dial.setAttribute("role", "slider");
+    dial.setAttribute("aria-label", name);
+    const knob = document.createElement("span");
+    knob.className = "qsync-dial-knob";
+    knob.setAttribute("aria-hidden", "true");
+    knob.textContent = "•";
+    const readout = document.createElement("span");
+    dial.append(name, knob, readout);
+    let range;
+    let drag;
+    let pending = false;
+    const show = (value) => {
+      dial.setAttribute("aria-valuenow", value);
+      readout.textContent = String(value) + (range.unit ? " " + range.unit : "");
+      knob.style.setProperty("--angle", (-135 + 270 * (value - range.min) / (range.max - range.min)) + "deg");
+    };
+    const update = () => {
+      const state = this.#hass.states[entity];
+      const value = Number(state?.state || NaN);
+      const { min, max, step, unit_of_measurement: unit } = state?.attributes ?? {};
+      range = [min, max, step, value].every(Number.isFinite) && max > min && step > 0
+        ? { min, max, step, unit, value }
+        : undefined;
+      dial.tabIndex = range ? 0 : -1;
+      dial.setAttribute("aria-disabled", String(!range));
+      if (!range) {
+        drag = undefined;
+        for (const attr of ["aria-valuemin", "aria-valuemax", "aria-valuenow"]) dial.removeAttribute(attr);
+        readout.textContent = "Unavailable";
+        return;
+      }
+      dial.setAttribute("aria-valuemin", min);
+      dial.setAttribute("aria-valuemax", max);
+      if (!drag && !pending) show(value);
+    };
+    const stepped = (value) => {
+      const tick = Math.round((value - range.min) / range.step);
+      const rounded = Number((range.min + tick * range.step).toPrecision(12));
+      return Math.max(range.min, Math.min(range.max, rounded));
+    };
+    const commit = async (value) => {
+      if (!range || value === range.value) return update();
+      pending = true;
+      show(value);
+      await this.#setControl("number", "set_value", entity, name, { value });
+      pending = false;
+      update();
+    };
+    dial.addEventListener("pointerdown", (event) => {
+      if (!range || drag || pending || event.button !== 0) return;
+      drag = { id: event.pointerId, x: event.clientX, start: range.value, value: range.value };
+      dial.setPointerCapture(event.pointerId);
+    });
+    dial.addEventListener("pointermove", (event) => {
+      if (drag?.id !== event.pointerId) return;
+      const value = stepped(drag.start + Math.round((event.clientX - drag.x) / 8) * range.step);
+      if (value === drag.value) return;
+      drag.value = value;
+      show(value);
+      dial.dispatchEvent(new CustomEvent("haptic", { detail: "selection", bubbles: true, composed: true }));
+    });
+    dial.addEventListener("pointerup", (event) => {
+      if (drag?.id !== event.pointerId) return;
+      const { value } = drag;
+      drag = undefined;
+      commit(value);
+    });
+    dial.addEventListener("lostpointercapture", (event) => {
+      if (drag?.id !== event.pointerId) return;
+      drag = undefined;
+      update();
+    });
+    dial.addEventListener("keydown", (event) => {
+      if (!range || drag || pending) return;
+      const { value, step, min, max } = range;
+      const values = { ArrowLeft: value - step, ArrowDown: value - step,
+        ArrowRight: value + step, ArrowUp: value + step, Home: min, End: max };
+      if (!Object.hasOwn(values, event.key)) return;
+      event.preventDefault();
+      commit(stepped(values[event.key]));
+    });
+    this.#controlUpdates.push(update);
+    return dial;
+  }
+
   #renderModes(modes) {
     this.#ambient.replaceChildren();
     this.#modeGroups = [];
-    const style = document.createElement("style");
-    style.textContent = SEGMENT_STYLES;
     const title = document.createElement("h2");
     title.textContent = "Ambient style";
     title.style.cssText = "font:inherit;font-size:1.25rem;margin:0 0 12px";
-    this.#ambient.append(style, title);
+    this.#ambient.append(title);
     this.#modeMessage.setAttribute("role", "status");
     for (const [entity, name, , options] of modes) {
       if (!Array.isArray(options) || !options.length) continue;

@@ -27,7 +27,7 @@ Check [cani.rootmy.tv](https://cani.rootmy.tv/) and [webOS Brew](https://github.
 
 ## Requirements
 
-- Development Mac with Rust/rustup, [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/), webOS Brew native SDK, `make`, SSH, and `uv`. Docker is needed for one-time sysroot setup or the explicit fallback.
+- Development Mac with Rust/rustup, [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/), webOS Brew native SDK, `make`, SSH, and `uv`. One-time sysroot setup and the container fallback use the `docker` CLI.
 - Rooted webOS TV with root SSH and compatible capture libraries.
 - Hue Bridge v2 and/or Nanoleaf 4D on the same LAN.
 
@@ -43,7 +43,11 @@ file target/armv7-unknown-linux-gnueabi/release/lg-hue-sync
 
 The default target build uses the Mac webOS SDK compiler with a Buster sysroot to stay within the LG C1/webOS 6 glibc ceiling. It produces an ARM Linux binary; ordinary host Cargo builds produce Mac binaries for tests.
 
-Run `make native-setup` once using the installed [webosbrew/native-toolchain](https://github.com/webosbrew/native-toolchain) and cached builder, then `make build` without Docker. `make build-docker` remains the explicit fallback and Linux CI path. Rust Ares powers `make package-app` and explicit-device launcher management. See [docs/operations.md](docs/operations.md) for setup, ABI gates and deployment boundaries.
+Run `make native-setup` once using the installed [webosbrew/native-toolchain](https://github.com/webosbrew/native-toolchain) and cached builder. Subsequent `make build` runs use the native toolchain without a container runtime.
+
+For the container fallback, run `make build-docker` with Docker Desktop or Docker Engine. On macOS with Kiri, run `DOCKER_CONTEXT=kiri make build-docker`. Both use the same `docker` CLI, Make target, and Dockerfile. Linux CI and forks can continue to use Docker without installing Kiri. [Container build details](docs/operations.md#container-build-with-docker-or-kiri)
+
+Rust Ares powers `make package-app` and explicit-device launcher management. See [docs/operations.md](docs/operations.md) for setup, ABI gates and deployment boundaries.
 
 Apple Shortcuts can apply a dashboard preset over the trusted LAN with a `POST` request to `http://<tv-ip>:8088/api/presets/<name>`; see [docs/operations.md](docs/operations.md#apple-shortcuts-and-presets). Preset changes are live until saved. The generated OpenAPI description for all HTTP API routes is available at `http://<tv-ip>:8088/openapi.json`; see [API discovery](docs/operations.md#http-api-description).
 

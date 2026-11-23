@@ -114,8 +114,9 @@ The transfer action reads `TV_IP=<tv-ip>` from `~/.config/lg-hue-sync/device.env
 
 Ordinary builds and transfers no longer require Docker after native setup.
 **Update Rust toolchain** refreshes rustup stable, runs host checks, and builds
-natively. Docker must be running for explicit fallback/image/cache operations;
-`make docker-toolchain-update` refreshes its image separately. Transfer preserves
+natively. The selected container runtime must be running for explicit fallback,
+image, and cache operations. `make docker-toolchain-update` refreshes the builder
+image. Transfer preserves
 the TV's paired `config.json`, verifies the uploaded binary checksum, and restarts
 the daemon.
 
@@ -134,12 +135,28 @@ Required result: 32-bit ARM Linux ELF with no required symbol newer than `GLIBC_
 against the extracted Buster sysroot. See setup below. Missing native tools fail
 with setup/fallback instructions; no automatic toolchain switch occurs.
 
+### Container build with Docker or Kiri
+
+```bash
+# Docker Desktop or Docker Engine with its context active
+make build-docker
+
+# Kiri on macOS after opening the app and setting up its Docker context
+DOCKER_CONTEXT=kiri make build-docker
+```
+
+Kiri uses the `docker` CLI through its Docker-compatible engine. If `kiri` is
+already the active context, `make build-docker` works directly. The explicit
+`DOCKER_CONTEXT` applies to that invocation. Docker users and Linux CI can keep
+their existing setup. [Kiri build documentation](https://docs.runkiri.com/docker/builds/)
+
 `make build-docker` explicitly uses `docker/Dockerfile.cross`, which bakes the
 archived Buster packages, stable Rust, ARM target and linker into the cached
 builder. The image stays at its installed Rust version until
-`make docker-toolchain-update` refreshes it. Named Cargo/target volumes preserve
-incremental fallback builds. `make cross-clean` removes the image and those
-volumes; it does not remove the native SDK/sysroot/cache.
+`make docker-toolchain-update` refreshes it. Docker and Kiri keep their own
+images and named Cargo/target volumes. Use the intended context for image and
+cache operations. `make cross-clean` removes the builder images and volumes in
+that context while preserving the native SDK, sysroot, and cache.
 
 Codex and local developers use the native default. Linux GitHub Actions explicitly
 runs `make build-docker`; its ordinary job separately checks formatting, host

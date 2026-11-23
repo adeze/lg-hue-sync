@@ -2,18 +2,27 @@ const DOMAIN = "lg_hue_sync";
 const CONTROLS = [
   ["switch", "screen_sync", "Screen sync"],
   ["switch", "display", "Display"],
+  ["switch", "hue_screen_sync", "Hue sync"],
+  ["switch", "nanoleaf_screen_sync", "Nanoleaf 4D sync"],
   ["select", "color_preset", "Color preset"],
   ["select", "response", "Response"],
   ["select", "spatial_blending", "Spatial blending"],
 ];
-const STATUS = [
-  ["sensor", "pipeline", "Pipeline"],
-  ["binary_sensor", "hue_connection", "Hue connection"],
-  ["binary_sensor", "nanoleaf_connection", "Nanoleaf connection"],
-];
+const STATUS = [["sensor", "pipeline", "Pipeline"]];
 const MAINTENANCE = [["button", "restart_pipeline", "Restart pipeline"]];
 const COLOUR_LABELS = { "Soft color": "Soft", Neutral: "Default", "Vivid color": "Vivid" };
 const SEGMENT_STYLES = `
+  qsync-card { display: flex; flex-direction: column; gap: 8px; }
+  qsync-card > [role="status"]:empty { display: none; }
+  qsync-card .qsync-refresh:where(:not([hidden])) {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 8px; min-height: 44px; margin-block: 8px;
+    border: 1px solid var(--divider-color); border-radius: 12px; padding: 0 14px;
+    background: var(--secondary-background-color); color: var(--primary-text-color);
+    font: inherit; cursor: pointer;
+  }
+  qsync-card .qsync-refresh:focus-visible { outline: 2px solid var(--primary-color); }
+  qsync-card .qsync-refresh:disabled { color: var(--disabled-text-color); cursor: default; }
   qsync-card .qsync-mode { border: 0; padding: 0; margin: 0 0 14px; min-inline-size: 0; }
   qsync-card .qsync-mode legend { margin-block-end: 6px; color: var(--secondary-text-color); }
   qsync-card .qsync-segments {
@@ -42,8 +51,9 @@ const SEGMENT_STYLES = `
   qsync-card .qsync-segments button:disabled { cursor: default; color: var(--disabled-text-color); }
   qsync-card .qsync-switches, qsync-card .qsync-dials {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
-    gap: 8px; margin-block: 8px;
+    gap: 8px;
   }
+  qsync-card .qsync-dials { margin-block: 8px; }
   qsync-card .qsync-switch, qsync-card .qsync-dial {
     border: 1px solid var(--divider-color); border-radius: 14px; padding: 10px;
     background: var(--ha-card-background, var(--card-background-color));
@@ -87,8 +97,6 @@ const TUNING = [
   ["switch", "direct_rgb_mode", "Direct RGB mode"],
   ["switch", "letterbox_compensation", "Letterbox compensation"],
   ["switch", "midtone_lift_legacy", "Midtone lift (legacy)"],
-  ["switch", "hue_screen_sync", "Hue screen sync"],
-  ["switch", "nanoleaf_screen_sync", "Nanoleaf screen sync"],
   ["switch", "follow_tv_power", "Follow TV power"],
   ["button", "reset_colour", "Reset colour"],
   ["button", "save_settings", "Save settings"],
@@ -102,7 +110,6 @@ const SIGNAL = [
   ["sensor", "audio_transport_rate", "Audio transport rate"],
   ["sensor", "audio_output_codec", "Audio output codec"],
   ["event", "pipeline_activity", "Pipeline activity"],
-  ["button", "refresh_diagnostics", "Refresh diagnostics"],
 ];
 const SIGNAL_ENTITIES = new Set([
   "video_frame_rate", "video_hdr", "display_refresh_rate", "output_arc_state",
@@ -125,6 +132,7 @@ function cardConfig(config, hass) {
     const entity = config.entities?.[key] ?? entries.find(
       (entry) => entry.entity_id.startsWith(`${domain}.`) &&
         (entry.entity_id.endsWith(`_${key}`) || entry.entity_id === `${domain}.${key}`) &&
+        (key !== "screen_sync" || !/[_\.](hue|nanoleaf)_screen_sync$/.test(entry.entity_id)) &&
         hass.states[entry.entity_id],
     )?.entity_id;
     return entity ? [{ entity, name }] : [];
@@ -166,15 +174,6 @@ function cardConfig(config, hass) {
           section.push({ type: "attribute", entity: pipeline, attribute, name, suffix });
         }
       }
-      for (const [key, name, icon] of [
-        ["hue_device", "Open Hue Bridge", "mdi:bridge"],
-        ["nanoleaf_device", "Open Nanoleaf controller", "mdi:led-strip-variant"],
-      ]) {
-        const id = attributes?.[key];
-        if (id && hass.devices?.[id]) {
-          section.push({ type: "weblink", name, icon, url: `/config/devices/device/${encodeURIComponent(id)}` });
-        }
-      }
     }
     if (label === "Diagnostics") diagnostics = section;
     else if (section.length) entities.push({ type: "section", label }, ...section);
@@ -195,6 +194,7 @@ function cardConfig(config, hass) {
   return {
     type: "entities", title: config.title ?? "QSync", show_header_toggle: false, entities,
     modes, switches, diagnostics, tuning: rows(TUNING),
+    refreshDiagnostics: rows([["button", "refresh_diagnostics", "Refresh diagnostics"]])[0]?.entity,
   };
 }
 
@@ -214,6 +214,8 @@ class QSyncCard extends HTMLElement {
   #advanced = document.createElement("details");
   #diagnostics = document.createElement("details");
   #diagnosticsCard;
+  #refreshDiagnostics = document.createElement("button");
+  #refreshEntity;
   #styles = document.createElement("style");
   #switches = document.createElement("div");
   #dials = document.createElement("div");
@@ -258,19 +260,35 @@ class QSyncCard extends HTMLElement {
     });
     regionToggle.append(this.#showRegions, " Light regions");
     const panel = document.createElement("ha-card");
-    panel.style.cssText = "margin-top:8px;padding:12px 16px";
+    panel.style.padding = "12px 16px";
     this.#preview.append(summary, this.#message, regionToggle, screen);
     panel.append(this.#preview);
     this.#preview.addEventListener("toggle", this.#updatePreview);
-    this.#ambient.style.cssText = "margin-block:8px;padding:16px";
-    this.#advanced.style.cssText = "margin-block:8px;padding:12px 16px";
+    this.#ambient.style.padding = "16px";
+    this.#advanced.style.padding = "12px 16px";
     const tuningTitle = document.createElement("summary");
     tuningTitle.textContent = "Advanced tuning";
     this.#advanced.append(tuningTitle);
-    this.#diagnostics.style.cssText = "margin-block:8px;padding:12px 16px";
+    this.#diagnostics.style.padding = "12px 16px";
     const diagnosticsTitle = document.createElement("summary");
     diagnosticsTitle.textContent = "Diagnostics";
-    this.#diagnostics.append(diagnosticsTitle);
+    this.#refreshDiagnostics.type = "button";
+    this.#refreshDiagnostics.className = "qsync-refresh";
+    const refreshIcon = document.createElement("ha-icon");
+    refreshIcon.setAttribute("icon", "mdi:refresh");
+    refreshIcon.setAttribute("aria-hidden", "true");
+    this.#refreshDiagnostics.append(refreshIcon, "Refresh diagnostics");
+    this.#refreshDiagnostics.addEventListener("click", async () => {
+      this.#refreshDiagnostics.setAttribute("aria-busy", "true");
+      this.#updateRefreshButton();
+      try {
+        await this.#setControl("button", "press", this.#refreshEntity, "diagnostics");
+      } finally {
+        this.#refreshDiagnostics.removeAttribute("aria-busy");
+        this.#updateRefreshButton();
+      }
+    });
+    this.#diagnostics.append(diagnosticsTitle, this.#refreshDiagnostics);
     this.#advanced.append(this.#dials);
     this.#switches.className = "qsync-switches";
     this.#dials.className = "qsync-dials";
@@ -314,7 +332,7 @@ class QSyncCard extends HTMLElement {
   }
 
   getGridOptions() {
-    return this.#card?.getGridOptions?.() ?? { columns: 12, min_columns: 6 };
+    return { columns: 12, min_columns: 6, rows: "auto" };
   }
 
   #draw(frame, message = "Waiting for active HDMI capture…") {
@@ -419,8 +437,10 @@ class QSyncCard extends HTMLElement {
     if (!this.#config || !this.#hass) return;
     this.#helpers ??= Promise.resolve().then(() => window.loadCardHelpers());
     this.#helpers.then(({ createCardElement }) => {
-      const { modes = [], switches = [], diagnostics = [], tuning = [], ...config } =
+      const { modes = [], switches = [], diagnostics = [], tuning = [], refreshDiagnostics, ...config } =
         cardConfig(this.#config, this.#hass);
+      this.#refreshEntity = refreshDiagnostics;
+      this.#updateRefreshButton();
       const numbers = tuning.filter(({entity}) => entity.startsWith("number."));
       const controlsSignature = JSON.stringify([switches, numbers]);
       if (controlsSignature !== this.#controlsSignature) {
@@ -450,7 +470,7 @@ class QSyncCard extends HTMLElement {
         });
       }
       const signature = JSON.stringify([
-        config, modes.length > 0, switches.length, diagnostics, tuning,
+        config, modes.length > 0, switches.length, diagnostics, tuning, refreshDiagnostics,
         this.#config.show_preview, this.#config.show_tuning,
       ]);
       if (signature !== this.#signature) {
@@ -459,7 +479,7 @@ class QSyncCard extends HTMLElement {
         this.#pipeline = config.entities?.find((row) => row.name === "Pipeline")?.entity;
         this.#advancedCard?.remove();
         const tuningRows = [
-          ["Processing and outputs", tuning.filter(({entity}) => entity.startsWith("switch."))],
+          ["Processing", tuning.filter(({entity}) => entity.startsWith("switch."))],
           ["Save and reset", tuning.filter(({entity}) => entity.startsWith("button."))],
         ].flatMap(([label, rows]) => rows.length ? [{ type: "section", label }, ...rows] : []);
         this.#advancedCard = tuningRows.length ? createCardElement({
@@ -478,7 +498,7 @@ class QSyncCard extends HTMLElement {
           ...(this.#pipeline && this.#config.show_preview !== false ? [this.#preview.parentElement] : []),
           ...(modes.length ? [this.#ambient] : []),
           this.#card,
-          ...(this.#diagnosticsCard ? [this.#diagnostics] : []),
+          ...(this.#diagnosticsCard || refreshDiagnostics ? [this.#diagnostics] : []),
           ...(tuning.length && this.#config.show_tuning !== false ? [this.#advanced] : []),
         );
       }
@@ -491,12 +511,19 @@ class QSyncCard extends HTMLElement {
     });
   }
 
+  #updateRefreshButton() {
+    const state = this.#hass.states[this.#refreshEntity]?.state;
+    this.#refreshDiagnostics.hidden = !this.#refreshEntity;
+    this.#refreshDiagnostics.disabled = !state || state === "unavailable" ||
+      this.#refreshDiagnostics.hasAttribute("aria-busy");
+  }
+
   async #setControl(domain, service, entity, name, data = {}) {
     this.#controlMessage.textContent = "";
     try {
       await this.#hass.callService(domain, service, { entity_id: entity, ...data });
     } catch {
-      this.#controlMessage.textContent = "Could not set " + name + ".";
+      this.#controlMessage.textContent = "Could not " + (service === "press" ? "refresh " : "set ") + name + ".";
     }
   }
 

@@ -25,9 +25,9 @@ entities:
   spatial_blending: select.tv_spatial_blending
 ```
 
-Supported entity override keys are `screen_sync`, `display`, `color_preset`, `response`, `spatial_blending`, `pipeline`, `hue_connection`, `nanoleaf_connection`, and `restart_pipeline`.
+Supported entity override keys include `screen_sync`, `display`, `hue_screen_sync`, `nanoleaf_screen_sync`, `color_preset`, `response`, `spatial_blending`, `pipeline`, and `restart_pipeline`. Keep **Screen sync** on and switch **Hue sync** or **Nanoleaf 4D sync** independently. The same switches are available as Home Assistant automation targets.
 
-In LG Hue Sync's **Reconfigure** screen, select the same TV from the built-in LG webOS TV integration or **LG WebOS TV (bscpylgtv)**. Home Assistant lists the TV under **Linked devices** when the selected integration has registered the TV's MAC address. Select the Hue Bridge and Nanoleaf controller to show shortcuts under **Status**. Pairing for screen sync and alignment live in QSync admin.
+In LG Hue Sync's **Reconfigure** screen, select the same TV from the built-in LG webOS TV integration or **LG WebOS TV (bscpylgtv)**. Home Assistant lists the TV under **Linked devices** when the selected integration has registered the TV's MAC address. Add the Hue and Nanoleaf integrations' own tiles to the dashboard for device controls and status. Pairing for screen sync and alignment live in QSync admin.
 
 Copy [the bright-room blueprint](qsync-bright-room.yaml) into `config/blueprints/automation/qsync/`, then create an automation from it. Choose the TV room's illuminance sensor and the QSync **Screen sync** switch. The default trigger is a crossing above 200 lux sustained for two minutes. It stops sync once per crossing, so you can manually start it again while the room is still bright.
 

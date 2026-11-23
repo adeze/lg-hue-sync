@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Move the independent Hue and Nanoleaf sync switches to the top of the Home Assistant card, remove duplicate connection rows and links, and tighten the spacing between panels.
+
 ## [1.5.0] - 2026-11-19
 
 - Give Screen sync and Display large switches on the Home Assistant card and remove its LG media player row.
